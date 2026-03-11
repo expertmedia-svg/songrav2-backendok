@@ -1,0 +1,425 @@
+[
+	{
+		"domain": "agriculture",
+		"title": "Préparer le champ avant la saison des pluies",
+		"question": "Comment bien préparer mon champ avant l'arrivée des pluies ?",
+		"answer": "1) Commence par enlever les herbes et les tiges sèches de la saison passée, mais garde une partie comme paillage.\n2) Trace des petites rigoles ou billons pour que l'eau de pluie s'écoule et ne reste pas en flaque.\n3) Si possible, apporte du fumier bien décomposé ou du compost 2 à 3 semaines avant les premières pluies.\n4) Nivele le sol avec une houe ou une daba pour éviter les trous où l'eau peut stagner.\n5) Si ton sol est très dur, casse la croûte avec une houe avant les premières grosses pluies.",
+		"tags": ["préparation", "champ", "pluie", "sol"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/175389/pexels-photo-175389.jpeg",
+				"title": "Paysans préparant un champ avant la pluie"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=mc3fzh7eZg8",
+				"title": "Préparer son champ avant l'hivernage (exemple général)"
+			}
+		]
+	},
+	{
+		"domain": "agriculture",
+		"title": "Utiliser le compost au champ",
+		"question": "Comment utiliser le compost pour nourrir le sol ?",
+		"answer": "1) Le compost doit être bien décomposé : couleur foncée, odeur de terre, pas de mauvaises odeurs fortes.\n2) Répartis le compost autour de chaque poquet ou plante, en petite poignée.\n3) Mélange légèrement le compost avec la terre pour qu'il ne soit pas directement au soleil.\n4) Applique le compost de préférence au début de la saison des pluies.\n5) Tu peux compléter par un peu d'engrais minéral si disponible, mais le compost améliore déjà bien le sol.",
+		"tags": ["compost", "fertilisation", "sol", "engrais"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/1301856/pexels-photo-1301856.jpeg",
+				"title": "Tas de compost mature prêt à être utilisé"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=w1H4U9Wwqjs",
+				"title": "Vidéo pédagogique sur l'utilisation du compost"
+			}
+		]
+	},
+	{
+		"domain": "agriculture",
+		"title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+		"question": "Que faire contre la chenille qui mange les feuilles de mon maïs ?",
+		"answer": "1) Inspecte régulièrement les jeunes plants de maïs, surtout le cœur des feuilles.\n2) Enlève les chenilles à la main avec des gants ou un plastique et détruis-les loin du champ.\n3) Mets un peu de cendre fine ou de sable mélangé avec du piment moulu dans le cœur des plants attaqués.\n4) Évite de semer très tard : les champs semés en retard sont souvent plus attaqués.\n5) Si l'attaque est très forte, rapproche-toi du service agricole pour un conseil adapté.",
+		"tags": ["maïs", "chenille", "ravageur", "lutte"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/265242/pexels-photo-265242.jpeg",
+				"title": "Feuilles de maïs montrant des dégâts de chenilles"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=DCjG2b0f1AM",
+				"title": "Reconnaître la chenille légionnaire (contenu général)"
+			}
+		]
+	},
+	{
+		"domain": "agriculture",
+		"title": "Conserver le maïs après la récolte",
+		"question": "Comment bien conserver le maïs pour éviter les insectes et la moisissure ?",
+		"answer": "1) Récolte le maïs quand les épis sont bien secs et les grains durs.\n2) Fais sécher les épis au soleil sur une bâche propre, en les retournant souvent.\n3) Égrène seulement quand les épis sont bien secs, puis sèche encore les grains au soleil.\n4) Stocke le maïs dans des sacs propres, secs, si possible sur des palettes ou des briques.\n5) Vérifie régulièrement le stock pour repérer tôt les insectes ou moisissures.",
+		"tags": ["stockage", "maïs", "récolte", "conservation"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/162712/corn-maize-agriculture-field-162712.jpeg",
+				"title": "Grains de maïs secs stockés en sacs"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=Y5TQkzAJhRk",
+				"title": "Bonnes pratiques de stockage du maïs"
+			}
+		]
+	},
+	{
+		"domain": "agriculture",
+		"title": "Avantages de la rotation des cultures",
+		"question": "Pourquoi changer de culture sur la même parcelle ?",
+		"answer": "1) La rotation des cultures (maïs, puis niébé ou arachide, puis sorgho) permet de reposer le sol.\n2) Les légumineuses enrichissent le sol en azote pour la culture suivante.\n3) Changer de culture limite certains ravageurs et maladies du sol.\n4) Planifie sur 2 à 3 ans avec un agent agricole ou un producteur expérimenté.\n5) La rotation aide aussi à mieux utiliser les pluies et les nutriments.",
+		"tags": ["rotation", "sol", "niébé", "arachide"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/1172518/pexels-photo-1172518.jpeg",
+				"title": "Parcelles avec différentes cultures en rotation"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=ie5W8R2zEeQ",
+				"title": "Vidéo : exemple de rotation des cultures"
+			}
+		]
+	},
+
+	{
+		"domain": "elevage",
+		"title": "Alimentation simple des poules villageoises",
+		"question": "Comment mieux nourrir mes poules locales pour avoir plus d'œufs ?",
+		"answer": "1) Laisse les poules chercher une partie de leur nourriture en divagation, mais complète chaque jour avec un peu de céréales cassées.\n2) Ajoute des restes de cuisine propres et des feuilles vertes hachées.\n3) Mets toujours à disposition de l'eau propre dans un petit abreuvoir.\n4) Prévois un endroit sec et abrité pour dormir et pondre.\n5) Donne un peu de coquilles pilées pour le calcium si possible.",
+		"tags": ["poules", "alimentation", "œufs", "villageois"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/2886218/pexels-photo-2886218.jpeg",
+				"title": "Poules locales mangeant au sol"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=S4NwP2mQd9c",
+				"title": "Exemple d'alimentation de poules villageoises"
+			}
+		]
+	},
+	{
+		"domain": "elevage",
+		"title": "Donner de l'eau propre aux animaux",
+		"question": "Combien de fois donner de l'eau à mes animaux ?",
+		"answer": "1) Les bovins, ovins et caprins doivent avoir accès à de l'eau propre chaque jour.\n2) Mets un abreuvoir ombragé pour éviter que l'eau chauffe trop.\n3) Nettoie régulièrement les récipients pour éviter boue et crottes.\n4) En saison sèche, fais boire aux heures les moins chaudes.\n5) Si un animal refuse de boire ou semble très faible, consulte vite un agent d'élevage ou un vétérinaire.",
+		"tags": ["eau", "abreuvement", "bétail", "chaleur"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/735968/pexels-photo-735968.jpeg",
+				"title": "Bovins s'abreuvant à un point d'eau"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=z9oM8ZK6R3g",
+				"title": "Vidéo : donner de l'eau au bétail en saison chaude"
+			}
+		]
+	},
+	{
+		"domain": "elevage",
+		"title": "Prévenir les parasites externes chez les bovins et caprins",
+		"question": "Que faire contre les tiques et autres parasites sur la peau des animaux ?",
+		"answer": "1) Inspecte régulièrement la peau du bétail, surtout oreilles, cou et base de la queue.\n2) Enlève les grosses tiques à la main avec un tissu ou des gants et détruis-les.\n3) Garde les enclos propres en enlevant bouses et litière humide.\n4) Demande à un agent d'élevage s'il y a un produit recommandé dans ta zone.\n5) Si tu vois des plaies ou si l'animal se gratte beaucoup, consulte un professionnel.",
+		"tags": ["tiques", "parasites", "bovins", "caprins"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/162451/cow-calf-cattle-stock-162451.jpeg",
+				"title": "Bovin avec inspection de la peau pour les tiques"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=8A8eR6wTtcc",
+				"title": "Vidéo : lutte simple contre les tiques"
+			}
+		]
+	},
+	{
+		"domain": "elevage",
+		"title": "Construire un abri simple pour les chèvres",
+		"question": "Comment faire un petit abri pour mes chèvres ?",
+		"answer": "1) Choisis un endroit légèrement en hauteur pour éviter l'eau stagnante.\n2) Fais un sol légèrement surélevé avec de la terre tassée ou des planches.\n3) Utilise des piquets et des branches pour faire une structure simple, avec un toit en paille ou tôle.\n4) Prévois une bonne aération sans courants d'air directs.\n5) Garde l'abri propre en changeant la litière régulièrement.",
+		"tags": ["chèvres", "abri", "logement", "élevage"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/144040/pexels-photo-144040.jpeg",
+				"title": "Petit abri simple pour chèvres"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=2C1cUBoSRRo",
+				"title": "Exemple d'abri traditionnel pour caprins"
+			}
+		]
+	},
+	{
+		"domain": "elevage",
+		"title": "Signes simples d'un animal malade",
+		"question": "Comment reconnaître rapidement qu'un animal ne va pas bien ?",
+		"answer": "1) Observe chaque jour si l'animal mange et boit normalement.\n2) Un animal malade reste souvent à l'écart du troupeau.\n3) Regarde si la respiration est très rapide, s'il tousse ou s'il y a des écoulements au nez ou aux yeux.\n4) Vérifie s'il y a diarrhée ou urines très foncées.\n5) En cas de doute, ne donne pas de médicaments forts sans conseil : contacte un agent d'élevage ou un vétérinaire.",
+		"tags": ["maladie", "bétail", "signes", "surveillance"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/735423/pexels-photo-735423.jpeg",
+				"title": "Bovin affaibli se tenant à l'écart du troupeau"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=H5f_1HzWwMw",
+				"title": "Vidéo : reconnaître un animal malade (sensibilisation)"
+			}
+		]
+	},
+
+	{
+		"domain": "sos_accident",
+		"title": "Premiers gestes en cas de petite coupure propre",
+		"question": "Que faire si je me coupe légèrement en travaillant au champ ?",
+		"answer": "1) Lave-toi les mains puis mets des gants propres si tu en as (ou un plastique propre) pour éviter d'infecter la plaie.\n2) Rince la plaie plusieurs minutes avec de l'eau potable ou de l'eau bouillie refroidie pour enlever la terre et les saletés visibles.\n3) Laisse saigner légèrement quelques secondes, puis comprime directement la plaie avec une compresse ou un linge propre plié, jusqu'à arrêt du saignement.\n4) Si tu disposes d'un antiseptique simple (solution iodée ou chlorhexidine), applique-le autour de la plaie, sans verser de produit agressif à l'intérieur.\n5) Recouvre avec un pansement propre et sec. Si la plaie est profonde, large, très sale, ou si elle se situe près d'une articulation, fais-toi examiner rapidement au centre de santé.",
+		"tags": ["coupure", "blessure", "champ", "premiers secours"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/7721670/pexels-photo-7721670.jpeg",
+				"title": "Nettoyage d'une petite coupure au doigt"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=9Uwh2_SuzpE",
+				"title": "Geste simple pour une petite coupure"
+			}
+		]
+	},
+	{
+		"domain": "sos_accident",
+		"title": "Prévention du coup de chaleur au champ",
+		"question": "Comment éviter le coup de chaleur quand je travaille longtemps au soleil ?",
+		"answer": "1) Porte un chapeau à large bord ou une casquette et des vêtements légers, de couleur claire, qui couvrent bien la peau.\n2) Bois régulièrement de petites quantités d'eau propre, toutes les 15 à 20 minutes, même si tu n'as pas très soif.\n3) Organise le travail physique le plus dur tôt le matin et en fin d'après-midi ; limite l'effort entre 11h et 15h.\n4) Fais des pauses fréquentes sous un arbre ou un abri ventilé, assis, en laissant le corps refroidir.\n5) Si une personne se plaint de maux de tête, vertiges, nausées ou grande fatigue, arrête immédiatement le travail, mets-la à l'ombre, allonge-la, desserre ses vêtements, rafraîchis-la avec de l'eau sur la peau, et conduis-la au centre de santé si les signes ne disparaissent pas vite.",
+		"tags": ["chaleur", "soleil", "travail", "prévention"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/923657/pexels-photo-923657.jpeg",
+				"title": "Travailleur au champ se protégeant du soleil"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=J7nKkF9wF9I",
+				"title": "Vidéo : éviter le coup de chaleur (sensibilisation)"
+			}
+		]
+	},
+	{
+		"domain": "sos_accident",
+		"title": "Brûlure légère avec eau chaude ou feu",
+		"question": "Que faire en cas de petite brûlure ?",
+		"answer": "1) Éloigne d'abord la personne de la source de chaleur (feu, charbon, eau bouillante) pour supprimer le danger.\n2) Refroidis immédiatement la zone brûlée sous un filet d'eau propre et fraîche (pas glacée) pendant au moins 10 à 15 minutes, sans arrêter trop tôt.\n3) Retire doucement les bijoux, bagues ou vêtements serrés autour de la zone, sans arracher ce qui colle à la peau.\n4) Ne mets jamais d'huile, beurre, dentifrice ou produit traditionnel gras sur la brûlure : cela garde la chaleur et peut infecter.\n5) Recouvre la brûlure avec un pansement ou un linge propre non collant. Si la brûlure est étendue, profonde, sur le visage, les mains, les parties génitales ou chez un enfant, va immédiatement au centre de santé.",
+		"tags": ["brûlure", "feu", "eau chaude", "secours"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/1616415/pexels-photo-1616415.jpeg",
+				"title": "Main sous l'eau froide après une petite brûlure"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=PJ7sKnz03Oo",
+				"title": "Premiers gestes en cas de brûlure légère"
+			}
+		]
+	},
+	{
+		"domain": "sos_accident",
+		"title": "Diarrhée simple chez l'adulte",
+		"question": "Que faire en cas de diarrhée simple chez un adulte ?",
+		"answer": "1) Donne à boire souvent de petites gorgées d'eau propre ou de boisson de réhydratation pour compenser les pertes.\n2) Si tu as des sachets de solution de réhydratation orale (SRO), prépare-les exactement comme indiqué (quantité d'eau correcte) et fais boire régulièrement.\n3) Donne des aliments faciles à digérer : bouillie peu sucrée, riz, banane mûre ; évite les repas très gras, très épicés ou l'alcool.\n4) Surveille l'état général : fièvre, sang dans les selles, bouche très sèche, grande fatigue, peu d'urines sont des signes de gravité.\n5) Si la diarrhée dure plus de 24–48 heures, ou s'il y a du sang, forte fièvre, ou grande faiblesse, va rapidement au centre de santé pour un avis médical.",
+		"tags": ["diarrhée", "déshydratation", "adultes", "prévention"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/5934513/pexels-photo-5934513.jpeg",
+				"title": "Verre d'eau et solution de réhydratation"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=u4BvPpD6qPg",
+				"title": "Vidéo : que faire en cas de diarrhée simple"
+			}
+		]
+	},
+	{
+		"domain": "sos_accident",
+		"title": "Piqûre suspecte (insecte ou animal)",
+		"question": "Que faire après une piqûre ou morsure suspecte ?",
+		"answer": "1) Lave immédiatement la zone de piqûre ou morsure avec de l'eau et du savon pendant plusieurs minutes pour limiter les germes.\n2) Observe la personne : difficultés à respirer, gonflement rapide du visage ou de la langue, malaise sont des signes d'alerte grave.\n3) Si l'animal peut être dangereux (chien inconnu, serpent, scorpion, gros insecte), immobilise le membre atteint si possible et rends-toi sans tarder au centre de santé.\n4) Pour une petite piqûre sans signe grave, tu peux appliquer du froid (linge propre humide et frais) pour diminuer la douleur et le gonflement.\n5) En cas de doute, surtout chez l'enfant, la femme enceinte ou la personne âgée, fais contrôler la personne au centre de santé et, si possible, signale l'animal responsable.",
+		"tags": ["piqûre", "morsure", "insecte", "urgence"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/6594515/pexels-photo-6594515.jpeg",
+				"title": "Main présentant une petite piqûre avec rougeur"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=7dwbvTzA6lo",
+				"title": "Geste simple après une piqûre suspecte"
+			}
+		]
+	},
+
+	{
+		"domain": "cybersecurity",
+		"title": "Reconnaître un faux SMS de mobile money",
+		"question": "Comment savoir si un SMS de mobile money est faux ?",
+		"answer": "1) Un faux SMS demande souvent de rappeler un numéro ou de donner ton code secret.\n2) Regarde bien le nom de l'expéditeur : les vrais messages viennent d'un nom officiel de l'opérateur.\n3) Vérifie ton solde directement dans l'application ou avec le code officiel.\n4) Ne donne jamais ton code PIN ou tes mots de passe par téléphone ou SMS.\n5) En cas de doute, contacte le service client officiel ou rends-toi en agence.",
+		"tags": ["mobile money", "arnaque", "SMS", "fraude"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/5076517/pexels-photo-5076517.jpeg",
+				"title": "Téléphone affichant un SMS suspect"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=F6GN7U1IYvM",
+				"title": "Exemples d'arnaques par SMS (sensibilisation)"
+			}
+		]
+	},
+	{
+		"domain": "cybersecurity",
+		"title": "Choisir un mot de passe simple mais solide",
+		"question": "Comment créer un bon mot de passe pour mon téléphone ou mes comptes ?",
+		"answer": "1) Évite les mots de passe trop évidents comme 0000, 1234 ou ta date de naissance.\n2) Choisis un mot de passe avec au moins 6 chiffres ou une petite phrase facile à retenir.\n3) Ne partage pas ton mot de passe avec des amis ou la famille.\n4) Change ton mot de passe si tu penses que quelqu'un l'a vu.\n5) Essaie de ne pas utiliser exactement le même mot de passe partout.",
+		"tags": ["mot de passe", "sécurité", "téléphone", "compte"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/5380642/pexels-photo-5380642.jpeg",
+				"title": "Clavier d'ordinateur avec cadenas symbolisant la sécurité"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=v6QkQkX6F0g",
+				"title": "Vidéo : créer un mot de passe sécurisé"
+			}
+		]
+	},
+	{
+		"domain": "cybersecurity",
+		"title": "Protéger son smartphone en cas de perte ou vol",
+		"question": "Que faire pour limiter les dégâts si je perds mon téléphone ?",
+		"answer": "1) Mets toujours un code de déverrouillage (PIN, schéma ou mot de passe).\n2) Active, si possible, une fonction de localisation ou verrouillage à distance.\n3) Note les numéros du service client de ton opérateur dans un carnet à la maison.\n4) En cas de perte ou vol, appelle vite l'opérateur pour bloquer la SIM et le mobile money.\n5) Évite de stocker des photos de cartes bancaires ou des mots de passe dans la galerie.",
+		"tags": ["smartphone", "perte", "vol", "mobile money"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/193004/pexels-photo-193004.jpeg",
+				"title": "Smartphone verrouillé avec un code de sécurité"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=SkR6-2U0GAE",
+				"title": "Que faire en cas de vol de téléphone (conseils généraux)"
+			}
+		]
+	},
+	{
+		"domain": "cybersecurity",
+		"title": "Se méfier des liens suspects",
+		"question": "Dois-je cliquer sur tous les liens reçus par message ou WhatsApp ?",
+		"answer": "1) Ne clique pas sur un lien envoyé par quelqu'un que tu ne connais pas.\n2) Méfie-toi même si le message semble venir d'un ami mais demande de l'argent.\n3) Les liens qui promettent un gros gain facile ou un cadeau sont souvent des arnaques.\n4) Si tu n'es pas sûr, demande confirmation à la personne par un autre moyen (appel).\n5) Supprime les messages suspects sans répondre.",
+		"tags": ["liens", "WhatsApp", "escroquerie", "phishing"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/267385/pexels-photo-267385.jpeg",
+				"title": "Écran de smartphone avec notifications de messages"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=9H8hGJp0Z6A",
+				"title": "Vidéo : reconnaître un lien dangereux"
+			}
+		]
+	},
+	{
+		"domain": "cybersecurity",
+		"title": "Sauvegarder ses contacts et ses données importantes",
+		"question": "Comment éviter de tout perdre si mon téléphone se casse ?",
+		"answer": "1) Note les numéros très importants dans un carnet papier chez toi.\n2) Si possible, sauvegarde tes contacts dans le compte de ton téléphone.\n3) Copie parfois tes photos importantes sur une clé USB ou un autre appareil.\n4) Évite de garder tous les documents sensibles seulement dans le téléphone.\n5) Explique à ta famille l'importance de ces sauvegardes.",
+		"tags": ["sauvegarde", "contacts", "données", "téléphone"],
+		"language": "fr",
+		"source": "resolvehub_local_v1",
+		"media": [
+			{
+				"type": "image",
+				"url": "https://images.pexels.com/photos/1092671/pexels-photo-1092671.jpeg",
+				"title": "Personne notant des contacts dans un carnet"
+			},
+			{
+				"type": "video",
+				"url": "https://www.youtube.com/watch?v=RFaUeJY0K8Y",
+				"title": "Vidéo : comment sauvegarder ses données mobiles"
+			}
+		]
+	}
+]

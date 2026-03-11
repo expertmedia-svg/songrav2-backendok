@@ -1,0 +1,185 @@
+[
+  {
+    "domain": "agriculture",
+    "title": "Préparer le champ avant la saison des pluies",
+    "question": "Comment bien préparer mon champ avant l'arrivée des pluies ?",
+    "answer": "1) Commence par enlever les herbes et les tiges sèches de la saison passée, mais garde une partie comme paillage.\n2) Trace des petites rigoles ou billons pour que l'eau de pluie s'écoule et ne reste pas en flaque.\n3) Si possible, apporte du fumier bien décomposé ou du compost 2 à 3 semaines avant les premières pluies.\n4) Nivele le sol avec une houe ou une daba pour éviter les trous où l'eau peut stagner.\n5) Si ton sol est très dur, casse la croûte avec une houe avant les premières grosses pluies.",
+    "tags": ["préparation", "champ", "pluie", "sol"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "agriculture",
+    "title": "Utiliser le compost au champ",
+    "question": "Comment utiliser le compost pour nourrir le sol ?",
+    "answer": "1) Le compost doit être bien décomposé : couleur foncée, odeur de terre, pas de mauvaises odeurs fortes.\n2) Répartis le compost autour de chaque poquet ou plante, en petite poignée (environ une boîte de tomate par trou selon la taille du champ).\n3) Mélange légèrement le compost avec la terre pour qu'il ne soit pas directement au soleil.\n4) Applique le compost de préférence au début de la saison des pluies, pour que la pluie aide à faire descendre les nutriments.\n5) Tu peux compléter par un peu d'engrais minéral si disponible, mais le compost améliore déjà bien le sol.",
+    "tags": ["compost", "fertilisation", "sol", "engrais"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "agriculture",
+    "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+    "question": "Que faire contre la chenille qui mange les feuilles de mon maïs ?",
+    "answer": "1) Inspecte régulièrement les jeunes plants de maïs, surtout le cœur des feuilles où la chenille se cache.\n2) Quand tu vois les premières attaques, enlève les chenilles à la main (avec gants ou plastique) et détruis-les loin du champ.\n3) Tu peux mettre un peu de cendre fine ou de sable mélangé avec du piment moulu dans le cœur des plants attaqués.\n4) Évite de semer très tard : les champs semés en retard sont souvent plus attaqués.\n5) Si l'attaque est très forte sur de grandes surfaces, rapproche-toi du service agricole ou d'un agent pour voir s'il y a un traitement conseillé dans ta zone.",
+    "tags": ["maïs", "chenille", "ravageur", "lutte"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "agriculture",
+    "title": "Conserver le maïs après la récolte",
+    "question": "Comment bien conserver le maïs pour éviter les insectes et la moisissure ?",
+    "answer": "1) Récolte le maïs quand les épis sont bien secs, les feuilles de la plante sont jaunes et les grains durs.\n2) Fais bien sécher les épis au soleil sur une bâche propre, en les retournant souvent pendant plusieurs jours.\n3) Égrène seulement quand les épis sont bien secs, puis sèche encore les grains au soleil.\n4) Stocke le maïs dans des sacs propres, bien secs, si possible sur des palettes ou des briques pour éviter l'humidité du sol.\n5) Vérifie régulièrement le stock pour repérer tôt les insectes ou moisissures et enlève les sacs abîmés.",
+    "tags": ["stockage", "maïs", "récolte", "conservation"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "agriculture",
+    "title": "Avantages de la rotation des cultures",
+    "question": "Pourquoi changer de culture sur la même parcelle ?",
+    "answer": "1) La rotation des cultures (ex : maïs une année, niébé ou arachide l'année suivante) permet de reposer le sol et de réduire certaines maladies.\n2) Les légumineuses comme le niébé et l'arachide enrichissent le sol en azote, ce qui aide la culture suivante.\n3) Changer de culture limite aussi certains ravageurs qui restent dans le sol ou les résidus des plantes.\n4) Planifie sur 2 à 3 ans : par exemple maïs → niébé → sorgho.\n5) Parle avec un agent agricole ou un producteur expérimenté de ton village pour adapter la rotation à ta zone.",
+    "tags": ["rotation", "sol", "niébé", "arachide"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+
+  {
+    "domain": "elevage",
+    "title": "Donner de l'eau propre aux animaux",
+    "question": "Combien de fois donner de l'eau à mes animaux ?",
+    "answer": "1) Les bovins, ovins et caprins doivent avoir accès à de l'eau propre chaque jour, surtout en saison chaude.\n2) Si possible, mets un abreuvoir ombragé pour éviter que l'eau chauffe trop au soleil.\n3) Nettoie régulièrement les récipients pour éviter la boue et les matières fécales.\n4) En saison sèche, organise les sorties au point d'eau aux heures les moins chaudes (matin tôt, fin d'après-midi).\n5) Si un animal refuse de boire, semble très faible ou respire vite, rapproche-toi rapidement d'un agent d'élevage ou d'un vétérinaire.",
+    "tags": ["eau", "abreuvement", "bétail", "chaleur"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "elevage",
+    "title": "Alimentation simple des poules villageoises",
+    "question": "Comment mieux nourrir mes poules locales pour avoir plus d'œufs ?",
+    "answer": "1) Laisse les poules chercher une partie de leur nourriture en divagation, mais complète chaque jour avec un peu de céréales cassées (maïs, sorgho, mil).\n2) Ajoute des restes de cuisine propres (sans trop de gras ni de sel) et des feuilles vertes hachées.\n3) Mets toujours à disposition de l'eau propre dans un petit abreuvoir.\n4) Prévois un endroit sec et abrité où les poules peuvent dormir et pondre, à l'abri des prédateurs.\n5) Si tu le peux, donne un peu de coquilles pilées ou de pierre à lécher pour le calcium (coquilles d'œufs broyées par exemple).",
+    "tags": ["poules", "alimentation", "œufs", "villageois"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "elevage",
+    "title": "Prévenir les parasites externes chez les bovins et caprins",
+    "question": "Que faire contre les tiques et autres parasites sur la peau des animaux ?",
+    "answer": "1) Inspecte régulièrement la peau du bétail, surtout autour des oreilles, du cou et de la base de la queue.\n2) Enlève les grosses tiques à la main avec un tissu ou des gants et brûle-les ou enterre-les profondément.\n3) Garde les enclos propres, enlève régulièrement les bouses et la litière humide.\n4) Demande à un agent d'élevage ou vétérinaire s'il y a un bain ou un produit recommandé dans ta zone et comment l'utiliser sans danger.\n5) Si tu vois des plaies, croûtes, ou si l'animal se gratte beaucoup, consulte un professionnel pour éviter les complications.",
+    "tags": ["tiques", "parasites", "bovins", "caprins"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "elevage",
+    "title": "Construire un abri simple pour les chèvres",
+    "question": "Comment faire un petit abri pour mes chèvres ?",
+    "answer": "1) Choisis un endroit légèrement en hauteur pour éviter l'eau stagnante en saison des pluies.\n2) Fais un sol légèrement surélevé avec de la terre tassée ou des planches si possible.\n3) Utilise des piquets et des branches pour faire une structure simple, avec un toit en paille ou en tôle.\n4) Prévoyez une bonne aération mais évite les courants d'air directs en saison froide.\n5) Garde l'abri propre en changeant régulièrement la litière et en enlevant les crottes.",
+    "tags": ["chèvres", "abri", "logement", "élevage"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "elevage",
+    "title": "Signes simples d'un animal malade",
+    "question": "Comment reconnaître rapidement qu'un animal ne va pas bien ?",
+    "answer": "1) Observe chaque jour si l'animal mange et boit normalement.\n2) Un animal malade est souvent triste, reste à l'écart du troupeau et bouge peu.\n3) Regarde si la respiration est très rapide, s'il tousse, ou si tu vois des écoulements au nez ou aux yeux.\n4) Vérifie s'il y a diarrhée, urines très foncées ou sang visibles.\n5) En cas de doute, ne donne pas de médicaments forts sans conseil : contacte un agent d'élevage ou un vétérinaire pour avis.",
+    "tags": ["maladie", "bétail", "signes", "surveillance"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+
+  {
+    "domain": "health",
+    "title": "Premiers gestes en cas de petite coupure propre",
+    "question": "Que faire si je me coupe légèrement en travaillant au champ ?",
+    "answer": "1) Si la coupure est petite et peu profonde, commence par te laver les mains si possible.\n2) Rince doucement la plaie avec de l'eau propre ; si tu as du savon doux, lave autour de la plaie puis rince.\n3) Laisse un peu saigner quelques instants, puis appuie avec un linge propre pour arrêter le saignement.\n4) Si tu as un désinfectant simple (par exemple une solution iodée), mets-en légèrement autour de la plaie.\n5) Couvre la plaie avec un pansement propre. Si la coupure est profonde, très sale ou saigne beaucoup, rends-toi rapidement au centre de santé.",
+    "tags": ["coupure", "blessure", "champ", "premiers secours"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "health",
+    "title": "Prévention du coup de chaleur au champ",
+    "question": "Comment éviter le coup de chaleur quand je travaille longtemps au soleil ?",
+    "answer": "1) Porte un chapeau ou une casquette et des vêtements légers qui couvrent bien la peau.\n2) Bois régulièrement de l'eau propre, même si tu n'as pas très soif.\n3) Évite de travailler aux heures les plus chaudes de la journée ; privilégie le matin tôt et la fin d'après-midi.\n4) Fais des pauses à l'ombre plusieurs fois par jour.\n5) Si toi ou quelqu'un près de toi a mal à la tête, se sent faible, a des vertiges ou vomit, arrête le travail, mets la personne à l'ombre, fais-la boire si elle peut et va au centre de santé.",
+    "tags": ["chaleur", "soleil", "travail", "prévention"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "health",
+    "title": "Brûlure légère avec eau chaude ou feu",
+    "question": "Que faire en cas de petite brûlure ?",
+    "answer": "1) Si la brûlure est petite et sans cloques importantes, passe immédiatement la zone touchée sous de l'eau propre, fraîche (pas glacée) pendant au moins 10 à 15 minutes.\n2) Enlève doucement les bijoux ou objets serrés autour de la zone si c'est possible sans forcer.\n3) Ne mets pas d'huile, de beurre, de dentifrice ou de produits traditionnels gras sur la brûlure.\n4) Couvre la brûlure avec un linge propre, non collant.\n5) Si la brûlure est étendue, profonde, au visage, aux mains, aux parties génitales, ou s'il y a de grosses cloques, va au centre de santé le plus vite possible.",
+    "tags": ["brûlure", "feu", "eau chaude", "secours"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "health",
+    "title": "Diarrhée simple chez l'adulte",
+    "question": "Que faire en cas de diarrhée simple chez un adulte ?",
+    "answer": "1) Boire souvent de petites quantités d'eau propre pour éviter la déshydratation.\n2) Si possible, préparer une solution de réhydratation orale (eau propre + sachet recommandé par le centre de santé) et la boire selon les conseils.\n3) Manger léger : bouillies, riz, banane mûre, éviter les aliments très gras ou très épicés.\n4) Surveiller l'apparition de sang dans les selles, de fièvre ou de grande fatigue.\n5) Si la diarrhée dure plus de deux jours, s'il y a du sang, forte fièvre, ou si la personne est très faible, aller rapidement au centre de santé. Ne pas prendre de médicaments forts sans avis médical.",
+    "tags": ["diarrhée", "déshydratation", "adultes", "prévention"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "health",
+    "title": "Piqûre suspecte (insecte ou animal)",
+    "question": "Que faire après une piqûre ou morsure suspecte ?",
+    "answer": "1) Lave doucement la zone avec de l'eau et du savon si possible.\n2) Observe si la personne a des difficultés à respirer, un gonflement important, ou se sent très mal.\n3) Si l'animal est connu pour être dangereux (chien pouvant être enragé, serpent, scorpion, etc.), va rapidement au centre de santé, même si la douleur semble supportable.\n4) Si c'est une petite piqûre d'insecte sans signes graves, tu peux appliquer du froid (linge humide frais) sur la zone pour calmer la douleur.\n5) En cas de doute, surtout pour les enfants, consulte toujours un agent de santé.",
+    "tags": ["piqûre", "morsure", "insecte", "urgence"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+
+  {
+    "domain": "cybersecurity",
+    "title": "Reconnaître un faux SMS de mobile money",
+    "question": "Comment savoir si un SMS de mobile money est faux ?",
+    "answer": "1) Un faux SMS demande souvent de rappeler un numéro ou de communiquer ton code secret.\n2) Regarde bien le numéro ou le nom de l'expéditeur : les vrais messages viennent toujours du même nom officiel de l'opérateur.\n3) Vérifie ton solde directement dans l'application ou avec le code officiel (*xxx#) au lieu de faire confiance au message.\n4) Ne donne jamais ton code PIN ou tes mots de passe à quelqu'un au téléphone ou par message.\n5) En cas de doute, contacte le service client officiel de ton opérateur ou rends-toi dans une agence.",
+    "tags": ["mobile money", "arnaque", "SMS", "fraude"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "cybersecurity",
+    "title": "Choisir un mot de passe simple mais solide",
+    "question": "Comment créer un bon mot de passe pour mon téléphone ou mes comptes ?",
+    "answer": "1) Évite les mots de passe trop évidents comme 0000, 1234, ta date de naissance ou ton numéro.\n2) Choisis un mot de passe avec au moins 6 chiffres ou une phrase courte que tu peux retenir.\n3) Ne partage pas ton mot de passe avec des amis ou la famille, même proche.\n4) Change ton mot de passe si tu penses que quelqu'un l'a vu ou l'a deviné.\n5) Pour plusieurs comptes, essaie de ne pas utiliser exactement le même mot de passe partout.",
+    "tags": ["mot de passe", "sécurité", "téléphone", "compte"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "cybersecurity",
+    "title": "Protéger son smartphone en cas de perte ou vol",
+    "question": "Que faire pour limiter les dégâts si je perds mon téléphone ?",
+    "answer": "1) Mets toujours un code de déverrouillage sur ton téléphone (PIN, schéma, mot de passe).\n2) Active, si possible, une fonction de localisation ou de verrouillage à distance proposée par ton téléphone.\n3) Note quelque part, chez toi, les numéros du service client de ton opérateur pour pouvoir bloquer ta carte SIM rapidement.\n4) En cas de perte ou vol, appelle au plus vite l'opérateur pour bloquer la SIM et le mobile money.\n5) Évite de stocker des photos de tes cartes bancaires ou des mots de passe écrits dans la galerie.",
+    "tags": ["smartphone", "perte", "vol", "mobile money"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "cybersecurity",
+    "title": "Se méfier des liens suspects",
+    "question": "Dois-je cliquer sur tous les liens reçus par message ou WhatsApp ?",
+    "answer": "1) Ne clique pas sur un lien envoyé par une personne inconnue ou un numéro étrange.\n2) Même si le message semble venir d'un ami, méfie-toi s'il demande de l'argent ou des informations secrètes.\n3) Les liens qui promettent un gros gain facile ou un cadeau sont souvent des arnaques.\n4) Si tu n'es pas sûr, demande confirmation à la personne par un autre moyen (appel direct).\n5) Supprime les messages suspects sans répondre.",
+    "tags": ["liens", "WhatsApp", "escroquerie", "phishing"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  },
+  {
+    "domain": "cybersecurity",
+    "title": "Sauvegarder ses contacts et ses données importantes",
+    "question": "Comment éviter de tout perdre si mon téléphone se casse ?",
+    "answer": "1) Note les numéros très importants (famille, travail, service santé, opérateur) dans un carnet papier à la maison.\n2) Si possible, sauvegarde tes contacts dans le compte de ton téléphone (Google, etc.) pour pouvoir les retrouver sur un autre appareil.\n3) Copie parfois tes photos et documents importants sur une clé USB, un autre téléphone ou un ordinateur de confiance.\n4) Évite de garder tous les documents sensibles (papiers d'identité, informations bancaires) seulement dans le téléphone.\n5) Explique à ta famille l'importance de ces sauvegardes pour qu'ils t'aident à les maintenir à jour.",
+    "tags": ["sauvegarde", "contacts", "données", "téléphone"],
+    "language": "fr",
+    "source": "resolvehub_local_v1"
+  }
+]
