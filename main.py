@@ -448,6 +448,38 @@ def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json"
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isabs(file_path):
         file_path = os.path.join(base_dir, file_path)
+    # INITIALISATION AU DÉMARRAGE
+    # ==========================================
+
+    @app.on_event("startup")
+    async def startup_seed_data():
+        """Initialiser les données minimales au démarrage, y compris sous Gunicorn."""
+        try:
+            db = SessionLocal()
+            existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
+            if not existing:
+                expert = Expert(
+                    email="test@resolvehub.bf",
+                    password_hash=hash_password("test123"),
+                    full_name="Expert Test IA",
+                    specialization="agriculture",
+                    is_active=True
+                )
+                db.add(expert)
+                db.commit()
+                print("✓ Expert test créé: test@resolvehub.bf / test123")
+
+            try:
+                load_knowledge_from_json(db)
+                total_items = db.query(KnowledgeItem).count()
+                print(f"✓ Base de connaissances chargée ({total_items} fiches)")
+            except Exception as e_load:
+                print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"⚠️ Erreur initialisation startup: {e}")
+
 
     if not os.path.exists(file_path):
         return
