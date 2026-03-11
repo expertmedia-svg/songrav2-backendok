@@ -152,12 +152,17 @@ _ensure_media_column_for_knowledge_items()
 # MODÈLES PYDANTIC
 # ==========================================
 
+class ConversationTurn(BaseModel):
+    role: str
+    content: str
+
 class MessageCreate(BaseModel):
     content: str
     phone_number: str
     channel: str = "app"
     category: Optional[str] = None  # catégorie choisie côté app (agriculture, elevage, sos_accident, cybersecurity)
     photo_base64: Optional[str] = None
+    conversation_context: Optional[List[ConversationTurn]] = None
 
 class ExpertLogin(BaseModel):
     email: str
@@ -700,6 +705,7 @@ def generate_llm_answer(
     language: str,
     domain: str,
     knowledge_items: List[Dict[str, Any]],
+    conversation_context: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[str]:
     """Utiliser ChatGPT pour reformuler et raisonner à partir de la base RAG.
 
@@ -764,9 +770,21 @@ def generate_llm_answer(
         "- Ne propose jamais de traitement dangereux ou interdit.\n"
     )
 
+    conversation_text = ""
+    if conversation_context:
+        serialized_turns = []
+        for turn in conversation_context[-6:]:
+            role = "Utilisateur" if turn.get("role") == "user" else "Assistant"
+            content = (turn.get("content") or "").strip()
+            if content:
+                serialized_turns.append(f"{role}: {content}")
+        if serialized_turns:
+            conversation_text = "\n\nContexte de la conversation en cours :\n" + "\n".join(serialized_turns) + "\n"
+
     user_prompt = (
         f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
-        f"Question de l'utilisateur : {question}\n\n"
+        f"Question actuelle de l'utilisateur : {question}\n"
+        f"{conversation_text}\n"
         f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
         "Tâche : en utilisant UNIQUEMENT ces fiches : \n"
         "- Donne une réponse courte (10 à 15 phrases max). \n"
@@ -774,6 +792,7 @@ def generate_llm_answer(
         "  1) Ce que tu comprends du problème (2-3 phrases). \n"
         "  2) Conseils PRATIQUES en étapes numérotées (1., 2., 3., ...), adaptés à un agriculteur ou éleveur. \n"
         "  3) Quand il faut absolument appeler un expert humain, un vétérinaire ou un service local. \n"
+        "- Si la question actuelle est une relance, tiens compte du contexte précédent et évite de répéter inutilement la réponse déjà donnée. \n"
         "Si les fiches ne couvrent pas bien la situation, dis clairement que tu n'as pas assez d'informations et conseille de voir un expert local."
     )
 
@@ -1149,16 +1168,33 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
             print(f"Erreur analyse photo (assistant_query): {e}")
             photo_analysis = {"error": str(e), "requires_expert": True}
 
-    # 4. RAG + LLM
-    rag_items = retrieve_knowledge(db, kb_domain, data.content)
+    # 4. Construire le contexte conversationnel et enrichir la recherche RAG
+    conversation_context = []
+    if data.conversation_context:
+        conversation_context = [
+            {"role": turn.role, "content": turn.content}
+            for turn in data.conversation_context
+            if (turn.content or "").strip()
+        ]
+
+    contextual_query_parts = [
+        turn["content"]
+        for turn in conversation_context[-4:]
+    ]
+    contextual_query_parts.append(data.content)
+    contextual_query = "\n".join(part for part in contextual_query_parts if part)
+
+    # 5. RAG + LLM
+    rag_items = retrieve_knowledge(db, kb_domain, contextual_query)
     llm_answer = generate_llm_answer(
         question=data.content,
         language="fr",
         domain=kb_domain,
         knowledge_items=rag_items,
+        conversation_context=conversation_context,
     )
 
-    # 5. Construction de la réponse (sans ticket)
+    # 6. Construction de la réponse (sans ticket)
     response: Dict[str, Any] = {
         "status": "success",
         "ai_analysis": ai_result,
