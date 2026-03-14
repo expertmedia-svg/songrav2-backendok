@@ -1993,9 +1993,17 @@ def extract_focus_context(
     }
 
 
+def _focus_label(focus_context: Optional[Dict[str, Any]], key: str) -> Optional[str]:
+    focus_entry = (focus_context or {}).get(key)
+    if isinstance(focus_entry, dict):
+        label = focus_entry.get("label")
+        return str(label) if label else None
+    return None
+
+
 def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str, Any]] = None) -> str:
-    focus_subject = (focus_context or {}).get("subject", {}).get("label")
-    focus_issue = (focus_context or {}).get("issue", {}).get("label")
+    focus_subject = _focus_label(focus_context, "subject")
+    focus_issue = _focus_label(focus_context, "issue")
 
     focus_parts = [label for label in [focus_subject, focus_issue] if label]
     if focus_parts:
@@ -2237,8 +2245,8 @@ def generate_llm_answer(
         # Pas de base de connaissance pertinente, on ne force pas le modèle
         return None
 
-    focus_subject_label = (focus_context or {}).get("subject", {}).get("label")
-    focus_issue_label = (focus_context or {}).get("issue", {}).get("label")
+    focus_subject_label = _focus_label(focus_context, "subject")
+    focus_issue_label = _focus_label(focus_context, "issue")
 
     # Petit fallback local : si le LLM n'est pas disponible, on formate au
     # minimum une réponse structurée à partir de la meilleure fiche.
