@@ -2701,6 +2701,8 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     # la catégorie NLP locale.
     nlp_category = ai_result.get("category", "agriculture")
     chosen_category = data.category or nlp_category
+    ai_result["classifier_category"] = nlp_category
+    ai_result["category"] = chosen_category
 
     # Mapping catégorie -> domaine de la base de connaissances
     if chosen_category == "agriculture":
@@ -2854,6 +2856,8 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     # 2. Déterminer la catégorie finale et le domaine RAG
     nlp_category = ai_result.get("category", "agriculture")
     chosen_category = data.category or nlp_category
+    ai_result["classifier_category"] = nlp_category
+    ai_result["category"] = chosen_category
 
     if chosen_category == "agriculture":
         kb_domain = "agriculture"
