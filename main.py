@@ -1789,45 +1789,87 @@ def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json"
 
     for item in raw:
         try:
-            domain = item.get("domain", "agriculture")
-            title = item.get("title")
-            answer = item.get("answer")
-            if not title or not answer:
-                continue
-
-            question = item.get("question")
-            tags = item.get("tags") or []
-            language = item.get("language", "fr")
-            source = item.get("source")
-            media = item.get("media")
-
-            # Éviter les doublons simples sur (domain, title)
-            existing = db.query(KnowledgeItem).filter(
-                KnowledgeItem.domain == domain,
-                KnowledgeItem.title == title
-            ).first()
-            if existing:
-                existing.answer = answer
-                existing.question = question
-                existing.tags = json.dumps(tags, ensure_ascii=False)
-                existing.language = language
-                existing.source = source
-                existing.media = json.dumps(media, ensure_ascii=False) if media is not None else None
-            else:
-                db.add(KnowledgeItem(
-                    domain=domain,
-                    title=title,
-                    question=question,
-                    answer=answer,
-                    tags=json.dumps(tags, ensure_ascii=False),
-                    language=language,
-                    source=source,
-                    media=json.dumps(media, ensure_ascii=False) if media is not None else None,
-                ))
+            _upsert_knowledge_item(
+                db,
+                domain=item.get("domain", "agriculture"),
+                title=item.get("title"),
+                question=item.get("question"),
+                answer=item.get("answer"),
+                tags=item.get("tags") or [],
+                language=item.get("language", "fr"),
+                source=item.get("source"),
+                media=item.get("media"),
+            )
         except Exception as e:
             print(f"⚠️ Erreur lors de l'import d'une entrée de connaissance: {e}")
 
     db.commit()
+
+
+def _upsert_knowledge_item(
+    db: Session,
+    domain: str,
+    title: Optional[str],
+    answer: Optional[str],
+    question: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    language: str = "fr",
+    source: Optional[str] = None,
+    media: Optional[Any] = None,
+) -> None:
+    """Mettre à jour la KB en considérant le titre comme clé canonique.
+
+    Cela répare les bases déjà polluées où une même fiche a pu être enregistrée
+    sous un mauvais domaine ou en doublon. Au prochain démarrage/import, la
+    fiche est réalignée sur le domaine déclaré dans le JSON.
+    """
+    if not title or not answer:
+        return
+
+    normalized_domain = (domain or "agriculture").strip().lower()
+    serialized_tags = json.dumps(tags or [], ensure_ascii=False)
+    serialized_media = json.dumps(media, ensure_ascii=False) if media is not None else None
+
+    existing_items = (
+        db.query(KnowledgeItem)
+        .filter(KnowledgeItem.title == title)
+        .order_by(KnowledgeItem.id.asc())
+        .all()
+    )
+
+    primary = next(
+        (item for item in existing_items if (item.domain or "").strip().lower() == normalized_domain),
+        None,
+    )
+    if primary is None and existing_items:
+        primary = existing_items[0]
+
+    if primary is None:
+        db.add(
+            KnowledgeItem(
+                domain=normalized_domain,
+                title=title,
+                question=question,
+                answer=answer,
+                tags=serialized_tags,
+                language=language,
+                source=source,
+                media=serialized_media,
+            )
+        )
+        return
+
+    primary.domain = normalized_domain
+    primary.question = question
+    primary.answer = answer
+    primary.tags = serialized_tags
+    primary.language = language
+    primary.source = source
+    primary.media = serialized_media
+
+    for duplicate in existing_items:
+        if duplicate.id != primary.id:
+            db.delete(duplicate)
 
 
 def _normalize_token(token: str) -> str:
@@ -2088,6 +2130,13 @@ def retrieve_knowledge(
             norm_text = normalize_text(big_text)
             if any(part in norm_text for part in norm_query_parts):
                 scored.append({"item": it, "score": 1.0})
+
+    if not expand_scope:
+        scored = [
+            entry
+            for entry in scored
+            if (entry["item"].domain or "").strip().lower() == domain.strip().lower()
+        ]
 
     if focus_subject_terms and any(entry.get("subject_match") for entry in scored):
         scored = [entry for entry in scored if entry.get("subject_match")]
@@ -3457,42 +3506,23 @@ async def import_knowledge_from_json(
     updated = 0
 
     for entry in payload.items:
-        existing = (
-            db.query(KnowledgeItem)
-            .filter(
-                KnowledgeItem.domain == entry.domain,
-                KnowledgeItem.title == entry.title,
-            )
-            .first()
+        before = db.query(KnowledgeItem).filter(KnowledgeItem.title == entry.title).count()
+        _upsert_knowledge_item(
+            db,
+            domain=entry.domain,
+            title=entry.title,
+            question=entry.question,
+            answer=entry.answer,
+            tags=entry.tags or [],
+            language=entry.language,
+            source=entry.source,
+            media=[m.dict() for m in entry.media] if entry.media else None,
         )
-
-        media_json = None
-        if entry.media:
-            media_json = json.dumps(
-                [m.dict() for m in entry.media], ensure_ascii=False
-            )
-
-        if existing:
-            existing.question = entry.question
-            existing.answer = entry.answer
-            existing.tags = json.dumps(entry.tags or [], ensure_ascii=False)
-            existing.language = entry.language
-            existing.source = entry.source
-            existing.media = media_json
-            updated += 1
-        else:
-            item = KnowledgeItem(
-                domain=entry.domain,
-                title=entry.title,
-                question=entry.question,
-                answer=entry.answer,
-                tags=json.dumps(entry.tags or [], ensure_ascii=False),
-                language=entry.language,
-                source=entry.source,
-                media=media_json,
-            )
-            db.add(item)
+        after = db.query(KnowledgeItem).filter(KnowledgeItem.title == entry.title).count()
+        if before == 0 and after == 1:
             created += 1
+        else:
+            updated += 1
 
     db.commit()
 
