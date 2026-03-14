@@ -2002,6 +2002,7 @@ def _focus_label(focus_context: Optional[Dict[str, Any]], key: str) -> Optional[
 
 
 def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str, Any]] = None) -> str:
+    """Réponse quand aucune fiche RAG n'est trouvée - Songra/Yingr-AI reste humble."""
     focus_subject = _focus_label(focus_context, "subject")
     focus_issue = _focus_label(focus_context, "issue")
 
@@ -2009,9 +2010,11 @@ def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str
     if focus_parts:
         target = " / ".join(focus_parts)
         return (
-            f"Je n'ai pas trouvé de fiche assez précise pour ce cas ciblé : {target}. "
-            "Je préfère ne pas élargir vers un autre animal, une autre culture ou un autre problème. "
-            "Ajoute si possible un symptôme clé, une photo plus nette, ou demande une vérification par un expert du domaine."
+            f"Moi, Songra (assistant de Yingr-AI), je n'ai pas trouvé une fiche assez précise pour ton cas : {target}. "
+            "Je préfère rester honnête plutôt que de généraliser vers un autre animal, une autre culture ou un autre problème. \n"
+            "Ce que je te conseille : "
+            "Ajoute si possible un symptôme clé, une photo plus nette de la situation, "
+            "ou rapproche-toi d'un expert local (agent agricole, vétérinaire, service de santé du Burkina Faso) pour une vérification sur place."
         )
 
     domain_label = {
@@ -2021,8 +2024,13 @@ def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str
         "cybersecurity": "cybersécurité",
     }.get(domain, domain)
     return (
+        f"Je suis Songra, l'assistant IA de Yingr-AI dédié au Burkina Faso. "
         f"Je n'ai pas trouvé de fiche suffisamment précise dans le domaine {domain_label}. "
-        "Je préfère ne pas généraliser. Ajoute des détails concrets sur l'objet du problème pour une réponse plus ciblée."
+        "Accumuler des connaissances locales du Burkina Faso est mon mission, "
+        "mais pour cette question spécifique, je dois rester prudent. \n"
+        "Ajoute des détails concrets sur ton problème (quelle culture, quel animal, quelle région au BF?) "
+        "pour que je puisse mieux t'aider. "
+        "Ou contacte un expert local du domaine pour une vérification fiable."
     )
 
 
@@ -2179,6 +2187,92 @@ def retrieve_knowledge(
     return results
 
 
+def generate_llm_answer_with_general_knowledge(
+    question: str,
+    language: str,
+    domain: str,
+    conversation_context: Optional[List[Dict[str, str]]] = None,
+) -> Optional[str]:
+    """Utiliser ChatGPT avec ses connaissances générales quand la RAG n'a rien.
+    
+    Ce fallback permet à Lia de partager ses connaissances générales tout en restant
+    prudente et encourageant à consulter un expert si le doute persiste.
+    """
+    if not openai_client or not OPENAI_API_KEY:
+        return None
+
+    conversation_text = ""
+    if conversation_context:
+        serialized_turns = []
+        for turn in conversation_context[-6:]:
+            role = "Utilisateur" if turn.get("role") == "user" else "Assistant"
+            content = (turn.get("content") or "").strip()
+            if content:
+                serialized_turns.append(f"{role}: {content}")
+        if serialized_turns:
+            conversation_text = "\n\nContexte de la conversation en cours :\n" + "\n".join(serialized_turns) + "\n"
+
+    domain_description = {
+        "agriculture": "l'agriculture et les cultures",
+        "elevage": "l'élevage et l'élevage du bétail",
+        "health": "les premiers secours et la sécurité sanitaire",
+        "cybersecurity": "la cybersécurité et la sécurité en ligne",
+    }.get(domain, domain)
+
+    system_prompt = (
+        "Tu es Songra, l'agent d'assistance de Yingr-AI (Yingr Artificial Intelligence). \n"
+        "Yingr-AI est une intelligence artificielle locale et SOUVERAINE du Burkina Faso. \n"
+        "Tu aides exclusivement les communautés du Burkina Faso en matière d'agriculture, d'élevage et de cybersécurité. \n"
+        "Tu es dédié à l'autonomisation et au développement des populations rurales burkinabè. \n"
+        f"Ta spécialité actuelle : {domain_description}. \n\n"
+        "IMPORTANT : Toutes tes réponses doivent tenir compte du contexte spécifique du Burkina Faso \n"
+        "- Climat, condition agro-climatique de la région Sahélienne \n"
+        "- Ressources et pratiques locales disponibles au BF \n"
+        "- Cultures et pratiques d'élevage du Burkina Faso \n"
+        "- Défis particuliers des communautés burkinabè \n\n"
+        "Tu n'as pas de fiche spécialisée pour cette question précise, donc tu vas partager tes connaissances générales "
+        "tout en gardant le contexte burkinabè à l'esprit. Rappelle à l'utilisateur les limites de tes connaissances. \n\n"
+        "Contraintes importantes : \n"
+        "- HONNÊTETÉ totale sur tes limites sans fiche locale de Yingr. \n"
+        "- Zéro conseil médical avancé ou dangereux. \n"
+        "- Langage TRÈS simple, adapté à des populations rurales peu alphabétisées. \n"
+        "- Utilise le français clair mais tu peux ajouter des mots en Mooré, Dioula ou autres langues locales si pertinent. \n"
+        "- TOUJOURS recommander de vérifier avec un expert local, agent agricole, ou service de santé du BF. \n"
+        "- Adapter chaque conseil au contexte climatique et socio-économique du Burkina Faso. \n"
+    )
+
+    user_prompt = (
+        f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
+        f"Question actuelle de l'utilisateur : {question}\n"
+        f"{conversation_text}\n"
+        "IMPORTANT : Je n'ai pas de fiche spécialisée exacte pour cette question. "
+        "Utilise tes connaissances générales pour aider, mais sois prudent. \n\n"
+        "Tâche : \n"
+        "- Donne une réponse courte (10 à 15 phrases max). \n"
+        "- Structure ta réponse ainsi : \n"
+        "  1) Ce que tu comprends du problème (2-3 phrases). \n"
+        "  2) Quelques conseils généraux pratiques ou bonnes pratiques (numérotés). \n"
+        "  3) IMPORTANT : Quand et pourquoi il FAUT consulter un expert humain, vétérinaire ou agent local. \n"
+        "  4) Une note transparente du type : 'Je ne suis pas certain sans plus d'infos, donc vérification par un expert est vraiment importante.'. \n"
+        "- Si la question actuelle est une relance, tiens compte du contexte précédent. \n"
+        "Sois humble et prudent : c'est mieux de recommander un expert que de donner un mauvais conseil."
+    )
+
+    try:
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,  # Légèrement plus élevé que 0.3 car on est en mode "général"
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        print("⚠️ Erreur appel OpenAI (generate_llm_answer_with_general_knowledge):", repr(e))
+        return None
+
+
 def resolve_knowledge_answer(
     db: Session,
     domain: str,
@@ -2188,11 +2282,15 @@ def resolve_knowledge_answer(
     limit: int = 5,
     focus_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Répondre via RAG strict sans jamais sortir du domaine autorisé.
+    """Répondre via fallback amélioré : RAG strict → expanded RAG → Connaissances générales.
 
-    La recherche reste limitée au domaine attendu, sans fusion automatique
-    entre agriculture et élevage.
+    Stratégie :
+    1. D'abord : RAG strict dans le domaine exact (expand_scope=False)
+    2. Si rien : RAG élargi pour trouver des fiches similaires d'autres domaines
+    3. Si rien : Utiliser les connaissances générales du LLM (avec mise en garde)
+    4. Fallback minimal : réponse générique "Je ne sais pas"
     """
+    # ÉTAPE 1 : Recherche RAG strict dans le domaine demandé
     rag_items = retrieve_knowledge(
         db,
         domain,
@@ -2202,7 +2300,9 @@ def resolve_knowledge_answer(
         focus_subject=(focus_context or {}).get("subject"),
         focus_issue=(focus_context or {}).get("issue"),
     )
+    
     if rag_items:
+        # Succès RAG strict : utiliser ces fiches
         llm_answer = generate_llm_answer(
             question=question,
             language=language,
@@ -2219,6 +2319,53 @@ def resolve_knowledge_answer(
             "knowledge_fallback_used": False,
         }
 
+    # ÉTAPE 2 : RAG élargi pour chercher des fiches similaires même d'autres domaines
+    expanded_rag_items = retrieve_knowledge(
+        db,
+        domain,
+        question,
+        limit=limit,
+        expand_scope=True,  # Chercher dans TOUTE la base
+        focus_subject=(focus_context or {}).get("subject"),
+        focus_issue=(focus_context or {}).get("issue"),
+    )
+    
+    if expanded_rag_items:
+        # Trouver des fiches, même d'autres domaines
+        llm_answer = generate_llm_answer(
+            question=question,
+            language=language,
+            domain=domain,
+            knowledge_items=expanded_rag_items,
+            conversation_context=conversation_context,
+            focus_context=focus_context,
+        )
+        return {
+            "rag_items": expanded_rag_items,
+            "llm_answer": llm_answer,
+            "rag_fallback_answer": None if llm_answer else expanded_rag_items[0].get("answer"),
+            "knowledge_mode": "rag_expanded",  # Permet au frontend de savoir qu'on est en mode "élargi"
+            "knowledge_fallback_used": True,  # Fallback activé
+        }
+
+    # ÉTAPE 3 : Aucune fiche trouvée → Utiliser connaissances générales du LLM
+    if openai_client and OPENAI_API_KEY:
+        general_answer = generate_llm_answer_with_general_knowledge(
+            question=question,
+            language=language,
+            domain=domain,
+            conversation_context=conversation_context,
+        )
+        if general_answer:
+            return {
+                "rag_items": [],
+                "llm_answer": general_answer,
+                "rag_fallback_answer": None,
+                "knowledge_mode": "llm_general_knowledge",  # Mode avec connaissances générales
+                "knowledge_fallback_used": True,
+            }
+
+    # ÉTAPE 4 : Fallback ultime - aucune source d'info disponible
     return {
         "rag_items": [],
         "llm_answer": None,
@@ -2236,10 +2383,12 @@ def generate_llm_answer(
     conversation_context: Optional[List[Dict[str, str]]] = None,
     focus_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Utiliser ChatGPT pour reformuler et raisonner à partir de la base RAG.
+    """Songra (Yingr-AI) reformule et raisonne à partir de la base RAG validée localement au Burkina Faso.
 
-    - Le modèle NE DOIT PAS inventer de faits en dehors des connaissances fournies.
-    - S'il n'y a pas assez d'informations, il doit le dire clairement.
+    IMPORTANT : Songra NE DOIT PAS inventer de faits en dehors des fiches RAG du Burkina Faso.
+    - S'il n'y a pas assez de fiches, Songra le dit clairement.
+    - Toutes les réponses doivent respecter le contexte socio-climatique du BF.
+    - Songra reste humble et recommande toujours un expert local si doute.
     """
     if not knowledge_items:
         # Pas de base de connaissance pertinente, on ne force pas le modèle
@@ -2262,17 +2411,20 @@ def generate_llm_answer(
             focus_parts = [label for label in [focus_subject_label, focus_issue_label] if label]
             focus_hint = f" de façon précise sur {' / '.join(focus_parts)}"
         parts.append(
-            f"1) Ce que je comprends de ton problème :\n"
-            f"Tu signales un souci lié à : {titre}. Je vais utiliser les conseils déjà validés localement{focus_hint}."
+            f"1) Ce que Songra (moi!) comprends de ton problème :\n"
+            f"Tu signales un souci lié à : {titre}. "
+            f"Je vais te partager les conseils validés et déjà accumulés au Burkina Faso{focus_hint}, "
+            f"car je suis Songra, l'assistant IA local de Yingr-AI dédié aux communautés du BF."
         )
         parts.append(
-            "2) Conseils pratiques à suivre :\n" + reponse
+            "2) Conseils pratiques pour le contexte du Burkina Faso :\n" + reponse
         )
         parts.append(
-            "3) Quand appeler un expert :\n"
+            "3) Quand ABSOLUMENT contacter un expert local :\n"
             "Si malgré ces conseils la situation ne s'améliore pas, si le problème s'aggrave, ou si tu as un doute, "
-            "rapproche-toi d'un agent agricole ou d'un service technique local pour vérifier sur place."
-            f" (Source : {source})."
+            "rapproche-toi d'un agent agricole, d'un vétérinaire, ou d'un service technique local pour vérifier sur place. "
+            "C'est important pour ta sécurité et celle de ta famille/communauté."
+            f" (Conseil validé localement - Source : {source})."
         )
         return "\n\n".join(parts)
 
@@ -2293,17 +2445,28 @@ def generate_llm_answer(
     context_text = "\n\n".join(context_blocks)
 
     system_prompt = (
-        "Tu es un assistant local pour la population rurale au Burkina Faso. "
-        "Tu aides sur l'agriculture, l'élevage et la cybersécurité. "
-        "Tu dois répondre UNIQUEMENT avec les informations présentes dans les fiches ci-dessous. "
-        "Si les fiches ne suffisent pas, tu dis clairement que tu n'as pas assez d'informations "
-        "et tu recommandes de contacter un expert humain. \n\n"
-        "Contraintes importantes : \n"
-        "- Pas de hors-sujet, pas de conseils médicaux avancés. \n"
-        "- Langage TRÈS simple, phrases courtes, concret, sans jargon. \n"
-        "- Adresse-toi à une personne peu à l'aise avec l'écrit. \n"
-        "- Donne la réponse principalement en français clair; tu peux ajouter quelques mots en langue locale si utile (mais pas obligatoire). \n"
-        "- Ne propose jamais de traitement dangereux ou interdit.\n"
+        "Tu es Songra, l'agent d'assistance IA de Yingr-AI (Yingr Artificial Intelligence). \n"
+        "Yingr-AI est une intelligence artificielle LOCALE et SOUVERAINE basée au Burkina Faso. \n"
+        "Tu es le lien entre la connaissance validée et les communautés rurales du Burkina Faso. \n\n"
+        "IDENTITÉ ET MISSION : \n"
+        "- Tu es Songra, dédié à l'assistance des communautés du Burkina Faso \n"
+        "- Tu fournis des conseils en agriculture, élevage, et cybersécurité adaptés au contexte burkinabè \n"
+        "- Ton objectif : autonomiser les agriculteurs et éleveurs du BF avec des solutions locales \n\n"
+        "CONTEXTE BURKINABÈ - TOUJOURS à l'esprit : \n"
+        "- Climat Sahélien avec sécheresses périodiques \n"
+        "- Ressources naturelles limitées mais exploitables intelligemment \n"
+        "- Cultures principales : mil, sorgho, maïs, arachide, coton, oignons \n"
+        "- Élevages : bovins, ovins, caprins, volailles adaptés aux conditions locales \n"
+        "- Langues locales : Mooré, Dioula, Fulfuldé dominent les zones rurales \n\n"
+        "RÈGLES STRICTES : \n"
+        "- Tu dois répondre UNIQUEMENT avec les fiches ci-dessous. \n"
+        "- Si les fiches ne suffisent pas, dis-le clairement sans généralisations hasardeuses. \n"
+        "- Pas de hors-sujet, zéro conseil médical avancé ou dangereux. \n"
+        "- Langage TRÈS simple, phrases courtes, concret, sans jargon - adapté aux populations peu alphabétisées. \n"
+        "- Réponds en français clair mais intègre des mots en langue locale si c'est plus approprié \n"
+        "(ex: 'zaï' pour les trous en agroforesterie, 'daba' pour la houe). \n"
+        "- TOUJOURS recommander de vérifier avec un expert local (agent agricole, vétérinaire, service de santé du BF). \n"
+        "- Adapte chaque conseil à la climatologie et aux réalités socio-économiques burkinabè. \n"
     )
 
     focus_instruction = ""
@@ -2368,17 +2531,30 @@ def generate_llm_answer(
 @app.get("/")
 async def root():
     return {
-        "message": "SONGRA API - IA Locale",
+        "service": "Songra - Agent Yingr-AI",
+        "description": "Assistant IA local et souverain au service des communautés du Burkina Faso",
+        "organization": "Yingr-AI (Yingr Artificial Intelligence)",
+        "mission": "Autonomiser les agriculteurs et éleveurs du Burkina Faso avec l'IA locale",
+        "specializations": ["Agriculture BF", "Élevage BF", "Cybersécurité BF"],
         "version": "5.0",
-        "features": ["Analyse IA texte", "Analyse IA photo", "Computer Vision local"]
+        "features": [
+            "Analyse IA texte (classification)",
+            "Analyse IA photo (Computer Vision local)",
+            "Base de connaissances RAG validée localement",
+            "Raisonnement contextuel au Burkina Faso",
+            "Fallback multi-niveaux (RAG strict → RAG élargi → Connaissances générales)"
+        ]
     }
 
 @app.get("/health")
 async def health_check():
     return {
+        "service": "Songra/Yingr-AI",
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "ia_status": "active"
+        "ia_status": "active",
+        "ai_name": "Songra",
+        "ai_role": "Assistant IA dédié aux communautés du Burkina Faso"
     }
 
 
@@ -2767,13 +2943,28 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     # LOG DEBUG : affichage des fiches RAG et de la réponse LLM (si disponible)
     try:
         print("[RAG] Domaine:", kb_domain)
-        print(f"[RAG] {len(rag_items)} fiche(s) sélectionnée(s) | mode={knowledge_result['knowledge_mode']}")
+        knowledge_mode = knowledge_result['knowledge_mode']
+        fallback_used = knowledge_result['knowledge_fallback_used']
+        
+        if knowledge_mode == "rag_strict":
+            print(f"✓ [RAG-STRICT] {len(rag_items)} fiche(s) trouvée(s) dans le domaine exact")
+        elif knowledge_mode == "rag_expanded":
+            print(f"⚠ [RAG-EXPANDED] {len(rag_items)} fiche(s) trouvée(s) (recherche élargie dans d'autres domaines)")
+        elif knowledge_mode == "llm_general_knowledge":
+            print(f"⚡ [LLM-GENERAL] Pas de fiche RAG, utilisation des connaissances générales de Lia")
+        elif knowledge_mode == "no_match":
+            print(f"✗ [NO-MATCH] Aucune connaissance trouvée, réponse générique")
+        
         for idx, item in enumerate(rag_items, start=1):
-            print(f"[RAG] FICHE {idx}: {item.get('title')} | tags={item.get('tags')}")
+            print(f"  - FICHE {idx}: {item.get('title')} (domaine: {item.get('domain')})")
+        
         if llm_answer:
-            print("[LLM] Réponse générée (début):", llm_answer[:300].replace("\n", " "))
+            if knowledge_mode == "llm_general_knowledge":
+                print("[LLM-GENERAL] Réponse générée avec connaissances générales (début):", llm_answer[:250].replace("\n", " "))
+            else:
+                print("[LLM] Réponse générée à partir de RAG (début):", llm_answer[:250].replace("\n", " "))
         else:
-            print("[LLM] Aucune réponse générée (pas de clé ou pas de fiches pertinentes)")
+            print("[LLM] Aucune réponse LLM générée")
     except Exception as e_log:
         print(f"[DEBUG] Erreur lors du log RAG/LLM: {e_log}")
 
@@ -2918,6 +3109,20 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     )
     rag_items = knowledge_result["rag_items"]
     llm_answer = knowledge_result["llm_answer"]
+
+    # Log the knowledge source
+    try:
+        knowledge_mode = knowledge_result['knowledge_mode']
+        if knowledge_mode == "rag_strict":
+            print(f"✓ [ASSISTANT] RAG-STRICT | {len(rag_items)} fiches trouvées")
+        elif knowledge_mode == "rag_expanded":
+            print(f"⚠ [ASSISTANT] RAG-EXPANDED | {len(rag_items)} fiches (recherche élargie)")
+        elif knowledge_mode == "llm_general_knowledge":
+            print(f"⚡ [ASSISTANT] LLM-GENERAL | Connaissances générales sans RAG")
+        elif knowledge_mode == "no_match":
+            print(f"✗ [ASSISTANT] NO-MATCH | Aucune source disponible")
+    except Exception as e:
+        print(f"[ASSISTANT] Log error: {e}")
 
     # 6. Construction de la réponse (sans ticket)
     response: Dict[str, Any] = {
