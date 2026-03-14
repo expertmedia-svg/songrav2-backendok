@@ -17,6 +17,7 @@ numpy==1.26.2
 # 4. BUILD TOOLS & UTILITIES (Stabilise l'environnement de build)
 setuptools==70.0.0                 # Rend le processus d'installation plus fiable
 python-dotenv==1.0.0               # Pour gérer les variables d'environnement
+PyJWT==2.10.1
 
 # 6. LLM / ChatGPT (pour reformulation contrôlée des réponses RAG)
 openai==1.59.7

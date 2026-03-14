@@ -3,13 +3,14 @@ SONGRA - Backend API avec Computer Vision LOCALE
 Version FINALE - Avec analyse IA complète
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+import jwt
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -41,6 +42,9 @@ Base = declarative_base()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+JWT_SECRET = os.getenv("JWT_SECRET", "songra-mobile-dev-secret")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
 
 # ==========================================
 # MODÈLES (Compatibles avec base existante)
@@ -50,6 +54,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     phone_number = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=True)
     name = Column(String, nullable=True)
     location = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -81,9 +86,23 @@ class Ticket(Base):
     ai_extracted_keywords = Column(String, nullable=True)
     ai_photo_analysis = Column(Text, nullable=True)
     photo_path = Column(String, nullable=True)  # NOM ORIGINAL - NE PAS CHANGER
+    photo_paths_json = Column(Text, nullable=True)
     resolution_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+
+class PhotoAnalysisHistoryDB(Base):
+    __tablename__ = "photo_analysis_history"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    client_record_id = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    prompt = Column(Text, nullable=True)
+    analysis_json = Column(Text, nullable=True)
+    photo_paths_json = Column(Text, nullable=True)
+    photo_labels_json = Column(Text, nullable=True)
+    source_ticket_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Message(Base):
     __tablename__ = "messages"
@@ -122,6 +141,25 @@ class EmergencyNumber(Base):
 Base.metadata.create_all(bind=engine)
 
 
+def _ensure_user_auth_columns() -> None:
+    """Ajouter les colonnes d'auth mobile si elles sont absentes."""
+    if not str(engine.url).startswith("sqlite"):
+        return
+
+    try:
+        with engine.connect() as conn:
+            result = conn.exec_driver_sql("PRAGMA table_info(users)")
+            columns = [row[1] for row in result]
+
+            if "password_hash" not in columns:
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_hash TEXT")
+    except Exception as e:
+        print(f"⚠️ Impossible d'ajouter les colonnes d'auth utilisateur: {e}")
+
+
+_ensure_user_auth_columns()
+
+
 def _ensure_media_column_for_knowledge_items() -> None:
     """S'assurer que la colonne 'media' existe dans la table knowledge_items.
 
@@ -148,6 +186,24 @@ def _ensure_media_column_for_knowledge_items() -> None:
 
 _ensure_media_column_for_knowledge_items()
 
+
+def _ensure_ticket_photo_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+
+    try:
+        with engine.connect() as conn:
+            result = conn.exec_driver_sql("PRAGMA table_info(tickets)")
+            columns = [row[1] for row in result]
+
+            if "photo_paths_json" not in columns:
+                conn.exec_driver_sql("ALTER TABLE tickets ADD COLUMN photo_paths_json TEXT")
+    except Exception as e:
+        print(f"⚠️ Impossible d'ajouter la colonne 'photo_paths_json' à tickets: {e}")
+
+
+_ensure_ticket_photo_columns()
+
 # ==========================================
 # MODÈLES PYDANTIC
 # ==========================================
@@ -162,14 +218,45 @@ class MessageCreate(BaseModel):
     channel: str = "app"
     category: Optional[str] = None  # catégorie choisie côté app (agriculture, elevage, sos_accident, cybersecurity)
     photo_base64: Optional[str] = None
+    photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
 
 class ExpertLogin(BaseModel):
     email: str
     password: str
 
+
+class UserRegister(BaseModel):
+    phone_number: str
+    password: str
+    name: str
+    location: Optional[str] = None
+
+
+class UserLogin(BaseModel):
+    phone_number: str
+    password: str
+
+
+class MobileQuestionCreate(BaseModel):
+    content: str
+    category: Optional[str] = None
+    photo_base64: Optional[str] = None
+    photo_base64_list: Optional[List[str]] = None
+    conversation_context: Optional[List[ConversationTurn]] = None
+
 class ReplyMessage(BaseModel):
     message: str
+
+
+class PhotoAnalysisHistoryIn(BaseModel):
+    phone_number: str
+    client_record_id: Optional[str] = None
+    category: Optional[str] = None
+    prompt: Optional[str] = None
+    analysis: Dict[str, Any]
+    photo_base64_list: List[str] = []
+    photo_labels: List[str] = []
 
 
 class KnowledgeMedia(BaseModel):
@@ -260,6 +347,94 @@ class LocalComputerVision:
                 "treatment": "CONSULTER vétérinaire RAPIDEMENT. Isoler animal. Eau fraîche disponible.",
                 "urgency": "high",
                 "prevention": "Vaccination, vermifugation, abri ombragé"
+            },
+            "animal_plaie": {
+                "name": "Plaie ou traumatisme animal",
+                "confidence_keywords": ["plaie", "blessure", "saigne", "boite", "coupure", "peau"],
+                "symptoms": ["Rougeur, saignement ou lésion visible", "Douleur ou gêne au déplacement"],
+                "treatment": "Nettoyer la zone avec une solution antiseptique adaptée, limiter les mouches et isoler l'animal si nécessaire.",
+                "urgency": "high",
+                "prevention": "Inspecter les clôtures, retirer les objets coupants et surveiller les parasites.",
+            },
+            "animal_infection_cutanee": {
+                "name": "Infection cutanée animale (suspicion)",
+                "confidence_keywords": ["croûte", "peau", "purulent", "plaque", "démangeaison"],
+                "symptoms": ["Croûtes, inflammation ou dépilation locale", "Zone cutanée anormale persistante"],
+                "treatment": "Nettoyer la zone, éviter le léchage ou frottement et demander un avis vétérinaire pour confirmer le traitement.",
+                "urgency": "medium",
+                "prevention": "Hygiène de l'abri, contrôle des parasites et isolement des animaux atteints.",
+            },
+            "animal_oculaire": {
+                "name": "Atteinte oculaire ou nasale animale",
+                "confidence_keywords": ["oeil", "œil", "ecoulement", "nez", "narine", "crête"],
+                "symptoms": ["Écoulement, irritation ou gonflement visible", "Atteinte possible des voies respiratoires ou des yeux"],
+                "treatment": "Isoler l'animal, nettoyer délicatement les sécrétions externes et consulter rapidement un agent d'élevage ou vétérinaire.",
+                "urgency": "high",
+                "prevention": "Ventilation correcte, réduction de la promiscuité et surveillance du lot.",
+            },
+            "human_plaie_hemorragique": {
+                "name": "Plaie ouverte ou saignement",
+                "confidence_keywords": ["sang", "saigne", "plaie", "coupure", "blessure", "accident"],
+                "symptoms": ["Plaie ouverte ou saignement visible", "Atteinte cutanée nécessitant compression ou pansement"],
+                "treatment": "Comprimer la plaie avec un tissu propre, surélever si possible la zone touchée et consulter d'urgence si le saignement persiste.",
+                "urgency": "high",
+                "prevention": "Port de protections et désinfection rapide des petites coupures.",
+            },
+            "human_brule": {
+                "name": "Brûlure ou irritation thermique",
+                "confidence_keywords": ["brulure", "brûlure", "chaud", "huile", "feu", "peau rouge"],
+                "symptoms": ["Rougeur diffuse, cloque ou surface brûlée", "Douleur et inflammation locale"],
+                "treatment": "Refroidir immédiatement à l'eau propre tempérée pendant 10 à 20 minutes. Ne pas appliquer de produit agressif ni percer les cloques.",
+                "urgency": "high",
+                "prevention": "Manipuler chaleur et liquides bouillants avec protection adaptée.",
+            },
+            "human_infection_plaie": {
+                "name": "Plaie infectée ou inflammatoire",
+                "confidence_keywords": ["pus", "infecte", "infectée", "gonfle", "rouge", "chaud"],
+                "symptoms": ["Rougeur persistante, gonflement ou écoulement", "Suspicion d'infection locale"],
+                "treatment": "Nettoyer la plaie à l'eau propre, couvrir avec un pansement propre et consulter un soignant si douleur, fièvre ou pus apparaissent.",
+                "urgency": "high",
+                "prevention": "Désinfecter tôt les plaies et renouveler les pansements propres.",
+            },
+            "human_contusion": {
+                "name": "Contusion ou hématome",
+                "confidence_keywords": ["choc", "tombe", "bleu", "gonfle", "douleur", "coup"],
+                "symptoms": ["Coloration sombre ou tuméfaction visible", "Douleur localisée après choc"],
+                "treatment": "Appliquer du froid enveloppé, surélever la zone si possible et surveiller douleur intense ou incapacité à bouger.",
+                "urgency": "medium",
+                "prevention": "Protéger les zones exposées et sécuriser les zones de travail ou de déplacement.",
+            },
+            "mais_helminthosporiose": {
+                "name": "Helminthosporiose / brûlure foliaire du maïs",
+                "confidence_keywords": ["mais", "maïs", "taches allongees", "brun", "feuille", "brule"],
+                "symptoms": ["Taches allongées brunes sur feuilles", "Dessèchement progressif du feuillage"],
+                "treatment": "Retirer les feuilles très atteintes, améliorer l'aération et utiliser un traitement fongique adapté si disponible localement.",
+                "urgency": "high",
+                "prevention": "Rotation culturale, destruction des résidus malades et semences saines.",
+            },
+            "manioc_bacteriose": {
+                "name": "Brûlure bactérienne du manioc (suspicion)",
+                "confidence_keywords": ["manioc", "brulure", "brûlure", "feuille", "dessèchement", "bacteriose"],
+                "symptoms": ["Brunissement et dessèchement foliaire", "Atteinte progressive des feuilles ou tiges"],
+                "treatment": "Éliminer les plants très atteints, désinfecter les outils et éviter les boutures issues des plants suspects.",
+                "urgency": "high",
+                "prevention": "Utiliser des boutures saines, éviter la propagation mécanique et pratiquer la rotation.",
+            },
+            "animal_pied_lesion": {
+                "name": "Lésion du pied ou du sabot",
+                "confidence_keywords": ["pied", "sabot", "boiterie", "boite", "patte", "plaie"],
+                "symptoms": ["Boiterie ou douleur à l'appui", "Lésion visible au pied ou au sabot"],
+                "treatment": "Nettoyer le pied, limiter les déplacements et faire vérifier rapidement si l'animal ne pose plus correctement le membre.",
+                "urgency": "high",
+                "prevention": "Assainir les sols humides, inspecter régulièrement les sabots et retirer les objets blessants.",
+            },
+            "volaille_variole": {
+                "name": "Variole aviaire (suspicion)",
+                "confidence_keywords": ["volaille", "croute", "crete", "crête", "face", "bouton"],
+                "symptoms": ["Croûtes ou nodules sur tête, crête ou autour des yeux", "Atteinte cutanée évocatrice chez la volaille"],
+                "treatment": "Isoler la volaille, désinfecter l'abri et consulter rapidement un technicien d'élevage pour confirmer la conduite à tenir.",
+                "urgency": "high",
+                "prevention": "Lutter contre les moustiques, isoler les sujets atteints et renforcer l'hygiène du poulailler.",
             }
         }
         
@@ -271,53 +446,872 @@ class LocalComputerVision:
             "manioc": ["manioc_mosaïque"],
             "bétail": ["animal_fievre"]
         }
-    
-    def analyze_image_simple(self, image_data: bytes, text_description: str = "") -> dict:
+        self.subject_profiles = {
+            "mais": {
+                "label": "Maïs",
+                "keywords": ["mais", "maïs", "epi", "épi"],
+                "capture_guidance": [
+                    "Vue générale de la parcelle ou du plant",
+                    "Gros plan des feuilles jaunies ou tachées",
+                    "Photo du revers de la feuille ou de l'épi",
+                ],
+            },
+            "tomate": {
+                "label": "Tomate",
+                "keywords": ["tomate", "fruit", "tige"],
+                "capture_guidance": [
+                    "Vue générale du plant de tomate",
+                    "Gros plan des feuilles touchées",
+                    "Photo des fruits ou de la tige atteinte",
+                ],
+            },
+            "manioc": {
+                "label": "Manioc",
+                "keywords": ["manioc", "bouture"],
+                "capture_guidance": [
+                    "Vue générale du plant de manioc",
+                    "Gros plan d'une feuille entière",
+                    "Photo du revers des feuilles ou des jeunes pousses",
+                ],
+            },
+            "sorgho": {
+                "label": "Sorgho",
+                "keywords": ["sorgho", "panicule", "epi", "épi"],
+                "capture_guidance": [
+                    "Vue générale du plant de sorgho",
+                    "Photo de l'épi ou panicule",
+                    "Gros plan de la zone noircie ou poudreuse",
+                ],
+            },
+            "oignon": {
+                "label": "Oignon",
+                "keywords": ["oignon", "bulbe"],
+                "capture_guidance": [
+                    "Vue générale du rang d'oignons",
+                    "Gros plan des feuilles ou du collet",
+                    "Photo du bulbe si possible",
+                ],
+            },
+            "arachide": {
+                "label": "Arachide",
+                "keywords": ["arachide", "cacahuete", "cacahuète"],
+                "capture_guidance": [
+                    "Vue générale du plant d'arachide",
+                    "Gros plan des folioles tachées",
+                    "Photo du pied et du sol autour",
+                ],
+            },
+            "betail": {
+                "label": "Bétail",
+                "keywords": ["betail", "bétail", "vache", "boeuf", "bovin", "veau"],
+                "capture_guidance": [
+                    "Vue générale de l'animal",
+                    "Gros plan de la zone touchée",
+                    "Photo des yeux, de la bouche ou du museau si anormal",
+                ],
+            },
+            "petit_ruminant": {
+                "label": "Petit ruminant",
+                "keywords": ["chevre", "chèvre", "mouton", "brebis"],
+                "capture_guidance": [
+                    "Vue générale de l'animal",
+                    "Gros plan de la peau ou de la lésion",
+                    "Photo des yeux ou de la bouche si écoulement",
+                ],
+            },
+            "volaille": {
+                "label": "Volaille",
+                "keywords": ["volaille", "poule", "coq", "poulet", "canard"],
+                "capture_guidance": [
+                    "Vue générale de la volaille",
+                    "Gros plan de la tête, des yeux ou de la crête",
+                    "Photo de la zone plumage ou peau touchée",
+                ],
+            },
+            "lapin": {
+                "label": "Lapin",
+                "keywords": ["lapin", "lapins", "lapereau", "lapereaux", "clapier"],
+                "capture_guidance": [
+                    "Vue générale du lapin dans le clapier",
+                    "Gros plan de la zone touchée ou de la tête",
+                    "Photo des yeux, du nez, des oreilles ou des pattes si anormaux",
+                ],
+            },
+            "humain": {
+                "label": "Blessure humaine",
+                "keywords": ["main", "bras", "jambe", "pied", "doigt", "peau", "plaie", "brulure", "brûlure", "blessure", "sang"],
+                "capture_guidance": [
+                    "Vue générale de la zone touchée",
+                    "Gros plan net de la blessure ou brûlure",
+                    "Photo latérale montrant le gonflement, la profondeur ou l'étendue",
+                ],
+            },
+        }
+
+    def _normalize_text(self, text: str) -> str:
+        normalized = unicodedata.normalize("NFD", (text or "").lower())
+        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+    def _prepare_image(self, image_data: bytes) -> Image.Image:
+        image = Image.open(BytesIO(image_data)).convert("RGB")
+        image.thumbnail((256, 256))
+        return image
+
+    def _extract_visual_features(self, image: Image.Image) -> Dict[str, float]:
+        rgb = np.asarray(image, dtype=np.float32)
+        hsv = np.asarray(image.convert("HSV"), dtype=np.float32)
+
+        hue = hsv[..., 0] * (360.0 / 255.0)
+        saturation = hsv[..., 1] / 255.0
+        value = hsv[..., 2] / 255.0
+        gray = rgb.mean(axis=2) / 255.0
+
+        green_mask = (hue >= 45) & (hue <= 150) & (saturation > 0.20) & (value > 0.16)
+        yellow_mask = (hue >= 32) & (hue <= 72) & (saturation > 0.22) & (value > 0.28)
+        orange_mask = (hue >= 8) & (hue <= 30) & (saturation > 0.32) & (value > 0.20)
+        brown_mask = (hue >= 10) & (hue <= 40) & (saturation > 0.25) & (value >= 0.10) & (value <= 0.65)
+        dark_mask = value < 0.22
+        white_mask = (saturation < 0.15) & (value > 0.72)
+        red_mask = ((hue <= 12) | (hue >= 340)) & (saturation > 0.32) & (value > 0.20)
+        blue_purple_mask = (hue >= 210) & (hue <= 300) & (saturation > 0.18) & (value > 0.12)
+        skin_mask = (
+            (((hue >= 0) & (hue <= 35)) | ((hue >= 340) & (hue <= 360)))
+            & (saturation >= 0.12)
+            & (saturation <= 0.65)
+            & (value >= 0.28)
+            & (value <= 0.96)
+        )
+
+        horizontal_diff = np.abs(np.diff(gray, axis=1))
+        vertical_diff = np.abs(np.diff(gray, axis=0))
+        edge_density = float(
+            (
+                (horizontal_diff > 0.16).mean()
+                + (vertical_diff > 0.16).mean()
+            ) / 2.0
+        )
+
+        lesion_mask = brown_mask | (dark_mask & (saturation > 0.18))
+
+        return {
+            "green_ratio": float(green_mask.mean()),
+            "yellow_ratio": float(yellow_mask.mean()),
+            "orange_ratio": float(orange_mask.mean()),
+            "brown_ratio": float(brown_mask.mean()),
+            "dark_ratio": float(dark_mask.mean()),
+            "white_ratio": float(white_mask.mean()),
+            "red_ratio": float(red_mask.mean()),
+            "blue_purple_ratio": float(blue_purple_mask.mean()),
+            "skin_ratio": float(skin_mask.mean()),
+            "lesion_ratio": float(lesion_mask.mean()),
+            "brightness": float(value.mean()),
+            "saturation": float(saturation.mean()),
+            "texture": float(gray.std()),
+            "edge_density": edge_density,
+        }
+
+    def _keyword_score(self, text: str, keywords: List[str]) -> float:
+        if not keywords:
+            return 0.0
+        hits = sum(1 for keyword in keywords if self._normalize_text(keyword) in text)
+        return min(0.18, hits * 0.06)
+
+    def _build_visual_observations(self, features: Dict[str, float]) -> List[str]:
+        observations: List[str] = []
+
+        if features["green_ratio"] > 0.18:
+            observations.append("La photo contient une forte présence de feuillage vert exploitable pour le diagnostic.")
+        if features["yellow_ratio"] > 0.14:
+            observations.append("Présence notable de jaunissement sur la zone analysée.")
+        if features["orange_ratio"] > 0.04:
+            observations.append("Des zones orange/brun clair ressemblant à des pustules ou taches sont visibles.")
+        if features["brown_ratio"] > 0.10 or features["lesion_ratio"] > 0.12:
+            observations.append("Des nécroses ou taches sombres/brunes sont détectées.")
+        if features["white_ratio"] > 0.08:
+            observations.append("Des zones pâles ou blanchâtres sont visibles sur l'image.")
+        if features["red_ratio"] > 0.06:
+            observations.append("Des zones rouges ou inflammatoires ressortent sur la photo.")
+        if features.get("blue_purple_ratio", 0.0) > 0.05:
+            observations.append("Des zones bleu-violet évoquant un hématome ou une contusion sont visibles.")
+        if features.get("skin_ratio", 0.0) > 0.16:
+            observations.append("La photo contient une zone cutanée bien visible, utile pour une analyse de blessure.")
+        if features["texture"] < 0.08:
+            observations.append("L'image semble peu contrastée; un diagnostic plus précis demanderait une photo plus nette.")
+
+        return observations[:4]
+
+    def _detect_subject_profile(self, normalized_text: str, normalized_category: str) -> Optional[Dict[str, Any]]:
+        for key, profile in self.subject_profiles.items():
+            if any(self._normalize_text(keyword) in normalized_text for keyword in profile["keywords"]):
+                return {"key": key, **profile}
+
+        if normalized_category == "elevage":
+            return {"key": "betail", **self.subject_profiles["betail"]}
+        if normalized_category == "sos_accident":
+            return {"key": "humain", **self.subject_profiles["humain"]}
+        if normalized_category == "agriculture":
+            return {"key": "mais", **self.subject_profiles["mais"]}
+        return None
+
+    def _infer_diagnosis_type(self, disease: str, subject_profile: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        disease_key = self._normalize_text(disease)
+        profile_key = subject_profile.get("key") if subject_profile else None
+
+        if profile_key == "humain" or any(token in disease_key for token in ["brulure", "brûlure", "plaie", "contusion", "hematome", "hématome"]):
+            return {
+                "diagnosis_type": "human_first_aid",
+                "diagnosis_type_label": "Blessure humaine / premiers secours",
+            }
+        if profile_key in {"betail", "petit_ruminant", "volaille", "lapin"} or any(token in disease_key for token in ["animale", "volaille", "sabot", "veterinaire", "vétérinaire", "lapin"]):
+            return {
+                "diagnosis_type": "animal_health_injury",
+                "diagnosis_type_label": "Maladie ou blessure animale",
+            }
+        return {
+            "diagnosis_type": "plant_disease_stress",
+            "diagnosis_type_label": "Maladie ou stress de plante",
+        }
+
+    def _build_critical_alert(self, disease: str, urgency: str, diagnosis_type: str) -> Dict[str, Any]:
+        disease_key = self._normalize_text(disease)
+        critical_alert = None
+        emergency_actions: List[str] = []
+        severity_label = "Surveillance"
+
+        if diagnosis_type == "human_first_aid" and any(token in disease_key for token in ["saignement", "plaie ouverte", "brulure", "brûlure"]):
+            critical_alert = "Cas potentiellement urgent: appliquez immédiatement les premiers gestes et cherchez une aide médicale si l'état est grave ou s'aggrave."
+            emergency_actions = [
+                "Comprimer ou refroidir la zone selon le type de blessure.",
+                "Utiliser uniquement de l'eau propre et un tissu propre si disponible.",
+                "Contacter les secours ou un centre de santé si la douleur, le saignement ou l'étendue est importante.",
+            ]
+            severity_label = "Alerte immédiate"
+        elif diagnosis_type == "animal_health_injury" and any(token in disease_key for token in ["plaie", "sabot", "oculaire", "variole", "fievre", "fièvre"]):
+            critical_alert = "Suspicion de cas animal sérieux: isolez l'animal et faites confirmer rapidement par un agent d'élevage ou vétérinaire."
+            emergency_actions = [
+                "Isoler l'animal ou la volaille atteinte si possible.",
+                "Limiter les déplacements et surveiller écoulement, boiterie, abattement ou difficulté respiratoire.",
+                "Désinfecter le matériel et éviter le contact rapproché avec le reste du troupeau.",
+            ]
+            severity_label = "A surveiller d'urgence"
+        elif diagnosis_type == "plant_disease_stress" and urgency == "high":
+            critical_alert = "Risque d'aggravation rapide de la culture: isolez ou retirez les parties très atteintes et confirmez vite sur le terrain."
+            emergency_actions = [
+                "Éviter la propagation par contact ou arrosage sur le feuillage.",
+                "Retirer les parties ou plants très atteints si la maladie se diffuse rapidement.",
+                "Prendre une seconde photo de confirmation des feuilles, tiges ou fruits.",
+            ]
+            severity_label = "Intervention rapide"
+        elif urgency == "high":
+            severity_label = "Intervention rapide"
+        elif urgency == "medium":
+            severity_label = "À surveiller"
+
+        return {
+            "severity_label": severity_label,
+            "critical_alert": critical_alert,
+            "emergency_actions": emergency_actions,
+        }
+
+    def _build_local_context(self, disease: str, diagnosis_type: str, subject_profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        disease_key = self._normalize_text(disease)
+        subject_label = subject_profile["label"] if subject_profile else None
+
+        if diagnosis_type == "human_first_aid":
+            return {
+                "local_context_note": "Conseils adaptés à un contexte terrain Burkina: priorité à l'eau propre, au tissu propre, à la protection contre la poussière et à l'accès rapide au centre de santé le plus proche.",
+                "local_examples": [
+                    "Au champ ou au marché, une coupure sale doit être rincée vite avec eau propre avant pansement propre.",
+                    "Pour une brûlure à l'huile ou au feu de cuisson, refroidir à l'eau propre sans appliquer de poudre ou de pâte agressive.",
+                    "Si la blessure continue à saigner ou empêche de bouger, cherchez une prise en charge médicale sans attendre.",
+                ],
+            }
+
+        if diagnosis_type == "animal_health_injury":
+            examples = [
+                "En élevage villageois, isolez vite l'animal atteint pour limiter la contagion ou l'aggravation.",
+                "Nettoyez la zone touchée avec un antiseptique adapté si disponible et gardez l'abri plus sec et propre.",
+                "Si l'animal ne mange plus, boite fort ou présente écoulement/fièvre, faites intervenir rapidement un agent d'élevage ou vétérinaire.",
+            ]
+            if subject_label == "Volaille":
+                examples[1] = "Pour la volaille, séparez immédiatement les sujets atteints et désinfectez mangeoires, abreuvoirs et poulailler."
+            return {
+                "local_context_note": "Conseils orientés élevage Burkina: gestion du troupeau ou du lot, isolement rapide, hygiène de l'abri et recours à l'agent d'élevage local.",
+                "local_examples": examples,
+            }
+
+        plant_examples = [
+            "En saison humide, évitez l'arrosage direct du feuillage déjà taché et retirez vite les parties très atteintes.",
+            "Au champ, observez aussi les plants voisins pour voir si le problème se diffuse sur la ligne ou la parcelle.",
+            "Si possible, combinez traitement local, aération et rotation culturale au prochain cycle.",
+        ]
+        if "mais" in disease_key:
+            plant_examples[0] = "Sur maïs, comparez plusieurs feuilles du bas et du haut pour distinguer carence et maladie foliaire." 
+        elif "manioc" in disease_key:
+            plant_examples[0] = "Sur manioc, évitez d'utiliser comme boutures des tiges venant de plants suspects ou déjà desséchés."
+        elif "tomate" in disease_key:
+            plant_examples[0] = "Sur tomate, aérez davantage les plants et évitez de mouiller les feuilles en fin de journée."
+
+        return {
+            "local_context_note": "Conseils formulés pour des pratiques agricoles courantes au Burkina: observation de parcelle, retrait ciblé, hygiène culturale et confirmation par agent agricole si propagation rapide.",
+            "local_examples": plant_examples,
+        }
+
+    def _analyze_human_condition(self, normalized_text: str, features: Dict[str, float], observations: List[str],
+                                 subject_profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        bleeding_score = 0.28 + min(0.34, features["red_ratio"] * 2.3) + min(0.16, features["edge_density"] * 0.8)
+        bleeding_score += self._keyword_score(normalized_text, self.diseases_database["human_plaie_hemorragique"]["confidence_keywords"])
+
+        burn_score = 0.24 + min(0.22, features["red_ratio"] * 1.5) + min(0.16, features["white_ratio"] * 1.2) + min(0.08, features["orange_ratio"] * 0.9)
+        burn_score += self._keyword_score(normalized_text, self.diseases_database["human_brule"]["confidence_keywords"])
+
+        infected_score = 0.22 + min(0.22, features["red_ratio"] * 1.2) + min(0.22, features["yellow_ratio"] * 1.0) + min(0.10, features["brown_ratio"] * 0.8)
+        infected_score += self._keyword_score(normalized_text, self.diseases_database["human_infection_plaie"]["confidence_keywords"])
+
+        bruise_score = 0.20 + min(0.28, features.get("blue_purple_ratio", 0.0) * 2.1) + min(0.10, features["dark_ratio"] * 0.6)
+        bruise_score += self._keyword_score(normalized_text, self.diseases_database["human_contusion"]["confidence_keywords"])
+
+        if bleeding_score >= max(burn_score, infected_score, bruise_score) and bleeding_score >= 0.42:
+            disease = self.diseases_database["human_plaie_hemorragique"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=bleeding_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les indices visuels et le contexte évoquent une plaie ouverte ou un saignement nécessitant des gestes de premiers secours rapides.",
+                recommendations="Si le saignement est abondant, non contrôlé, ou si la plaie est profonde, contactez immédiatement les secours ou un soignant.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if burn_score >= max(infected_score, bruise_score) and burn_score >= 0.40:
+            disease = self.diseases_database["human_brule"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=burn_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="L'image évoque davantage une brûlure superficielle ou intermédiaire qu'une simple coupure mécanique.",
+                recommendations="Ajoutez une photo montrant l'étendue complète et précisez la cause (eau chaude, feu, produit chimique, huile, métal chaud).",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if infected_score >= bruise_score and infected_score >= 0.38:
+            disease = self.diseases_database["human_infection_plaie"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=infected_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="La rougeur, les tons jaunâtres ou brunâtres et le contexte texte suggèrent une plaie inflammatoire ou déjà infectée.",
+                recommendations="Consultez rapidement s'il y a fièvre, pus, douleur croissante ou extension de la rougeur.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if bruise_score >= 0.34:
+            disease = self.diseases_database["human_contusion"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=bruise_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="L'aspect bleu-violet ou sombre détecté ressemble à une contusion ou un hématome après choc.",
+                recommendations="Si la zone ne peut plus bouger normalement, si la douleur est très forte ou si un os semble touché, cherchez une prise en charge médicale.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        return self._base_result(
+            disease="Blessure humaine non caractérisée",
+            confidence=0.36,
+            symptoms=["Lésion visible mais difficile à classer précisément sur photo seule"],
+            treatment="Nettoyez à l'eau propre si possible, protégez la zone et consultez si douleur, saignement ou brûlure importante.",
+            prevention="Utiliser une protection adaptée et éviter de manipuler la plaie avec des mains sales.",
+            urgency="medium",
+            analysis="La photo montre bien une atteinte cutanée humaine, mais le type exact de blessure ne peut pas être confirmé avec assez de certitude.",
+            recommendations="Ajoutez une autre vue plus nette et précisez la cause, l'heure de l'accident et l'intensité de la douleur.",
+            requires_expert=True,
+            features=features,
+            observations=observations,
+            subject_profile=subject_profile,
+        )
+
+    def _analyze_animal_condition(self, normalized_text: str, features: Dict[str, float], observations: List[str],
+                                  subject_profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        subject_key = subject_profile["key"] if subject_profile else None
+        wound_score = 0.26 + min(0.24, features["red_ratio"] * 1.8) + min(0.18, features["edge_density"] * 0.7)
+        wound_score += self._keyword_score(normalized_text, self.diseases_database["animal_plaie"]["confidence_keywords"])
+
+        skin_infection_score = 0.22 + min(0.18, features["brown_ratio"] * 1.0) + min(0.14, features["yellow_ratio"] * 0.9) + min(0.12, features["texture"] * 0.8)
+        skin_infection_score += self._keyword_score(normalized_text, self.diseases_database["animal_infection_cutanee"]["confidence_keywords"])
+
+        ocular_score = 0.21 + min(0.16, features["white_ratio"] * 1.1) + min(0.16, features["red_ratio"] * 1.0)
+        ocular_score += self._keyword_score(normalized_text, self.diseases_database["animal_oculaire"]["confidence_keywords"])
+        if subject_profile and subject_profile.get("key") == "volaille":
+            ocular_score += 0.06
+
+        fever_score = 0.34 + self._keyword_score(normalized_text, self.diseases_database["animal_fievre"]["confidence_keywords"])
+        foot_score = 0.24 + min(0.18, features["red_ratio"] * 1.1) + min(0.20, features["brown_ratio"] * 1.1) + min(0.12, features["edge_density"] * 0.6)
+        foot_score += self._keyword_score(normalized_text, self.diseases_database["animal_pied_lesion"]["confidence_keywords"])
+        if subject_key in {"betail", "petit_ruminant"}:
+            foot_score += 0.06
+
+        pox_score = 0.22 + min(0.20, features["brown_ratio"] * 1.0) + min(0.16, features["red_ratio"] * 0.9) + min(0.10, features["white_ratio"] * 0.8)
+        pox_score += self._keyword_score(normalized_text, self.diseases_database["volaille_variole"]["confidence_keywords"])
+        if subject_key == "volaille":
+            pox_score += 0.10
+
+        if foot_score >= max(wound_score, skin_infection_score, ocular_score, fever_score, pox_score) and foot_score >= 0.40:
+            disease = self.diseases_database["animal_pied_lesion"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=foot_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Le contexte de boiterie ou de pied/sabot associé aux indices visuels évoque une lésion localisée du membre.",
+                recommendations="Ajoutez une photo de dessous et de profil du pied ou sabot si l'animal accepte de se laisser observer.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if pox_score >= max(wound_score, skin_infection_score, ocular_score, fever_score) and pox_score >= 0.39:
+            disease = self.diseases_database["volaille_variole"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=pox_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Chez la volaille, les croûtes visibles au niveau de la tête ou de la crête évoquent une suspicion de variole aviaire.",
+                recommendations="Ajoutez une photo de face et précisez si plusieurs volailles présentent des croûtes similaires.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if wound_score >= max(skin_infection_score, ocular_score, fever_score, foot_score, pox_score) and wound_score >= 0.40:
+            disease = self.diseases_database["animal_plaie"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=wound_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="La photo montre des signes compatibles avec une blessure, une plaie ouverte ou un traumatisme local chez l'animal.",
+                recommendations="Vérifiez s'il y a boiterie, écoulement, odeur inhabituelle ou infestation par les mouches.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if skin_infection_score >= max(ocular_score, fever_score, foot_score, pox_score) and skin_infection_score >= 0.38:
+            disease = self.diseases_database["animal_infection_cutanee"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=skin_infection_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les croûtes, taches brunâtres ou altérations de texture orientent vers une atteinte cutanée infectieuse ou parasitaire.",
+                recommendations="Ajoutez une photo du contour de la lésion et précisez s'il y a démangeaison, chute de poils ou mauvaise odeur.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if ocular_score >= max(fever_score, foot_score, pox_score) and ocular_score >= 0.35:
+            disease = self.diseases_database["animal_oculaire"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=ocular_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Le contexte et les indices visuels évoquent une atteinte des yeux, des narines ou de la tête chez l'animal.",
+                recommendations="Prenez une vue de face en lumière naturelle et signalez toux, abattement ou difficulté respiratoire si présents.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        disease = self.diseases_database["animal_fievre"]
+        return self._base_result(
+            disease=disease["name"],
+            confidence=fever_score,
+            symptoms=disease["symptoms"],
+            treatment=disease["treatment"],
+            prevention=disease["prevention"],
+            urgency=disease["urgency"],
+            analysis="Le contexte évoque un problème sanitaire animal plus général, sans signe photo assez spécifique pour une confirmation visuelle forte.",
+            recommendations="Ajoutez la température, l'appétit, la durée d'évolution et une vue plus nette de la zone anormale.",
+            requires_expert=True,
+            features=features,
+            observations=observations,
+            subject_profile=subject_profile,
+        )
+
+    def _analyze_plant_condition(self, normalized_text: str, features: Dict[str, float], observations: List[str],
+                                 subject_profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        subject_key = subject_profile["key"] if subject_profile else None
+        nitrogen_score = 0.28 + min(0.28, features["yellow_ratio"] * 1.4) + min(0.10, features["green_ratio"] * 0.4)
+        nitrogen_score += self._keyword_score(normalized_text, self.diseases_database["mais_taches_jaunes"]["confidence_keywords"])
+
+        rust_score = 0.24 + min(0.30, features["orange_ratio"] * 2.2) + min(0.12, features["lesion_ratio"] * 0.9)
+        rust_score += self._keyword_score(normalized_text, self.diseases_database["mais_rouille"]["confidence_keywords"])
+
+        blight_score = 0.24 + min(0.26, features["brown_ratio"] * 1.5) + min(0.14, features["dark_ratio"] * 0.8)
+        blight_score += self._keyword_score(normalized_text, self.diseases_database["tomate_mildiou"]["confidence_keywords"])
+
+        mosaic_score = 0.22 + min(0.24, features["yellow_ratio"] * 0.9) + min(0.12, features["texture"] * 0.8)
+        mosaic_score += 0.08 if "manioc" in normalized_text else 0.0
+
+        drought_score = 0.20 + min(0.26, features["brown_ratio"] * 1.1) + min(0.16, (1 - features["brightness"]) * 0.5)
+        drought_score += 0.06 if any(token in normalized_text for token in ["seche", "fletri", "manque d'eau", "sol"]) else 0.0
+
+        charbon_score = 0.18 + min(0.34, features["dark_ratio"] * 1.9) + min(0.12, features["texture"] * 0.7)
+        charbon_score += self._keyword_score(normalized_text, self.diseases_database["sorgho_charbon"]["confidence_keywords"])
+
+        maize_blight_score = 0.22 + min(0.24, features["brown_ratio"] * 1.3) + min(0.18, features["lesion_ratio"] * 1.1) + min(0.10, features["edge_density"] * 0.5)
+        maize_blight_score += self._keyword_score(normalized_text, self.diseases_database["mais_helminthosporiose"]["confidence_keywords"])
+
+        cassava_blight_score = 0.21 + min(0.22, features["brown_ratio"] * 1.0) + min(0.18, features["yellow_ratio"] * 0.8) + min(0.12, features["dark_ratio"] * 0.6)
+        cassava_blight_score += self._keyword_score(normalized_text, self.diseases_database["manioc_bacteriose"]["confidence_keywords"])
+
+        oignon_score = 0.20 + min(0.22, features["yellow_ratio"] * 0.8) + min(0.18, features["brown_ratio"] * 1.1)
+        arachide_score = 0.19 + min(0.22, features["brown_ratio"] * 1.0) + min(0.10, features["orange_ratio"] * 0.9)
+
+        if subject_key == "tomate":
+            blight_score += 0.08
+        if subject_key == "manioc":
+            mosaic_score += 0.10
+            cassava_blight_score += 0.08
+        if subject_key == "sorgho":
+            charbon_score += 0.10
+        if subject_key == "mais":
+            rust_score += 0.06
+            nitrogen_score += 0.05
+            maize_blight_score += 0.09
+        if subject_key == "oignon":
+            oignon_score += 0.10
+        if subject_key == "arachide":
+            arachide_score += 0.10
+
+        if maize_blight_score >= max(nitrogen_score, rust_score, blight_score, mosaic_score, drought_score, charbon_score, oignon_score, arachide_score, cassava_blight_score) and maize_blight_score >= 0.40:
+            disease = self.diseases_database["mais_helminthosporiose"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=maize_blight_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les taches brunes et allongées sur le maïs orientent plutôt vers une brûlure foliaire fongique qu'une simple rouille ou carence.",
+                recommendations="Ajoutez une photo d'une feuille entière, idéalement avec plusieurs lésions alignées, pour confirmer l'aspect allongé des taches.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if cassava_blight_score >= max(nitrogen_score, rust_score, blight_score, mosaic_score, drought_score, charbon_score, oignon_score, arachide_score) and cassava_blight_score >= 0.39:
+            disease = self.diseases_database["manioc_bacteriose"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=cassava_blight_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Le brunissement et le dessèchement visibles sur le manioc évoquent davantage une brûlure bactérienne qu'une simple mosaïque.",
+                recommendations="Prenez aussi une photo des tiges et précisez si le dessèchement progresse rapidement sur plusieurs plants.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if charbon_score >= max(nitrogen_score, rust_score, blight_score, mosaic_score, drought_score, oignon_score, arachide_score, maize_blight_score, cassava_blight_score) and charbon_score >= 0.42:
+            disease = self.diseases_database["sorgho_charbon"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=charbon_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les zones noires et poudreuses détectées sont compatibles avec une suspicion de charbon du sorgho.",
+                recommendations="Prenez une photo de l'épi entier pour confirmer si les grains sont remplacés par une masse noire poudreuse.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if oignon_score >= max(nitrogen_score, rust_score, blight_score, mosaic_score, drought_score, arachide_score, maize_blight_score, cassava_blight_score) and oignon_score >= 0.38:
+            return self._base_result(
+                disease="Suspicion de mildiou ou brûlure foliaire de l'oignon",
+                confidence=oignon_score,
+                symptoms=[
+                    "Jaunissement ou brunissement des feuilles",
+                    "Affaiblissement progressif du feuillage",
+                ],
+                treatment="Réduire l'humidité sur le feuillage, améliorer l'aération et retirer les feuilles très atteintes.",
+                prevention="Espacer les plants, éviter l'arrosage tardif sur les feuilles et pratiquer la rotation.",
+                urgency="medium",
+                analysis="Le profil visuel des feuilles d'oignon suggère une atteinte foliaire plutôt qu'une simple carence.",
+                recommendations="Ajoutez une photo du collet et précisez si l'humidité est élevée ou si l'attaque se diffuse rapidement.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if arachide_score >= max(nitrogen_score, rust_score, blight_score, mosaic_score, drought_score, maize_blight_score, cassava_blight_score) and arachide_score >= 0.36:
+            return self._base_result(
+                disease="Suspicion de cercosporiose ou taches foliaires de l'arachide",
+                confidence=arachide_score,
+                symptoms=[
+                    "Petites taches brunes sur folioles",
+                    "Dégradation progressive du feuillage",
+                ],
+                treatment="Retirer les feuilles très atteintes et appliquer un traitement fongique adapté si disponible localement.",
+                prevention="Rotation culturale, semences saines et limitation de l'humidité stagnante.",
+                urgency="medium",
+                analysis="Les taches détectées sur le feuillage d'arachide évoquent une maladie foliaire fongique courante.",
+                recommendations="Prenez un gros plan des deux faces de la foliole pour mieux distinguer tache foliaire et carence.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if rust_score >= max(nitrogen_score, blight_score, mosaic_score, drought_score, maize_blight_score, cassava_blight_score) and rust_score >= 0.45:
+            disease = self.diseases_database["mais_rouille"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=rust_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les zones orange/brunes détectées sur le feuillage sont compatibles avec une suspicion de rouille.",
+                recommendations="Photographiez aussi le revers des feuilles pour confirmer la présence de pustules poudreuses.",
+                requires_expert=rust_score < 0.62,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if blight_score >= max(nitrogen_score, mosaic_score, drought_score, maize_blight_score, cassava_blight_score) and blight_score >= 0.43:
+            disease = self.diseases_database["tomate_mildiou"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=blight_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Les taches sombres et brunes détectées évoquent une atteinte foliaire de type mildiou ou nécrose avancée.",
+                recommendations="Isolez les plants atteints et prenez une seconde photo des tiges et fruits pour confirmer l'extension.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if mosaic_score >= max(nitrogen_score, drought_score, cassava_blight_score, maize_blight_score) and mosaic_score >= 0.40:
+            return self._base_result(
+                disease="Suspicion de mosaïque foliaire",
+                confidence=mosaic_score,
+                symptoms=[
+                    "Alternance de zones vertes et jaunâtres",
+                    "Aspect irrégulier ou marbré du feuillage",
+                ],
+                treatment="Éliminer les plants très atteints et éviter toute bouture issue de plants suspects.",
+                prevention="Utiliser du matériel végétal sain, contrôler les insectes vecteurs et désinfecter les outils.",
+                urgency="high",
+                analysis="Le motif visuel mêlant vert et jaune sur le feuillage fait penser à une mosaïque virale ou un stress foliaire sévère.",
+                recommendations="Ajoutez une photo d'une feuille entière sur fond neutre pour distinguer mosaïque virale et carence.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if nitrogen_score >= max(drought_score, maize_blight_score, cassava_blight_score) and nitrogen_score >= 0.42:
+            disease = self.diseases_database["mais_taches_jaunes"]
+            return self._base_result(
+                disease=disease["name"],
+                confidence=nitrogen_score,
+                symptoms=disease["symptoms"],
+                treatment=disease["treatment"],
+                prevention=disease["prevention"],
+                urgency=disease["urgency"],
+                analysis="Le jaunissement dominant détecté sur l'image évoque davantage une carence nutritive qu'une brûlure localisée.",
+                recommendations="Vérifiez si le jaunissement commence sur les feuilles basses et ajoutez si possible l'âge de la culture.",
+                requires_expert=nitrogen_score < 0.58,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        if drought_score >= 0.36:
+            return self._base_result(
+                disease="Stress hydrique ou problème de sol",
+                confidence=drought_score,
+                symptoms=[
+                    "Brunissement ou dessèchement des bords",
+                    "Perte de vigueur visuelle",
+                ],
+                treatment="Contrôler l'humidité du sol, améliorer le paillage et ajuster l'irrigation selon le stade de la culture.",
+                prevention="Maintenir une humidité plus stable, apporter de la matière organique et éviter le compactage du sol.",
+                urgency="medium",
+                analysis="L'image suggère surtout un stress abiotiques: manque d'eau, chaleur ou déséquilibre du sol.",
+                recommendations="Prenez aussi une photo du sol au pied de la plante et précisez la fréquence d'arrosage.",
+                requires_expert=False,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
+
+        return self._base_result(
+            disease="Indéterminé",
+            confidence=0.34,
+            symptoms=["Informations visuelles insuffisantes pour identifier précisément la maladie"],
+            treatment="Un expert peut confirmer le diagnostic si vous ajoutez une photo plus proche et une description plus détaillée.",
+            prevention="Prendre plusieurs photos: vue générale, gros plan des zones atteintes et face inférieure des feuilles.",
+            urgency="medium",
+            analysis="Une photo a bien été analysée, mais les indices visuels ne permettent pas encore de conclure avec un niveau de confiance suffisant.",
+            recommendations="Ajoutez le nom de la culture ou de l'animal, l'ancienneté du problème et une photo plus nette pour améliorer la détection.",
+            requires_expert=True,
+            features=features,
+            observations=observations,
+            subject_profile=subject_profile,
+        )
+
+    def _base_result(self, *, disease: str, confidence: float, symptoms: List[str], treatment: str,
+                     prevention: str, urgency: str, analysis: str, recommendations: str,
+                     requires_expert: bool, features: Dict[str, float], observations: List[str],
+                     subject_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        diagnosis_meta = self._infer_diagnosis_type(disease, subject_profile)
+        alert_meta = self._build_critical_alert(disease, urgency, diagnosis_meta["diagnosis_type"])
+        local_context = self._build_local_context(disease, diagnosis_meta["diagnosis_type"], subject_profile)
+        return {
+            "disease_detected": disease,
+            "confidence": round(max(0.0, min(confidence, 0.92)), 2),
+            "symptoms": symptoms,
+            "treatment": treatment,
+            "prevention": prevention,
+            "urgency": urgency,
+            "analysis": analysis,
+            "recommendations": recommendations,
+            "requires_expert": requires_expert,
+            "analysis_mode": "hybrid_local_image_text",
+            "visual_observations": observations,
+            "visual_features": {key: round(value, 3) for key, value in features.items()},
+            "detected_subject": subject_profile["label"] if subject_profile else None,
+            "capture_guidance": subject_profile["capture_guidance"] if subject_profile else None,
+            "diagnosis_type": diagnosis_meta["diagnosis_type"],
+            "diagnosis_type_label": diagnosis_meta["diagnosis_type_label"],
+            "severity_label": alert_meta["severity_label"],
+            "critical_alert": alert_meta["critical_alert"],
+            "emergency_actions": alert_meta["emergency_actions"],
+            "local_context_note": local_context["local_context_note"],
+            "local_examples": local_context["local_examples"],
+        }
+
+    def analyze_image_simple(self, image_data: bytes, text_description: str = "", category: Optional[str] = None) -> dict:
         """
-        Analyse simple basée sur le texte ET détection basique image
-        (Version simplifiée mais fonctionnelle)
+        Analyse locale hybride: indices visuels extraits de l'image + contexte texte.
         """
         try:
-            text_lower = text_description.lower()
-            
-            # Détection basique selon texte
-            if "maïs" in text_lower or "mais" in text_lower or "jaune" in text_lower:
-                return {
-                    "disease_detected": "Carence en Azote",
-                    "confidence": 0.7,
-                    "symptoms": ["Jaunissement des feuilles du bas vers le haut", "Croissance ralentie"],
-                    "treatment": "Appliquer engrais NPK (10-10-10) à 50kg/ha. Améliorer drainage. Arrosage régulier matin/soir.",
-                    "prevention": "Rotation des cultures, compost organique, analyse sol annuelle",
-                    "urgency": "medium",
-                    "analysis": "Détection probable de carence en azote sur plants de maïs. Les feuilles jaunissent du bas vers le haut.",
-                    "recommendations": "Apportez de l'engrais NPK et assurez-vous d'un bon drainage.",
-                    "requires_expert": False
-                }
-            elif "tomate" in text_lower or "tache" in text_lower:
-                return {
-                    "disease_detected": "Mildiou de la Tomate",
-                    "confidence": 0.6,
-                    "symptoms": ["Taches brunes/noires sur feuilles", "Fruits pourrissent"],
-                    "treatment": "URGENT: Retirer plants infectés. Bouillie bordelaise. Éviter arrosage feuilles.",
-                    "prevention": "Paillage, arrosage au pied, aération",
-                    "urgency": "high",
-                    "analysis": "Symptômes typiques du mildiou de la tomate.",
-                    "recommendations": "Retirez les plants infectés et appliquez de la bouillie bordelaise.",
-                    "requires_expert": True
-                }
-            
-            # Réponse générique si pas de match
-            return {
-                "disease_detected": "Indéterminé",
-                "confidence": 0.3,
-                "symptoms": ["Analyse en cours"],
-                "treatment": "Un expert va examiner votre photo et vous donner des recommandations précises.",
-                "prevention": "Photos claires et description détaillée aident à un meilleur diagnostic.",
-                "urgency": "medium",
-                "analysis": "L'analyse nécessite plus d'informations. Un expert va examiner votre photo.",
-                "recommendations": "Prenez plusieurs photos (plante entière, feuilles, tiges). Décrivez les symptômes en détail.",
-                "requires_expert": True
-            }
+            normalized_text = self._normalize_text(text_description)
+            normalized_category = self._normalize_text(category or "")
+            image = self._prepare_image(image_data)
+            features = self._extract_visual_features(image)
+            observations = self._build_visual_observations(features)
+            subject_profile = self._detect_subject_profile(normalized_text, normalized_category)
+
+            is_human_context = normalized_category == "sos_accident" or any(
+                token in normalized_text for token in ["blessure", "plaie", "coupure", "brulure", "brûlure", "sang", "main", "bras", "jambe", "pied", "doigt"]
+            )
+            is_animal_context = not is_human_context and (normalized_category == "elevage" or any(
+                token in normalized_text for token in ["animal", "betail", "vache", "mouton", "chevre", "volaille", "peau"]
+            ))
+            is_plant_context = not is_human_context and not is_animal_context and (
+                normalized_category in {"agriculture", ""}
+                or any(token in normalized_text for token in ["feuille", "plante", "culture", "mais", "tomate", "manioc", "sorgho", "tache"])
+                or features["green_ratio"] > 0.12
+            )
+
+            if is_human_context:
+                return self._analyze_human_condition(
+                    normalized_text,
+                    features,
+                    observations,
+                    subject_profile,
+                )
+
+            if is_animal_context:
+                return self._analyze_animal_condition(
+                    normalized_text,
+                    features,
+                    observations,
+                    subject_profile,
+                )
+
+            if is_plant_context:
+                return self._analyze_plant_condition(
+                    normalized_text,
+                    features,
+                    observations,
+                    subject_profile,
+                )
+
+            return self._base_result(
+                disease="Indéterminé",
+                confidence=0.34,
+                symptoms=["Informations visuelles insuffisantes pour identifier précisément la maladie"],
+                treatment="Un expert peut confirmer le diagnostic si vous ajoutez une photo plus proche et une description plus détaillée.",
+                prevention="Prendre plusieurs photos: vue générale, gros plan des zones atteintes et face inférieure des feuilles.",
+                urgency="medium",
+                analysis="Une photo a bien été analysée, mais les indices visuels ne permettent pas encore de conclure avec un niveau de confiance suffisant.",
+                recommendations="Ajoutez le nom de la culture ou de l'animal, l'ancienneté du problème et une photo plus nette pour améliorer la détection.",
+                requires_expert=True,
+                features=features,
+                observations=observations,
+                subject_profile=subject_profile,
+            )
         except Exception as e:
             return {
                 "disease_detected": "Erreur d'analyse",
@@ -328,8 +1322,138 @@ class LocalComputerVision:
                 "urgency": "low",
                 "analysis": f"Erreur technique lors de l'analyse: {str(e)}",
                 "recommendations": "Veuillez réessayer ou décrire le problème par texte.",
-                "requires_expert": True
+                "requires_expert": True,
+                "analysis_mode": "hybrid_local_image_text",
             }
+
+    def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
+        valid_images = [image for image in images_data if image][:3]
+        if not valid_images:
+            raise ValueError("Aucune photo exploitable fournie")
+
+        results = [
+            self.analyze_image_simple(image, text_description, category)
+            for image in valid_images
+        ]
+
+        ranked = sorted(
+            enumerate(results, start=1),
+            key=lambda item: (
+                item[1].get("confidence", 0.0),
+                0 if item[1].get("requires_expert") else 1,
+                len(item[1].get("visual_observations") or []),
+            ),
+            reverse=True,
+        )
+        best_view_index, best_result = ranked[0]
+        aggregated = dict(best_result)
+
+        same_disease_count = sum(
+            1
+            for result in results
+            if result.get("disease_detected") == best_result.get("disease_detected")
+        )
+        if same_disease_count >= 2:
+            aggregated["confidence"] = round(
+                min(0.95, aggregated.get("confidence", 0.0) + 0.05),
+                2,
+            )
+
+        aggregated["photo_count"] = len(valid_images)
+        aggregated["best_view_index"] = best_view_index
+        aggregated["analyzed_views"] = [
+            {
+                "view_index": index,
+                "disease_detected": result.get("disease_detected"),
+                "confidence": result.get("confidence"),
+                "analysis": result.get("analysis"),
+            }
+            for index, result in enumerate(results, start=1)
+        ]
+        if aggregated.get("photo_count", 1) > 1:
+            aggregated["analysis"] = (
+                f"{aggregated.get('analysis', '')} Analyse consolidée sur {aggregated['photo_count']} vues; "
+                f"la vue {best_view_index} apporte les indices les plus nets."
+            ).strip()
+
+        return aggregated
+
+
+def _collect_photo_payloads(primary_photo: Optional[str], photo_list: Optional[List[str]]) -> List[str]:
+    payloads: List[str] = []
+    for payload in ([primary_photo] if primary_photo else []) + (photo_list or []):
+        if not payload:
+            continue
+        if payload not in payloads:
+            payloads.append(payload)
+    return payloads[:3]
+
+
+def _decode_photo_payload(photo_string: str) -> bytes:
+    if "," in photo_string:
+        photo_string = photo_string.split(",", 1)[1]
+    return base64.b64decode(photo_string)
+
+
+def _load_json_list(raw: Optional[str]) -> List[Any]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _build_upload_url(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    return f"http://localhost:8000/{path}"
+
+
+def _store_photo_payloads(owner_id: int, photo_data_list: List[bytes], prefix: str = "photo") -> List[str]:
+    stored_paths: List[str] = []
+    timestamp = int(datetime.utcnow().timestamp())
+    for index, photo_data in enumerate(photo_data_list, start=1):
+        filename = f"{owner_id}_{timestamp}_{prefix}_{index}.jpg"
+        path = f"uploads/{filename}"
+        with open(path, "wb") as f:
+            f.write(photo_data)
+        stored_paths.append(path)
+    return stored_paths
+
+
+def _serialize_photo_history_record(record: PhotoAnalysisHistoryDB) -> Dict[str, Any]:
+    photo_paths = _load_json_list(record.photo_paths_json)
+    photo_labels = _load_json_list(record.photo_labels_json)
+    photos = [
+        {
+            "url": _build_upload_url(path),
+            "label": photo_labels[index] if index < len(photo_labels) else f"Vue {index + 1}",
+        }
+        for index, path in enumerate(photo_paths)
+        if path
+    ]
+
+    analysis: Dict[str, Any] = {}
+    if record.analysis_json:
+        try:
+            parsed = json.loads(record.analysis_json)
+            if isinstance(parsed, dict):
+                analysis = parsed
+        except Exception:
+            analysis = {}
+
+    return {
+        "id": record.client_record_id or str(record.id),
+        "server_id": record.id,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "category": record.category or "agriculture",
+        "prompt": record.prompt or "",
+        "analysis": analysis,
+        "photos": photos,
+        "source_ticket_id": record.source_ticket_id,
+    }
 
 cv_engine = LocalComputerVision()
 
@@ -352,6 +1476,7 @@ class AITriageEngine:
                           "manioc", "riz", "feuille", "insecte", "parasite", "engrais"],
             # Catégorie élevage : animaux, bétail, poules…
             "elevage": ["bétail", "vache", "boeuf", "chèvre", "mouton", "poules", "volaille",
+                        "lapin", "lapereau", "clapier",
                         "agneau", "veau", "animal", "troupeau", "abri", "vermifuge", "parasites"],
             # Catégorie SOS Accident / premiers soins : on garde le domaine health pour le RAG
             "sos_accident": ["blessure", "coupure", "accident", "saigne", "sang", "brûlure",
@@ -389,6 +1514,78 @@ class AITriageEngine:
         }
 
 ai_engine = AITriageEngine()
+
+FOCUS_SUBJECTS: Dict[str, List[Dict[str, Any]]] = {
+    "agriculture": [
+        {"label": "Maïs", "aliases": ["maïs", "mais"]},
+        {"label": "Tomate", "aliases": ["tomate", "tomates"]},
+        {"label": "Manioc", "aliases": ["manioc", "bouture de manioc"]},
+        {"label": "Sorgho", "aliases": ["sorgho", "sorghos"]},
+        {"label": "Oignon", "aliases": ["oignon", "oignons"]},
+        {"label": "Arachide", "aliases": ["arachide", "arachides", "cacahuète", "cacahuete"]},
+        {"label": "Riz", "aliases": ["riz", "rizière", "riziere"]},
+        {"label": "Mil", "aliases": ["mil"]},
+        {"label": "Coton", "aliases": ["coton"]},
+    ],
+    "elevage": [
+        {"label": "Lapin", "aliases": ["lapin", "lapins", "lapereau", "lapereaux", "clapier"]},
+        {"label": "Volaille", "aliases": ["volaille", "poule", "poules", "poulet", "poulets", "coq", "canard"]},
+        {"label": "Vache", "aliases": ["vache", "vaches", "boeuf", "boeufs", "bovin", "bovins", "veau", "veaux"]},
+        {"label": "Chèvre", "aliases": ["chèvre", "chevre", "chèvres", "chevres"]},
+        {"label": "Mouton", "aliases": ["mouton", "moutons", "brebis", "agneau", "agneaux"]},
+        {"label": "Porc", "aliases": ["porc", "porcs", "cochon", "cochons"]},
+    ],
+    "sos_accident": [
+        {"label": "Main", "aliases": ["main", "mains", "doigt", "doigts", "paume"]},
+        {"label": "Bras", "aliases": ["bras", "coude"]},
+        {"label": "Jambe", "aliases": ["jambe", "jambes", "genou", "cuisse"]},
+        {"label": "Pied", "aliases": ["pied", "pieds", "orteil", "orteils"]},
+        {"label": "Œil", "aliases": ["oeil", "œil", "yeux"]},
+        {"label": "Peau", "aliases": ["peau", "visage", "tête", "tete"]},
+    ],
+    "cybersecurity": [
+        {"label": "Orange Money", "aliases": ["orange money", "orangemoney"]},
+        {"label": "Moov Money", "aliases": ["moov money", "moovmoney"]},
+        {"label": "Mobile Money", "aliases": ["mobile money", "wallet"]},
+        {"label": "WhatsApp", "aliases": ["whatsapp", "whats app"]},
+        {"label": "Facebook", "aliases": ["facebook", "fb"]},
+        {"label": "Téléphone", "aliases": ["telephone", "téléphone", "portable", "smartphone"]},
+        {"label": "Carte SIM", "aliases": ["carte sim", "sim"]},
+    ],
+}
+
+FOCUS_ISSUES: Dict[str, List[Dict[str, Any]]] = {
+    "agriculture": [
+        {"label": "Taches jaunes", "aliases": ["taches jaunes", "tache jaune", "jaunissement", "jaune"]},
+        {"label": "Rouille", "aliases": ["rouille", "pustule orange", "pustules orange"]},
+        {"label": "Mildiou", "aliases": ["mildiou", "pourriture", "feuilles noires"]},
+        {"label": "Mosaïque", "aliases": ["mosaïque", "mosaique", "feuilles déformées", "feuilles deformees"]},
+        {"label": "Bactériose", "aliases": ["bacteriose", "bactériose", "brûlure bactérienne", "brulure bacterienne"]},
+    ],
+    "elevage": [
+        {"label": "Plaie", "aliases": ["plaie", "blessure", "saigne", "coupure"]},
+        {"label": "Boiterie", "aliases": ["boite", "boiterie", "patte", "sabot", "pied"]},
+        {"label": "Fièvre", "aliases": ["fièvre", "fievre", "chaud", "abattu"]},
+        {"label": "Infection cutanée", "aliases": ["croûte", "croute", "peau", "gale", "plaque"]},
+        {"label": "Atteinte oculaire", "aliases": ["oeil", "œil", "écoulement", "ecoulement", "narine"]},
+        {"label": "Diarrhée", "aliases": ["diarrhee", "diarrhée", "selles liquides"]},
+    ],
+    "sos_accident": [
+        {"label": "Plaie ouverte", "aliases": ["plaie", "coupure", "saigne", "saignement"]},
+        {"label": "Brûlure", "aliases": ["brûlure", "brulure", "huile chaude", "feu"]},
+        {"label": "Fracture", "aliases": ["fracture", "cassé", "casse", "déboîté", "deboite"]},
+        {"label": "Infection", "aliases": ["pus", "infecté", "infecte", "gonflé", "gonfle"]},
+        {"label": "Contusion", "aliases": ["bleu", "choc", "contusion", "hématome", "hematome"]},
+    ],
+    "cybersecurity": [
+        {"label": "Arnaque", "aliases": ["arnaque", "escroquerie", "fraude"]},
+        {"label": "Pirâtage", "aliases": ["piraté", "pirate", "hacking", "compte volé", "compte vole"]},
+        {"label": "Code OTP", "aliases": ["otp", "code secret", "code de validation"]},
+        {"label": "SIM swap", "aliases": ["sim swap", "carte sim", "reseau perdu", "réseau perdu"]},
+        {"label": "Virus", "aliases": ["virus", "lien suspect", "application suspecte"]},
+    ],
+}
+
 
 # ==========================================
 # APPLICATION FASTAPI
@@ -428,6 +1625,96 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed: str) -> bool:
     return hash_password(password) == hashed
+
+
+def create_access_token(user: User) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user.id),
+        "phone_number": user.phone_number,
+        "type": "user",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _extract_bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    return token
+
+
+def get_current_user(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    token = _extract_bearer_token(authorization)
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Token expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    if payload.get("type") != "user":
+        raise HTTPException(status_code=401, detail="Invalid token scope")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token subject")
+
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
+
+
+def get_current_expert(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> Expert:
+    token = _extract_bearer_token(authorization)
+
+    if not token.startswith("token_"):
+        raise HTTPException(status_code=401, detail="Invalid expert token")
+
+    parts = token.split("_", 2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        raise HTTPException(status_code=401, detail="Invalid expert token")
+
+    expert = db.query(Expert).filter(Expert.id == int(parts[1])).first()
+    if not expert:
+        raise HTTPException(status_code=401, detail="Expert not found")
+
+    return expert
+
+
+def serialize_user(user: User) -> Dict[str, Any]:
+    return {
+        "id": user.id,
+        "phone_number": user.phone_number,
+        "name": user.name,
+        "location": user.location,
+        "is_premium": user.is_premium,
+        "messages_used": user.messages_used,
+        "messages_limit": user.messages_limit if user.is_premium else 1,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+def _validate_user_credentials(phone_number: str, password: str) -> None:
+    if not (phone_number or "").strip():
+        raise HTTPException(status_code=422, detail="Phone number is required")
+    if len((password or "").strip()) < 4:
+        raise HTTPException(status_code=422, detail="Password must contain at least 4 characters")
 
 
 # ==========================================
@@ -579,21 +1866,141 @@ def _tokenize(text: str) -> List[str]:
     return tokens
 
 
-def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+def _normalize_free_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", (text or "").lower())
+    normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return " ".join(normalized.split())
+
+
+def _build_focus_terms(label: Optional[str], aliases: Optional[List[str]] = None) -> List[str]:
+    values = [label or "", *(aliases or [])]
+    terms: List[str] = []
+    for value in values:
+        normalized_value = _normalize_free_text(value)
+        if normalized_value and normalized_value not in terms:
+            terms.append(normalized_value)
+        for token in _tokenize(value):
+            if token not in terms:
+                terms.append(token)
+    return terms
+
+
+def _find_best_focus_match(category: str, text: str, focus_map: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    candidates = focus_map.get(category, [])
+    if not candidates:
+        return None
+
+    normalized_text = _normalize_free_text(text)
+    best: Optional[Dict[str, Any]] = None
+    best_score = 0
+    best_alias_length = 0
+
+    for candidate in candidates:
+        aliases = candidate.get("aliases", [])
+        matched_aliases = []
+        for alias in aliases:
+            normalized_alias = _normalize_free_text(alias)
+            if normalized_alias and normalized_alias in normalized_text:
+                matched_aliases.append(alias)
+
+        score = len(matched_aliases)
+        alias_length = max((len(_normalize_free_text(alias)) for alias in matched_aliases), default=0)
+        if score > best_score or (score == best_score and alias_length > best_alias_length):
+            best = candidate
+            best_score = score
+            best_alias_length = alias_length
+
+    if not best:
+        return None
+
+    return {
+        "label": best["label"],
+        "aliases": best.get("aliases", []),
+        "terms": _build_focus_terms(best["label"], best.get("aliases", [])),
+    }
+
+
+def extract_focus_context(
+    category: str,
+    text: str,
+    photo_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    subject = _find_best_focus_match(category, text, FOCUS_SUBJECTS)
+    issue = _find_best_focus_match(category, text, FOCUS_ISSUES)
+
+    if photo_analysis:
+        detected_subject = photo_analysis.get("detected_subject")
+        if detected_subject:
+            subject = {
+                "label": str(detected_subject),
+                "aliases": [str(detected_subject)],
+                "terms": _build_focus_terms(str(detected_subject)),
+            }
+
+        disease_detected = photo_analysis.get("disease_detected")
+        if disease_detected:
+            issue = {
+                "label": str(disease_detected),
+                "aliases": [str(disease_detected)],
+                "terms": _build_focus_terms(str(disease_detected)),
+            }
+
+    return {
+        "subject": subject,
+        "issue": issue,
+    }
+
+
+def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str, Any]] = None) -> str:
+    focus_subject = (focus_context or {}).get("subject", {}).get("label")
+    focus_issue = (focus_context or {}).get("issue", {}).get("label")
+
+    focus_parts = [label for label in [focus_subject, focus_issue] if label]
+    if focus_parts:
+        target = " / ".join(focus_parts)
+        return (
+            f"Je n'ai pas trouvé de fiche assez précise pour ce cas ciblé : {target}. "
+            "Je préfère ne pas élargir vers un autre animal, une autre culture ou un autre problème. "
+            "Ajoute si possible un symptôme clé, une photo plus nette, ou demande une vérification par un expert du domaine."
+        )
+
+    domain_label = {
+        "agriculture": "agriculture",
+        "elevage": "élevage",
+        "health": "premiers secours",
+        "cybersecurity": "cybersécurité",
+    }.get(domain, domain)
+    return (
+        f"Je n'ai pas trouvé de fiche suffisamment précise dans le domaine {domain_label}. "
+        "Je préfère ne pas généraliser. Ajoute des détails concrets sur l'objet du problème pour une réponse plus ciblée."
+    )
+
+
+def retrieve_knowledge(
+    db: Session,
+    domain: str,
+    query: str,
+    limit: int = 5,
+    expand_scope: bool = True,
+    focus_subject: Optional[Dict[str, Any]] = None,
+    focus_issue: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """Récupération améliorée basée sur le recouvrement de mots-clés pondéré.
 
     - Les correspondances dans le titre et les tags comptent plus que celles
       présentes uniquement dans la réponse longue.
-    - Pour le domaine "agriculture", on inclut aussi les fiches d'élevage,
-      car dans la pratique les questions sur les animaux sont souvent
-      formulées comme des problèmes agricoles.
-    - Si aucune fiche n'est trouvée dans le domaine demandé, on fait un
-      second passage sur toutes les fiches pour éviter de rater une
-      correspondance évidente (tout en restant strictement dans la base).
+        - La recherche est limitée au domaine demandé. Aucun mélange automatique
+            entre agriculture et élevage n'est autorisé.
+        - Si ``expand_scope`` est activé et qu'aucune fiche n'est trouvée dans le
+            domaine demandé, on fait un second passage sur toutes les fiches pour
+            éviter de rater une correspondance évidente.
     """
     query_tokens = set(_tokenize(query))
     if not query_tokens:
         return []
+
+    focus_subject_terms = focus_subject.get("terms", []) if focus_subject else []
+    focus_issue_terms = focus_issue.get("terms", []) if focus_issue else []
 
     def score_items(items: List[KnowledgeItem]) -> List[Dict[str, Any]]:
         scored_local: List[Dict[str, Any]] = []
@@ -624,35 +2031,44 @@ def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5) -> 
                 + overlap_answer * 1.0
             )
 
+            combined_text = _normalize_free_text(
+                f"{it.title}\n{it.question or ''}\n{it.answer}\n{' '.join(tags_list)}"
+            )
+            subject_match = any(term in combined_text for term in focus_subject_terms) if focus_subject_terms else False
+            issue_match = any(term in combined_text for term in focus_issue_terms) if focus_issue_terms else False
+
+            if focus_subject_terms and subject_match:
+                score += 8.0
+            if focus_issue_terms and issue_match:
+                score += 4.5
+
             if score <= 0:
                 continue
 
-            scored_local.append({"item": it, "score": score})
+            scored_local.append({
+                "item": it,
+                "score": score,
+                "subject_match": subject_match,
+                "issue_match": issue_match,
+            })
 
         return scored_local
 
-    # 1) Fiches dans le domaine demandé (avec fusion agriculture + élevage)
-    primary_query = db.query(KnowledgeItem)
-    if domain == "agriculture":
-        primary_query = primary_query.filter(
-            KnowledgeItem.domain.in_(["agriculture", "elevage"])
-        )
-    else:
-        primary_query = primary_query.filter(KnowledgeItem.domain == domain)
+    # 1) Fiches strictement dans le domaine demandé
+    primary_query = db.query(KnowledgeItem).filter(KnowledgeItem.domain == domain)
 
     primary_items = primary_query.all()
     scored = score_items(primary_items)
 
-    # 2) Fallback : si rien trouvé, on regarde toutes les fiches
-    if not scored:
+    # 2) Fallback global optionnel : si rien trouvé, on regarde toutes les fiches
+    if not scored and expand_scope:
         all_items = db.query(KnowledgeItem).all()
         scored = score_items(all_items)
 
-    # 3) Dernier recours : si toujours rien, utiliser une recherche par sous-chaîne
-    # sur le texte complet des fiches (normalisé). Cela permet de gérer les
-    # entrées très courtes comme "jaune".
+    # 3) Dernier recours : recherche par sous-chaîne, soit dans le domaine
+    # strict, soit sur toute la base si l'élargissement est autorisé.
     if not scored:
-        all_items = db.query(KnowledgeItem).all()
+        fallback_items = primary_items if not expand_scope else db.query(KnowledgeItem).all()
 
         def normalize_text(text: str) -> str:
             if not text:
@@ -661,7 +2077,7 @@ def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5) -> 
             return " ".join(tokens)
 
         norm_query_parts = list(query_tokens)
-        for it in all_items:
+        for it in fallback_items:
             big_text = f"{it.title}\n{it.question or ''}\n{it.answer}\n"
             if it.tags:
                 try:
@@ -672,6 +2088,12 @@ def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5) -> 
             norm_text = normalize_text(big_text)
             if any(part in norm_text for part in norm_query_parts):
                 scored.append({"item": it, "score": 1.0})
+
+    if focus_subject_terms and any(entry.get("subject_match") for entry in scored):
+        scored = [entry for entry in scored if entry.get("subject_match")]
+
+    if focus_issue_terms and any(entry.get("issue_match") for entry in scored):
+        scored = [entry for entry in scored if entry.get("issue_match")]
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     top_items = [s["item"] for s in scored[:limit]]
@@ -700,12 +2122,62 @@ def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5) -> 
     return results
 
 
+def resolve_knowledge_answer(
+    db: Session,
+    domain: str,
+    question: str,
+    language: str = "fr",
+    conversation_context: Optional[List[Dict[str, str]]] = None,
+    limit: int = 5,
+    focus_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Répondre via RAG strict sans jamais sortir du domaine autorisé.
+
+    La recherche reste limitée au domaine attendu, sans fusion automatique
+    entre agriculture et élevage.
+    """
+    rag_items = retrieve_knowledge(
+        db,
+        domain,
+        question,
+        limit=limit,
+        expand_scope=False,
+        focus_subject=(focus_context or {}).get("subject"),
+        focus_issue=(focus_context or {}).get("issue"),
+    )
+    if rag_items:
+        llm_answer = generate_llm_answer(
+            question=question,
+            language=language,
+            domain=domain,
+            knowledge_items=rag_items,
+            conversation_context=conversation_context,
+            focus_context=focus_context,
+        )
+        return {
+            "rag_items": rag_items,
+            "llm_answer": llm_answer,
+            "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
+            "knowledge_mode": "rag_strict",
+            "knowledge_fallback_used": False,
+        }
+
+    return {
+        "rag_items": [],
+        "llm_answer": None,
+        "rag_fallback_answer": _build_precise_no_match_answer(domain, focus_context),
+        "knowledge_mode": "no_match",
+        "knowledge_fallback_used": False,
+    }
+
+
 def generate_llm_answer(
     question: str,
     language: str,
     domain: str,
     knowledge_items: List[Dict[str, Any]],
     conversation_context: Optional[List[Dict[str, str]]] = None,
+    focus_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Utiliser ChatGPT pour reformuler et raisonner à partir de la base RAG.
 
@@ -716,6 +2188,9 @@ def generate_llm_answer(
         # Pas de base de connaissance pertinente, on ne force pas le modèle
         return None
 
+    focus_subject_label = (focus_context or {}).get("subject", {}).get("label")
+    focus_issue_label = (focus_context or {}).get("issue", {}).get("label")
+
     # Petit fallback local : si le LLM n'est pas disponible, on formate au
     # minimum une réponse structurée à partir de la meilleure fiche.
     def build_structured_from_rag() -> str:
@@ -725,9 +2200,13 @@ def generate_llm_answer(
         source = best.get("source") or "fiches locales"
 
         parts = []
+        focus_hint = ""
+        if focus_subject_label or focus_issue_label:
+            focus_parts = [label for label in [focus_subject_label, focus_issue_label] if label]
+            focus_hint = f" de façon précise sur {' / '.join(focus_parts)}"
         parts.append(
             f"1) Ce que je comprends de ton problème :\n"
-            f"Tu signales un souci lié à : {titre}. Je vais utiliser les conseils déjà validés localement."
+            f"Tu signales un souci lié à : {titre}. Je vais utiliser les conseils déjà validés localement{focus_hint}."
         )
         parts.append(
             "2) Conseils pratiques à suivre :\n" + reponse
@@ -770,6 +2249,16 @@ def generate_llm_answer(
         "- Ne propose jamais de traitement dangereux ou interdit.\n"
     )
 
+    focus_instruction = ""
+    if focus_subject_label or focus_issue_label:
+        focus_parts = [label for label in [focus_subject_label, focus_issue_label] if label]
+        focus_instruction = (
+            "\nContrainte de précision : reste strictement centré sur cet objet précis"
+            f" : {' / '.join(focus_parts)}. "
+            "Ne dérive pas vers des conseils généraux d'une autre espèce, d'une autre culture, d'une autre blessure ou d'un autre service. "
+            "Si les fiches ne couvrent pas précisément cet objet, dis-le clairement au lieu de généraliser.\n"
+        )
+
     conversation_text = ""
     if conversation_context:
         serialized_turns = []
@@ -786,6 +2275,7 @@ def generate_llm_answer(
         f"Question actuelle de l'utilisateur : {question}\n"
         f"{conversation_text}\n"
         f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
+        f"{focus_instruction}"
         "Tâche : en utilisant UNIQUEMENT ces fiches : \n"
         "- Donne une réponse courte (10 à 15 phrases max). \n"
         "- Structure ta réponse ainsi : \n"
@@ -834,6 +2324,159 @@ async def health_check():
         "ia_status": "active"
     }
 
+
+@app.post("/api/register")
+async def register_user(data: UserRegister, db: Session = Depends(get_db)):
+    _validate_user_credentials(data.phone_number, data.password)
+
+    existing = db.query(User).filter(User.phone_number == data.phone_number.strip()).first()
+    if existing and existing.password_hash:
+        raise HTTPException(status_code=409, detail="User already exists")
+
+    if existing:
+        user = existing
+        user.name = data.name.strip()
+        user.location = (data.location or "").strip() or user.location
+        user.password_hash = hash_password(data.password)
+    else:
+        user = User(
+            phone_number=data.phone_number.strip(),
+            password_hash=hash_password(data.password),
+            name=data.name.strip(),
+            location=(data.location or "").strip() or None,
+            is_premium=False,
+            messages_used=0,
+            messages_limit=1,
+        )
+        db.add(user)
+
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "token": create_access_token(user),
+        "user": serialize_user(user),
+    }
+
+
+@app.post("/api/login")
+async def login_user(data: UserLogin, db: Session = Depends(get_db)):
+    _validate_user_credentials(data.phone_number, data.password)
+
+    user = db.query(User).filter(User.phone_number == data.phone_number.strip()).first()
+    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {
+        "token": create_access_token(user),
+        "user": serialize_user(user),
+    }
+
+
+@app.get("/api/user")
+async def get_authenticated_user(current_user: User = Depends(get_current_user)):
+    return serialize_user(current_user)
+
+
+@app.get("/api/dashboard")
+async def get_user_dashboard(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    recent_questions = await get_user_tickets(current_user.phone_number, db)
+    recent_questions = recent_questions[:5]
+
+    preferred_domain = next(
+        (item.get("category") for item in recent_questions if item.get("category")),
+        "agriculture",
+    )
+    ai_suggestions = retrieve_knowledge(db, preferred_domain, preferred_domain, limit=3)
+
+    community_messages = (
+        db.query(ChatMessageDB)
+        .filter(ChatMessageDB.is_hidden == False)
+        .order_by(ChatMessageDB.created_at.desc())
+        .limit(6)
+        .all()
+    )
+
+    return {
+        "user": serialize_user(current_user),
+        "recent_questions": recent_questions,
+        "ai_suggestions": [
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "answer": item.get("answer"),
+                "domain": item.get("domain"),
+                "tags": item.get("tags") or [],
+            }
+            for item in ai_suggestions
+        ],
+        "community_activity": [
+            {
+                "id": message.id,
+                "sender": message.sender,
+                "text": message.text,
+                "is_bot": message.is_bot,
+                "created_at": message.created_at.isoformat() if message.created_at else None,
+            }
+            for message in community_messages
+        ],
+    }
+
+
+@app.get("/api/questions")
+async def list_mobile_questions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return await get_user_tickets(current_user.phone_number, db)
+
+
+@app.post("/api/questions")
+async def create_mobile_question(
+    data: MobileQuestionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message_data = MessageCreate(
+        content=data.content,
+        phone_number=current_user.phone_number,
+        channel="app",
+        category=data.category,
+        photo_base64=data.photo_base64,
+        photo_base64_list=data.photo_base64_list,
+        conversation_context=data.conversation_context,
+    )
+    return await incoming_sms(message_data, db)
+
+
+@app.get("/api/questions/{question_id}")
+async def get_mobile_question_detail(
+    question_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ticket = db.query(Ticket).filter(Ticket.id == question_id, Ticket.user_id == current_user.id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    ticket_detail = await get_ticket_detail(question_id, db)
+    ai_summary_data = await get_ticket_ai_summary(question_id, db)
+
+    return {
+        "question": ticket_detail["ticket"],
+        "user": ticket_detail["user"],
+        "messages": ticket_detail["messages"],
+        "ai_summary": ai_summary_data.get("ai_summary"),
+        "rag_items": ai_summary_data.get("rag_items", []),
+        "latest_expert_answer": next(
+            (message["content"] for message in reversed(ticket_detail["messages"]) if message.get("sender_type") == "expert"),
+            None,
+        ),
+    }
+
 @app.post("/api/auth/login")
 async def login(data: ExpertLogin, db: Session = Depends(get_db)):
     expert = db.query(Expert).filter(Expert.email == data.email).first()
@@ -872,6 +2515,8 @@ async def get_tickets(
         photo_url = None
         if ticket.photo_path:
             photo_url = f"http://localhost:8000/{ticket.photo_path}"
+        photo_paths = _load_json_list(ticket.photo_paths_json)
+        photo_urls = [_build_upload_url(path) for path in photo_paths if path]
         
         result.append({
             "id": ticket.id,
@@ -884,6 +2529,7 @@ async def get_tickets(
             "ai_confidence": ticket.ai_confidence_score,
             "has_photo": ticket.photo_path is not None,
             "photo_url": photo_url,
+            "photo_urls": photo_urls,
             "photo_path": ticket.photo_path,
             "has_photo_analysis": ticket.ai_photo_analysis is not None
         })
@@ -941,6 +2587,8 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
     photo_url = None
     if ticket.photo_path:
         photo_url = f"http://localhost:8000/{ticket.photo_path}"
+    photo_paths = _load_json_list(ticket.photo_paths_json)
+    photo_urls = [_build_upload_url(path) for path in photo_paths if path]
     
     # Extraire les mots-clés
     keywords = []
@@ -959,6 +2607,7 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
             "keywords": keywords,
             "confidence": ticket.ai_confidence_score or 0.5,
             "photo_url": photo_url,
+            "photo_urls": photo_urls,
             "photo_path": ticket.photo_path,
             "photo_filename": ticket.photo_path,  # Alias pour le frontend expert
             "photo_analysis": photo_analysis,
@@ -1011,27 +2660,18 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     # 3. Analyse photo si présente (RESTAURÉ)
     photo_analysis = None
     photo_path = None
+    photo_paths: List[str] = []
     
-    if data.photo_base64:
+    photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
+    if photo_payloads:
         try:
-            # Décoder base64
-            photo_string = data.photo_base64
-            if ',' in photo_string:
-                photo_string = photo_string.split(',')[1]
-            
-            photo_data = base64.b64decode(photo_string)
-            
-            # Analyser avec IA locale (RESTAURÉ)
-            photo_analysis_result = cv_engine.analyze_image_simple(photo_data, data.content)
+            photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
+            photo_analysis_result = cv_engine.analyze_images(photo_data_list, data.content, data.category)
             photo_analysis = json.dumps(photo_analysis_result, ensure_ascii=False)
             
-            # Sauvegarder photo
-            timestamp = int(datetime.utcnow().timestamp())
-            filename = f"{user.id}_{timestamp}.jpg"
-            photo_path = f"uploads/{filename}"
-            
-            with open(photo_path, "wb") as f:
-                f.write(photo_data)
+            photo_paths = _store_photo_payloads(user.id, photo_data_list, prefix="ticket")
+            best_index = max(0, photo_analysis_result.get("best_view_index", 1) - 1)
+            photo_path = photo_paths[best_index] if best_index < len(photo_paths) else photo_paths[0]
             
             # Ajuster urgence si maladie grave détectée
             if photo_analysis_result.get("urgency") == "high":
@@ -1041,28 +2681,42 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
             print(f"Erreur analyse photo: {e}")
             photo_analysis = json.dumps({"error": str(e), "requires_expert": True})
     
-    # 3.bis Récupération de connaissances + appel LLM (RAG)
-    # On reste entièrement déterministe côté sélection de fiches, et le LLM ne fait que reformuler.
-    rag_items = retrieve_knowledge(db, kb_domain, data.content)
-    llm_answer = generate_llm_answer(
+    # 3.bis RAG strict d'abord, base élargie seulement si le RAG ne répond pas.
+    photo_analysis_payload = None
+    if photo_analysis:
+        try:
+            photo_analysis_payload = json.loads(photo_analysis)
+        except Exception:
+            photo_analysis_payload = None
+
+    focus_context = extract_focus_context(
+        chosen_category,
+        data.content,
+        photo_analysis_payload,
+    )
+
+    knowledge_result = resolve_knowledge_answer(
+        db=db,
+        domain=kb_domain,
         question=data.content,
         language="fr",
-        domain=kb_domain,
-        knowledge_items=rag_items,
+        focus_context=focus_context,
     )
+    rag_items = knowledge_result["rag_items"]
+    llm_answer = knowledge_result["llm_answer"]
 
     # LOG DEBUG : affichage des fiches RAG et de la réponse LLM (si disponible)
     try:
-      print("[RAG] Domaine:", kb_domain)
-      print(f"[RAG] {len(rag_items)} fiche(s) sélectionnée(s)")
-      for idx, item in enumerate(rag_items, start=1):
-          print(f"[RAG] FICHE {idx}: {item.get('title')} | tags={item.get('tags')}")
-      if llm_answer:
-          print("[LLM] Réponse générée (début):", llm_answer[:300].replace("\n", " "))
-      else:
-          print("[LLM] Aucune réponse générée (pas de clé ou pas de fiches pertinentes)")
+        print("[RAG] Domaine:", kb_domain)
+        print(f"[RAG] {len(rag_items)} fiche(s) sélectionnée(s) | mode={knowledge_result['knowledge_mode']}")
+        for idx, item in enumerate(rag_items, start=1):
+            print(f"[RAG] FICHE {idx}: {item.get('title')} | tags={item.get('tags')}")
+        if llm_answer:
+            print("[LLM] Réponse générée (début):", llm_answer[:300].replace("\n", " "))
+        else:
+            print("[LLM] Aucune réponse générée (pas de clé ou pas de fiches pertinentes)")
     except Exception as e_log:
-      print(f"[DEBUG] Erreur lors du log RAG/LLM: {e_log}")
+        print(f"[DEBUG] Erreur lors du log RAG/LLM: {e_log}")
 
     # 4. Créer ticket avec analyse IA
     ticket = Ticket(
@@ -1073,6 +2727,7 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
         ai_extracted_keywords=json.dumps(ai_result["keywords"], ensure_ascii=False),
         ai_photo_analysis=photo_analysis,
         photo_path=photo_path,
+        photo_paths_json=json.dumps(photo_paths, ensure_ascii=False) if photo_paths else None,
         status="open"
     )
     db.add(ticket)
@@ -1094,19 +2749,23 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     response = {
         "status": "success",
         "ticket_id": ticket.id,
-        "ai_analysis": ai_result
+        "ai_analysis": ai_result,
+        "knowledge_mode": knowledge_result["knowledge_mode"],
+        "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
     }
     
     # Ajouter l'analyse photo si disponible
     if photo_analysis:
         try:
-            response["photo_analysis"] = json.loads(photo_analysis)
+            response["photo_analysis"] = photo_analysis_payload or json.loads(photo_analysis)
         except:
             response["photo_analysis"] = {"analysis": "Analyse photo en cours"}
     
     # Ajouter l'URL de la photo
     if photo_path:
         response["photo_url"] = f"http://localhost:8000/{photo_path}"
+    if photo_paths:
+        response["photo_urls"] = [_build_upload_url(path) for path in photo_paths]
 
     # Toujours retourner les fiches RAG utilisées (pour debug et fallback côté frontend)
     if rag_items:
@@ -1115,12 +2774,11 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     # Ajouter la réponse principale générée par le LLM si disponible
     if llm_answer:
         response["llm_answer"] = llm_answer
-    elif rag_items:
+    elif knowledge_result["rag_fallback_answer"]:
         # Fallback déterministe : utiliser la réponse de la meilleure fiche
         # pour que l'utilisateur ait au moins la réponse validée locale,
         # même si la clé OpenAI n'est pas configurée.
-        best = rag_items[0]
-        response["rag_fallback_answer"] = best.get("answer")
+        response["rag_fallback_answer"] = knowledge_result["rag_fallback_answer"]
     
     return response
 
@@ -1153,13 +2811,11 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
 
     # 3. Analyse photo si présente (sans sauvegarder de fichier)
     photo_analysis = None
-    if data.photo_base64:
+    photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
+    if photo_payloads:
         try:
-            photo_string = data.photo_base64
-            if "," in photo_string:
-                photo_string = photo_string.split(",")[1]
-            photo_data = base64.b64decode(photo_string)
-            photo_analysis_result = cv_engine.analyze_image_simple(photo_data, data.content)
+            photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
+            photo_analysis_result = cv_engine.analyze_images(photo_data_list, data.content, data.category)
             photo_analysis = photo_analysis_result
 
             if photo_analysis_result.get("urgency") == "high":
@@ -1184,21 +2840,31 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     contextual_query_parts.append(data.content)
     contextual_query = "\n".join(part for part in contextual_query_parts if part)
 
-    # 5. RAG + LLM
-    rag_items = retrieve_knowledge(db, kb_domain, contextual_query)
-    llm_answer = generate_llm_answer(
-        question=data.content,
-        language="fr",
-        domain=kb_domain,
-        knowledge_items=rag_items,
-        conversation_context=conversation_context,
+    # 5. RAG strict d'abord, puis base élargie seulement si besoin
+    focus_context = extract_focus_context(
+        chosen_category,
+        contextual_query,
+        photo_analysis,
     )
+
+    knowledge_result = resolve_knowledge_answer(
+        db=db,
+        domain=kb_domain,
+        question=contextual_query,
+        language="fr",
+        conversation_context=conversation_context,
+        focus_context=focus_context,
+    )
+    rag_items = knowledge_result["rag_items"]
+    llm_answer = knowledge_result["llm_answer"]
 
     # 6. Construction de la réponse (sans ticket)
     response: Dict[str, Any] = {
         "status": "success",
         "ai_analysis": ai_result,
         "category": chosen_category,
+        "knowledge_mode": knowledge_result["knowledge_mode"],
+        "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
     }
 
     if photo_analysis is not None:
@@ -1209,6 +2875,8 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
 
     if llm_answer:
         response["llm_answer"] = llm_answer
+    elif knowledge_result["rag_fallback_answer"]:
+        response["rag_fallback_answer"] = knowledge_result["rag_fallback_answer"]
 
     return response
 
@@ -1298,19 +2966,28 @@ async def get_ticket_ai_summary(ticket_id: int, db: Session = Depends(get_db)):
     else:
         kb_domain = "agriculture"
 
-    rag_items = retrieve_knowledge(db, kb_domain, content)
-    llm_answer = generate_llm_answer(
+    focus_context = extract_focus_context(
+        chosen_category,
+        content,
+    )
+
+    knowledge_result = resolve_knowledge_answer(
+        db=db,
+        domain=kb_domain,
         question=content,
         language="fr",
-        domain=kb_domain,
-        knowledge_items=rag_items,
+        focus_context=focus_context,
     )
+    rag_items = knowledge_result["rag_items"]
+    llm_answer = knowledge_result["llm_answer"] or knowledge_result["rag_fallback_answer"]
 
     return {
         "status": "success",
         "ai_summary": llm_answer,
         "category": chosen_category,
         "rag_items": rag_items,
+        "knowledge_mode": knowledge_result["knowledge_mode"],
+        "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
     }
 
 @app.get("/api/user-tickets")
@@ -1333,6 +3010,8 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         photo_url = None
         if ticket.photo_path:
             photo_url = f"http://localhost:8000/{ticket.photo_path}"
+        photo_paths = _load_json_list(ticket.photo_paths_json)
+        photo_urls = [_build_upload_url(path) for path in photo_paths if path]
         
         result.append({
             "id": ticket.id,
@@ -1342,10 +3021,88 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
             "created_at": ticket.created_at,
             "last_message": last_msg.content if last_msg else "Aucun message",
             "has_photo": ticket.photo_path is not None,
-            "photo_url": photo_url
+            "photo_url": photo_url,
+            "photo_urls": photo_urls,
         })
     
     return result
+
+
+@app.get("/api/photo-analyses")
+async def get_photo_analyses(phone: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.phone_number == phone).first()
+    if not user:
+        return []
+
+    records = (
+        db.query(PhotoAnalysisHistoryDB)
+        .filter(PhotoAnalysisHistoryDB.user_id == user.id)
+        .order_by(PhotoAnalysisHistoryDB.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [_serialize_photo_history_record(record) for record in records]
+
+
+@app.post("/api/photo-analyses")
+async def save_photo_analysis_history(
+    data: PhotoAnalysisHistoryIn,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.phone_number == data.phone_number.strip()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    record = None
+    if data.client_record_id:
+        record = (
+            db.query(PhotoAnalysisHistoryDB)
+            .filter(
+                PhotoAnalysisHistoryDB.user_id == user.id,
+                PhotoAnalysisHistoryDB.client_record_id == data.client_record_id,
+            )
+            .first()
+        )
+
+    photo_data_list = [
+        _decode_photo_payload(payload)
+        for payload in data.photo_base64_list[:3]
+        if payload
+    ]
+    stored_paths = (
+        _store_photo_payloads(user.id, photo_data_list, prefix="analysis")
+        if photo_data_list
+        else []
+    )
+
+    if record is None:
+        record = PhotoAnalysisHistoryDB(
+            user_id=user.id,
+            client_record_id=data.client_record_id,
+            category=data.category,
+            prompt=data.prompt,
+            analysis_json=json.dumps(data.analysis, ensure_ascii=False),
+            photo_paths_json=json.dumps(stored_paths, ensure_ascii=False),
+            photo_labels_json=json.dumps(
+                data.photo_labels[: len(stored_paths)],
+                ensure_ascii=False,
+            ),
+        )
+        db.add(record)
+    else:
+        record.category = data.category
+        record.prompt = data.prompt
+        record.analysis_json = json.dumps(data.analysis, ensure_ascii=False)
+        if stored_paths:
+            record.photo_paths_json = json.dumps(stored_paths, ensure_ascii=False)
+            record.photo_labels_json = json.dumps(
+                data.photo_labels[: len(stored_paths)],
+                ensure_ascii=False,
+            )
+
+    db.commit()
+    db.refresh(record)
+    return _serialize_photo_history_record(record)
 
 
 @app.get("/api/knowledge/offline-cache")
@@ -1806,6 +3563,12 @@ class ChatMessageDB(Base):
     sender = Column(String, nullable=False)  # numéro ou nom affiché
     text = Column(Text, nullable=False)
     is_bot = Column(Boolean, default=False)
+    room = Column(String, default="general")
+    sender_role = Column(String, default="member")
+    report_count = Column(Integer, default=0)
+    is_hidden = Column(Boolean, default=False)
+    is_pinned = Column(Boolean, default=False)
+    pinned_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
@@ -1825,6 +3588,47 @@ def _ensure_sos_description_column() -> None:
         print(f"⚠️ Impossible d'ajouter la colonne 'description' à sos_alerts: {e}")
 
 _ensure_sos_description_column()
+
+
+def _ensure_chat_message_columns() -> None:
+    """Migration légère pour enrichir le module communauté."""
+    if not str(engine.url).startswith("sqlite"):
+        return
+
+    try:
+        with engine.connect() as conn:
+            result = conn.exec_driver_sql("PRAGMA table_info(chat_messages)")
+            columns = [row[1] for row in result]
+
+            if "room" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN room TEXT DEFAULT 'general'"
+                )
+            if "sender_role" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN sender_role TEXT DEFAULT 'member'"
+                )
+            if "report_count" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN report_count INTEGER DEFAULT 0"
+                )
+            if "is_hidden" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN is_hidden BOOLEAN DEFAULT 0"
+                )
+            if "is_pinned" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN is_pinned BOOLEAN DEFAULT 0"
+                )
+            if "pinned_at" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN pinned_at DATETIME"
+                )
+    except Exception as e:
+        print(f"⚠️ Impossible d'ajouter les colonnes de communauté: {e}")
+
+
+_ensure_chat_message_columns()
 
 @app.post("/api/sos/alert")
 async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
@@ -1944,28 +3748,165 @@ BOT_REPLIES = [
     "Votre question a bien été notée. Restez connecté !",
 ]
 
+COMMUNITY_ROOM_LABELS = {
+    "general": "Général",
+    "agriculture": "Agriculture",
+    "elevage": "Élevage",
+    "securite": "Sécurité",
+    "marche": "Marché",
+}
+
+COMMUNITY_ROOM_TO_DOMAIN = {
+    "general": "agriculture",
+    "agriculture": "agriculture",
+    "elevage": "elevage",
+    "securite": "cybersecurity",
+    "marche": "agriculture",
+}
+
+COMMUNITY_DUPLICATE_WINDOW_SECONDS = 120
+COMMUNITY_REPORT_HIDE_THRESHOLD = 3
+COMMUNITY_BLOCKED_TERMS = {
+    "arnaque",
+    "escroc",
+    "haine",
+    "insulte",
+}
+
+
+def _normalize_community_room(raw_room: Optional[str]) -> str:
+    normalized = (raw_room or "general").strip().lower()
+    return normalized if normalized in COMMUNITY_ROOM_LABELS else "general"
+
+
+def _serialize_community_message(message: ChatMessageDB) -> Dict[str, Any]:
+    normalized_room = _normalize_community_room(message.room)
+    sender_role = message.sender_role or ("assistant" if message.is_bot else "member")
+    return {
+        "id": message.id,
+        "sender": message.sender,
+        "text": message.text,
+        "is_bot": message.is_bot,
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+        "room": normalized_room,
+        "room_label": COMMUNITY_ROOM_LABELS.get(normalized_room, "Général"),
+        "sender_role": sender_role,
+        "is_expert": sender_role == "expert",
+        "report_count": message.report_count or 0,
+        "is_pinned": bool(message.is_pinned),
+        "pinned_at": message.pinned_at.isoformat() if message.pinned_at else None,
+    }
+
+
+def _get_pinned_community_message(db: Session, room: str) -> Optional[ChatMessageDB]:
+    return (
+        db.query(ChatMessageDB)
+        .filter(ChatMessageDB.room == room)
+        .filter(ChatMessageDB.is_hidden == False)
+        .filter(ChatMessageDB.is_pinned == True)
+        .order_by(ChatMessageDB.pinned_at.desc(), ChatMessageDB.id.desc())
+        .first()
+    )
+
+
+def _set_pinned_community_message(
+    db: Session,
+    message: ChatMessageDB,
+    pinned: bool,
+) -> ChatMessageDB:
+    db.query(ChatMessageDB).filter(ChatMessageDB.room == message.room).update(
+        {ChatMessageDB.is_pinned: False, ChatMessageDB.pinned_at: None},
+        synchronize_session=False,
+    )
+
+    if pinned:
+        message.is_pinned = True
+        message.pinned_at = datetime.utcnow()
+    else:
+        message.is_pinned = False
+        message.pinned_at = None
+
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def _contains_blocked_community_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in COMMUNITY_BLOCKED_TERMS)
+
+
+def _build_contextual_bot_reply(db: Session, room: str, text: str) -> str:
+    domain = COMMUNITY_ROOM_TO_DOMAIN.get(room, "agriculture")
+    items = retrieve_knowledge(db, domain, text, limit=2)
+    room_label = COMMUNITY_ROOM_LABELS.get(room, "Général")
+
+    if items:
+        best = items[0]
+        title = best.get("title") or room_label
+        answer = (best.get("answer") or "").replace("\n", " ").strip()
+        if len(answer) > 220:
+            answer = answer[:220].rsplit(" ", 1)[0] + "..."
+
+        if room == "marche":
+            return (
+                f"Repère marché: {title}. {answer} "
+                "Compare aussi les prix locaux avant de vendre ou d'acheter."
+            )
+
+        if room == "securite":
+            return (
+                f"Point sécurité: {title}. {answer} "
+                "Ne partage jamais ton code ou ton mot de passe par message."
+            )
+
+        return f"Conseil {room_label.lower()}: {title}. {answer}"
+
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ["urgent", "grave", "mort", "attaque"]):
+        return (
+            "La situation semble sérieuse. Décris le lieu, depuis quand le problème a commencé, "
+            "et contacte aussi un expert ou le module SOS si nécessaire."
+        )
+
+    if room == "marche":
+        return (
+            "Précise le produit, la quantité, le prix observé et la commune. "
+            "La communauté pourra comparer plus facilement."
+        )
+
+    return BOT_REPLIES[hash(f"{room}:{text[:40]}") % len(BOT_REPLIES)]
+
 @app.get("/api/community/messages")
 async def get_community_messages(
+    room: Optional[str] = None,
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_db)
 ):
     """Récupérer les derniers messages du chat communautaire."""
-    messages = (
-        db.query(ChatMessageDB)
-        .order_by(ChatMessageDB.created_at.asc())
-        .limit(limit)
-        .all()
-    )
-    return [
-        {
-            "id": m.id,
-            "sender": m.sender,
-            "text": m.text,
-            "is_bot": m.is_bot,
-            "created_at": m.created_at.isoformat() if m.created_at else None,
-        }
-        for m in messages
-    ]
+    query = db.query(ChatMessageDB).filter(ChatMessageDB.is_hidden == False)
+    if room is not None:
+        query = query.filter(ChatMessageDB.room == _normalize_community_room(room))
+
+    messages = query.order_by(
+        ChatMessageDB.created_at.desc(), ChatMessageDB.id.desc()
+    ).limit(limit).all()
+    messages.reverse()
+    return [_serialize_community_message(m) for m in messages]
+
+
+@app.get("/api/community/pinned")
+async def get_pinned_community_message(
+    room: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Récupérer l'annonce experte épinglée pour un salon."""
+    normalized_room = _normalize_community_room(room)
+    message = _get_pinned_community_message(db, normalized_room)
+    return {
+        "room": normalized_room,
+        "message": _serialize_community_message(message) if message else None,
+    }
 
 @app.post("/api/community/messages")
 async def post_community_message(
@@ -1975,26 +3916,201 @@ async def post_community_message(
     """Poster un message dans le chat communautaire et générer une réponse bot."""
     sender = (body.get("sender") or "Anonyme")[:80]
     text = (body.get("text") or "").strip()
+    room = _normalize_community_room(body.get("room"))
+    sender_role = (body.get("sender_role") or "member").strip().lower()
+    if sender_role not in {"member", "expert", "assistant"}:
+        sender_role = "member"
     if not text:
         raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
     if len(text) > 1000:
         raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+    if _contains_blocked_community_text(text):
+        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
 
-    user_msg = ChatMessageDB(sender=sender, text=text, is_bot=False)
+    duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
+    duplicate = (
+        db.query(ChatMessageDB)
+        .filter(ChatMessageDB.sender == sender)
+        .filter(ChatMessageDB.text == text)
+        .filter(ChatMessageDB.room == room)
+        .filter(ChatMessageDB.created_at >= duplicate_since)
+        .filter(ChatMessageDB.is_hidden == False)
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
+
+    user_msg = ChatMessageDB(
+        sender=sender,
+        text=text,
+        is_bot=False,
+        room=room,
+        sender_role=sender_role,
+    )
     db.add(user_msg)
     db.commit()
     db.refresh(user_msg)
 
-    import random
-    bot_text = random.choice(BOT_REPLIES)
-    bot_msg = ChatMessageDB(sender="Assistant SONGRA", text=bot_text, is_bot=True)
+    bot_text = _build_contextual_bot_reply(db, room, text)
+    bot_msg = ChatMessageDB(
+        sender="Assistant SONGRA",
+        text=bot_text,
+        is_bot=True,
+        room=room,
+        sender_role="assistant",
+    )
     db.add(bot_msg)
     db.commit()
     db.refresh(bot_msg)
 
     return {
-        "user": {"id": user_msg.id, "sender": user_msg.sender, "text": user_msg.text, "is_bot": False, "created_at": user_msg.created_at.isoformat()},
-        "bot": {"id": bot_msg.id, "sender": bot_msg.sender, "text": bot_msg.text, "is_bot": True, "created_at": bot_msg.created_at.isoformat()},
+        "user": _serialize_community_message(user_msg),
+        "bot": _serialize_community_message(bot_msg),
+    }
+
+
+@app.post("/api/community/messages/{message_id}/report")
+async def report_community_message(
+    message_id: int,
+    db: Session = Depends(get_db)
+):
+    """Signaler un message communautaire. Auto-masquage après plusieurs signalements."""
+    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message introuvable")
+
+    if message.is_hidden:
+        return {
+            "success": True,
+            "message_id": message_id,
+            "report_count": message.report_count or 0,
+            "status": "hidden",
+        }
+
+    message.report_count = (message.report_count or 0) + 1
+    if message.report_count >= COMMUNITY_REPORT_HIDE_THRESHOLD:
+        message.is_hidden = True
+    db.commit()
+    db.refresh(message)
+
+    return {
+        "success": True,
+        "message_id": message.id,
+        "report_count": message.report_count,
+        "status": "hidden" if message.is_hidden else "reported",
+    }
+
+
+@app.post("/api/expert/community/messages")
+async def post_expert_community_message(
+    body: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """Permet à un expert connecté de publier dans un salon communautaire."""
+    text = (body.get("text") or "").strip()
+    room = _normalize_community_room(body.get("room"))
+    pin_message = bool(body.get("pin"))
+    sender = (current_expert.full_name or current_expert.email or "Expert SONGRA").strip()[:80]
+
+    if not text:
+        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
+    if len(text) > 1000:
+        raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+    if _contains_blocked_community_text(text):
+        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
+
+    duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
+    duplicate = (
+        db.query(ChatMessageDB)
+        .filter(ChatMessageDB.sender == sender)
+        .filter(ChatMessageDB.text == text)
+        .filter(ChatMessageDB.room == room)
+        .filter(ChatMessageDB.created_at >= duplicate_since)
+        .filter(ChatMessageDB.is_hidden == False)
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
+
+    expert_message = ChatMessageDB(
+        sender=sender,
+        text=text,
+        is_bot=False,
+        room=room,
+        sender_role="expert",
+    )
+    db.add(expert_message)
+    db.commit()
+    db.refresh(expert_message)
+
+    if pin_message:
+        expert_message = _set_pinned_community_message(db, expert_message, True)
+
+    return {
+        "success": True,
+        "message": _serialize_community_message(expert_message),
+    }
+
+
+@app.patch("/api/expert/community/messages/{message_id}/pin")
+async def pin_expert_community_message(
+    message_id: int,
+    body: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """Épingler ou retirer une annonce experte dans un salon communautaire."""
+    del current_expert
+    pinned = bool(body.get("pinned", True))
+    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message introuvable")
+    if message.is_hidden:
+        raise HTTPException(status_code=422, detail="Impossible d'épingler un message masqué")
+    if (message.sender_role or "") != "expert":
+        raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être épinglés")
+
+    updated_message = _set_pinned_community_message(db, message, pinned)
+    return {
+        "success": True,
+        "message": _serialize_community_message(updated_message),
+        "pinned": bool(updated_message.is_pinned),
+    }
+
+
+@app.patch("/api/expert/community/messages/{message_id}")
+async def update_expert_community_message(
+    message_id: int,
+    body: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """Modifier directement un message expert communautaire, notamment une annonce épinglée."""
+    del current_expert
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
+    if len(text) > 1000:
+        raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+    if _contains_blocked_community_text(text):
+        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
+
+    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message introuvable")
+    if message.is_hidden:
+        raise HTTPException(status_code=422, detail="Impossible de modifier un message masqué")
+    if (message.sender_role or "") != "expert":
+        raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être modifiés")
+
+    message.text = text
+    db.commit()
+    db.refresh(message)
+
+    return {
+        "success": True,
+        "message": _serialize_community_message(message),
     }
 
 class OfflineSyncData(BaseModel):
