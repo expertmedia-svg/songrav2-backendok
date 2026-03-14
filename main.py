@@ -2162,7 +2162,7 @@ def retrieve_knowledge(
             "title": it.title,
             "question": it.question,
             "answer": it.answer,
-            "tags": json.loads(it.tags) if it.tags else [],
+            "tags": _load_json_list(it.tags),
             "language": it.language,
             "source": it.source,
             "media": media_data,
@@ -3171,7 +3171,7 @@ async def knowledge_offline_cache(
             "title": it.title,
             "question": it.question,
             "answer": it.answer,
-            "tags": json.loads(it.tags) if it.tags else [],
+            "tags": _load_json_list(it.tags),
             "language": it.language or "fr",
         })
     return {"items": result, "total": len(result)}
@@ -3209,7 +3209,7 @@ async def list_knowledge_items(
                 "title": it.title,
                 "question": it.question,
                 "answer": it.answer,
-                "tags": json.loads(it.tags) if it.tags else [],
+                "tags": _load_json_list(it.tags),
                 "language": it.language,
                 "source": it.source,
                 "media": media_data,
