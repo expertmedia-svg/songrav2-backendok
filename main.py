@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker, Session
 import hashlib
 import unicodedata
 import json
+import re
 import base64
 from io import BytesIO
 from PIL import Image
@@ -1455,7 +1456,164 @@ def _serialize_photo_history_record(record: PhotoAnalysisHistoryDB) -> Dict[str,
         "source_ticket_id": record.source_ticket_id,
     }
 
-cv_engine = LocalComputerVision()
+
+class GPTVisionEngine:
+    """Analyse d'images via GPT-4 Vision API (OpenAI)
+    
+    Remplace le Computer Vision local pour bénéficier des capacités
+    d'analyse avancée de ChatGPT avec sa propre connaissance.
+    """
+    
+    def __init__(self, openai_client):
+        self.client = openai_client
+        self.model = "gpt-4-vision-preview"
+    
+    def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
+        """Analyser les images via GPT-4 Vision API"""
+        valid_images = [image for image in images_data if image][:3]
+        if not valid_images:
+            raise ValueError("Aucune photo exploitable fournie")
+        
+        try:
+            # Convertir les images en base64
+            images_base64 = [base64.b64encode(img).decode('utf-8') for img in valid_images]
+            
+            # Créer le prompt contextuel
+            context_prompt = ""
+            if category == "agriculture":
+                context_prompt = """Analysez cette photo agricole pour identifier:
+1. Les cultures visibles
+2. Toute maladie, pest ou problème visible
+3. L'état général de la culture
+4. Les recommandations urgentes
+
+Répondez en JSON avec ce format:
+{
+    "disease_detected": "Nom de la maladie ou 'Aucune'",
+    "confidence": 0.0 à 1.0,
+    "symptoms": ["Symptôme 1", "Symptôme 2"],
+    "treatment": "Recommandations de traitement",
+    "urgency": "low/medium/high",
+    "prevents": "Mesures de prévention",
+    "visual_observations": ["Observation 1", "Observation 2"],
+    "analysis": "Analyse détaillée en français"
+}"""
+            elif category == "elevage":
+                context_prompt = """Analysez cette photo d'animal pour identifier:
+1. L'état de l'animal
+2. Toute maladie, blessure ou problème visible
+3. Les recommandations urgentes
+
+Répondez en JSON avec ce format:
+{
+    "disease_detected": "Problème identifié ou 'Aucun'",
+    "confidence": 0.0 à 1.0,
+    "symptoms": ["Symptôme visible 1", "Symptôme 2"],
+    "treatment": "Recommandations de traitement/action",
+    "urgency": "low/medium/high",
+    "prevents": "Mesures de prévention",
+    "visual_observations": ["Observation 1", "Observation 2"],
+    "analysis": "Analyse détaillée en français"
+}"""
+            else:
+                context_prompt = """Analysez cette image et fournissez une analyse détaillée en JSON:
+{
+    "disease_detected": "Problème identifié ou 'Aucun'",
+    "confidence": 0.0 à 1.0,
+    "symptoms": ["Observation 1", "Observation 2"],
+    "treatment": "Recommandations",
+    "urgency": "low/medium/high",
+    "prevents": "Prévention",
+    "visual_observations": ["Détail 1", "Détail 2"],
+    "analysis": "Analyse en français"
+}"""
+            
+            # Construire le message pour GPT-4 Vision
+            content = [
+                {
+                    "type": "text",
+                    "text": context_prompt + (f"\n\nContext utilisateur: {text_description}" if text_description else "")
+                }
+            ]
+            
+            # Ajouter les images
+            for img_b64 in images_base64:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_b64}"
+                    }
+                })
+            
+            # Appeler GPT-4 Vision
+            response = self.client.chat.completions.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": content
+                    }
+                ],
+                max_tokens=1024,
+                temperature=0.7
+            )
+            
+            # Parser la réponse
+            response_text = response.choices[0].message.content
+            
+            # Extraire le JSON de la réponse
+            try:
+                # Chercher le JSON dans la réponse
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    analysis_json = json.loads(json_match.group())
+                else:
+                    # Fallback si pas de JSON
+                    analysis_json = {
+                        "disease_detected": "Analyse incomplète",
+                        "confidence": 0.5,
+                        "analysis": response_text,
+                        "urgency": "medium",
+                        "requires_expert": True
+                    }
+            except json.JSONDecodeError:
+                analysis_json = {
+                    "disease_detected": "Erreur parsing",
+                    "confidence": 0.3,
+                    "analysis": response_text,
+                    "urgency": "medium",
+                    "requires_expert": True
+                }
+            
+            # Enrichir avec métadonnées
+            analysis_json["photo_count"] = len(valid_images)
+            analysis_json["best_view_index"] = 1
+            analysis_json["analyzed_views"] = [
+                {
+                    "view_index": i + 1,
+                    "disease_detected": analysis_json.get("disease_detected"),
+                    "confidence": analysis_json.get("confidence", 0.5)
+                }
+                for i in range(len(valid_images))
+            ]
+            analysis_json["requires_expert"] = analysis_json.get("urgency") == "high" or analysis_json.get("confidence", 0.5) < 0.6
+            
+            return analysis_json
+            
+        except Exception as e:
+            print(f"❌ Erreur GPT-4 Vision: {e}")
+            return {
+                "disease_detected": "Erreur analyse",
+                "confidence": 0,
+                "analysis": f"Erreur lors de l'analyse: {str(e)}",
+                "urgency": "medium",
+                "requires_expert": True,
+                "photo_count": len(valid_images),
+                "error": str(e)
+            }
+
+
+cv_engine = GPTVisionEngine(openai_client) if openai_client else LocalComputerVision()
 
 # ==========================================
 # MODULE IA TEXTE (NLP Local) - RESTAURÉ
@@ -2193,10 +2351,11 @@ def generate_llm_answer_with_general_knowledge(
     domain: str,
     conversation_context: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[str]:
-    """Utiliser ChatGPT avec ses connaissances générales quand la RAG n'a rien.
+    """Assistant rural utilisant la connaissance générale de ChatGPT.
     
-    Ce fallback permet à Lia de partager ses connaissances générales tout en restant
-    prudente et encourageant à consulter un expert si le doute persiste.
+    Quand il n'y a pas de fiche dans la base de connaissances locale,
+    Songra utilise ses connaissances générales pour aider la communauté.
+    Elle reste un assistant rural accessible et pratique.
     """
     if not openai_client or not OPENAI_API_KEY:
         return None
@@ -2210,7 +2369,7 @@ def generate_llm_answer_with_general_knowledge(
             if content:
                 serialized_turns.append(f"{role}: {content}")
         if serialized_turns:
-            conversation_text = "\n\nContexte de la conversation en cours :\n" + "\n".join(serialized_turns) + "\n"
+            conversation_text = "\n\nContexte de la conversation :\n" + "\n".join(serialized_turns) + "\n"
 
     domain_description = {
         "agriculture": "l'agriculture et les cultures",
@@ -2220,42 +2379,32 @@ def generate_llm_answer_with_general_knowledge(
     }.get(domain, domain)
 
     system_prompt = (
-        "Tu es Songra, l'agent d'assistance de Yingr-AI (Yingr Artificial Intelligence). \n"
-        "Yingr-AI est une intelligence artificielle locale et SOUVERAINE du Burkina Faso. \n"
-        "Tu aides exclusivement les communautés du Burkina Faso en matière d'agriculture, d'élevage et de cybersécurité. \n"
-        "Tu es dédié à l'autonomisation et au développement des populations rurales burkinabè. \n"
+        "Tu es Songra, un assistant rural qui aide les communautés à résoudre leurs difficultés quotidiennes. \n"
+        "Tu travailles avec Yingr-AI, une intelligence artificielle pour soutenir les populations. \n"
         f"Ta spécialité actuelle : {domain_description}. \n\n"
-        "IMPORTANT : Toutes tes réponses doivent tenir compte du contexte spécifique du Burkina Faso \n"
-        "- Climat, condition agro-climatique de la région Sahélienne \n"
-        "- Ressources et pratiques locales disponibles au BF \n"
-        "- Cultures et pratiques d'élevage du Burkina Faso \n"
-        "- Défis particuliers des communautés burkinabè \n\n"
-        "Tu n'as pas de fiche spécialisée pour cette question précise, donc tu vas partager tes connaissances générales "
-        "tout en gardant le contexte burkinabè à l'esprit. Rappelle à l'utilisateur les limites de tes connaissances. \n\n"
-        "Contraintes importantes : \n"
-        "- HONNÊTETÉ totale sur tes limites sans fiche locale de Yingr. \n"
-        "- Zéro conseil médical avancé ou dangereux. \n"
-        "- Langage TRÈS simple, adapté à des populations rurales peu alphabétisées. \n"
-        "- Utilise le français clair mais tu peux ajouter des mots en Mooré, Dioula ou autres langues locales si pertinent. \n"
-        "- TOUJOURS recommander de vérifier avec un expert local, agent agricole, ou service de santé du BF. \n"
-        "- Adapter chaque conseil au contexte climatique et socio-économique du Burkina Faso. \n"
+        "Tu es pratique, accessible et toujours prêt à aider. \n"
+        "Tes réponses doivent être : \n"
+        "- SIMPLES et directes (compréhensible par tout le monde) \n"
+        "- PRATIQUES avec des conseils qu'on peut appliquer tout de suite \n"
+        "- HONNÊTE sur ce que tu sais et ce que tu ne sais pas \n"
+        "- ENCOURAGEANTE : tu crois que la communauté peut réussir \n\n"
+        "Tu n'as pas de fiche spécialisée exacte pour cette question, donc tu utilises tes connaissances générales. \n"
+        "Mais tu donnes toujours des conseils pratiques et adaptés aux situations réelles. \n"
+        "Tu n'inventes jamais, tu dis toujours si tu n'es pas sûr. \n"
     )
 
     user_prompt = (
-        f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
-        f"Question actuelle de l'utilisateur : {question}\n"
+        f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
+        f"Question : {question}\n"
         f"{conversation_text}\n"
-        "IMPORTANT : Je n'ai pas de fiche spécialisée exacte pour cette question. "
-        "Utilise tes connaissances générales pour aider, mais sois prudent. \n\n"
-        "Tâche : \n"
-        "- Donne une réponse courte (10 à 15 phrases max). \n"
-        "- Structure ta réponse ainsi : \n"
-        "  1) Ce que tu comprends du problème (2-3 phrases). \n"
-        "  2) Quelques conseils généraux pratiques ou bonnes pratiques (numérotés). \n"
-        "  3) IMPORTANT : Quand et pourquoi il FAUT consulter un expert humain, vétérinaire ou agent local. \n"
-        "  4) Une note transparente du type : 'Je ne suis pas certain sans plus d'infos, donc vérification par un expert est vraiment importante.'. \n"
-        "- Si la question actuelle est une relance, tiens compte du contexte précédent. \n"
-        "Sois humble et prudent : c'est mieux de recommander un expert que de donner un mauvais conseil."
+        "Tâche : Aide cette personne de manière pratique et simple. \n"
+        "- Explique ce que tu comprends du problème (2-3 phrases). \n"
+        "- Donne des conseils concrets qu'on peut faire tout de suite (numérotés). \n"
+        "- Dis si tu penses qu'il faut l'aide d'un expert et pourquoi. \n"
+        "- Sois honnête si tu n'es pas totalement sûr. \n"
+        "- Utilise un langage simple et pratique. \n"
+        "- Limite à 10-15 phrases maximum. \n\n"
+        "Réponds TOUJOURS de manière pratique pour aider la communauté à résoudre ses difficultés."
     )
 
     try:
@@ -2265,7 +2414,7 @@ def generate_llm_answer_with_general_knowledge(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.4,  # Légèrement plus élevé que 0.3 car on est en mode "général"
+            temperature=0.7,  # Plus naturel et pratique
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -2282,21 +2431,24 @@ def resolve_knowledge_answer(
     limit: int = 5,
     focus_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Répondre via fallback amélioré : RAG strict → expanded RAG → Connaissances générales.
+    """Répondre via fallback amélioré : RAG strict (moins strict) → Connaissances générales.
 
-    Stratégie :
-    1. D'abord : RAG strict dans le domaine exact (expand_scope=False)
-    2. Si rien : RAG élargi pour trouver des fiches similaires d'autres domaines
-    3. Si rien : Utiliser les connaissances générales du LLM (avec mise en garde)
-    4. Fallback minimal : réponse générique "Je ne sais pas"
+    Stratégie RÉVISÉE (sans mélange de catégories) :
+    1. RAG strict dans le domaine : chercher PLUS de fiches (moins de seuil)
+    2. Si rien : Utiliser les connaissances générales du LLM (sans mélanger les domaines)
+    3. Fallback minimal : réponse générique "Je ne sais pas"
+    
+    ⚠️ SUPPRESSION VOLONTAIRE : La phase "RAG expanded" qui mélangeait les catégories
+    a été enlevée. On passe directement à la connaissances générales de Songra.
     """
-    # ÉTAPE 1 : Recherche RAG strict dans le domaine demandé
+    # ÉTAPE 1 : Recherche RAG strict dans le domaine demandé (avec limit augmenté)
+    # Augmenter limit pour chercher plus de fiches dans le bon domaine
     rag_items = retrieve_knowledge(
         db,
         domain,
         question,
-        limit=limit,
-        expand_scope=False,
+        limit=limit + 3,  # +3 pour être moins strict sans mélanger
+        expand_scope=False,  # IMPORTANT : rester dans le domaine, pas de mélange
         focus_subject=(focus_context or {}).get("subject"),
         focus_issue=(focus_context or {}).get("issue"),
     )
@@ -2319,36 +2471,11 @@ def resolve_knowledge_answer(
             "knowledge_fallback_used": False,
         }
 
-    # ÉTAPE 2 : RAG élargi pour chercher des fiches similaires même d'autres domaines
-    expanded_rag_items = retrieve_knowledge(
-        db,
-        domain,
-        question,
-        limit=limit,
-        expand_scope=True,  # Chercher dans TOUTE la base
-        focus_subject=(focus_context or {}).get("subject"),
-        focus_issue=(focus_context or {}).get("issue"),
-    )
-    
-    if expanded_rag_items:
-        # Trouver des fiches, même d'autres domaines
-        llm_answer = generate_llm_answer(
-            question=question,
-            language=language,
-            domain=domain,
-            knowledge_items=expanded_rag_items,
-            conversation_context=conversation_context,
-            focus_context=focus_context,
-        )
-        return {
-            "rag_items": expanded_rag_items,
-            "llm_answer": llm_answer,
-            "rag_fallback_answer": None if llm_answer else expanded_rag_items[0].get("answer"),
-            "knowledge_mode": "rag_expanded",  # Permet au frontend de savoir qu'on est en mode "élargi"
-            "knowledge_fallback_used": True,  # Fallback activé
-        }
+    # ÉTAPE 2 : SAUTÉE (ancien RAG expanded qui mélangeait les catégories)
+    # On va directement aux connaissances générales de Songra
 
     # ÉTAPE 3 : Aucune fiche trouvée → Utiliser connaissances générales du LLM
+    # C'est Songra qui répond avec sa propre connaissance, sans inventer de catégories
     if openai_client and OPENAI_API_KEY:
         general_answer = generate_llm_answer_with_general_knowledge(
             question=question,
@@ -2361,7 +2488,7 @@ def resolve_knowledge_answer(
                 "rag_items": [],
                 "llm_answer": general_answer,
                 "rag_fallback_answer": None,
-                "knowledge_mode": "llm_general_knowledge",  # Mode avec connaissances générales
+                "knowledge_mode": "llm_general_knowledge",  # Songra avec ses connaissances générales
                 "knowledge_fallback_used": True,
             }
 
