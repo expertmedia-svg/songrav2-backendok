@@ -22,6 +22,9 @@ PyJWT==2.10.1
 # 6. LLM / ChatGPT (pour reformulation contrôlée des réponses RAG)
 openai==1.59.7
 
+# 7. GOOGLE GEMINI (pour analyse photos - scanner)
+google-generativeai==0.8.2
+
 # 5. FUTURE AI/ML (Décommentez quand prêt)
 # tensorflow==2.15.0
 # opencv-python-headless==4.8.1.78  # Utilisez 'headless' pour le serveur

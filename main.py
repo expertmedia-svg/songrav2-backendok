@@ -24,6 +24,8 @@ from PIL import Image
 import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
+import google.generativeai as genai
+from gemini_vision import GeminiVisionEngine
 
 # ==========================================
 # CONFIGURATION
@@ -43,6 +45,15 @@ Base = declarative_base()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# Gemini API Key pour analyse photo
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print(f"[OK] Gemini API configuree")
+else:
+    print(f"[WARN] GEMINI_API_KEY non definie - scanner photo avec OpenAI")
+
 JWT_SECRET = os.getenv("JWT_SECRET", "songra-mobile-dev-secret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
@@ -1481,50 +1492,67 @@ class GPTVisionEngine:
             # Créer le prompt contextuel
             context_prompt = ""
             if category == "agriculture":
-                context_prompt = """Analysez cette photo agricole pour identifier:
-1. Les cultures visibles
-2. Toute maladie, pest ou problème visible
-3. L'état général de la culture
-4. Les recommandations urgentes
+                context_prompt = """TÂCHE: Analyser une photo agricole pour identifier les maladies des cultures.
 
-Répondez en JSON avec ce format:
+INSTRUCTIONS IMPORTANTES:
+- Analysez la photo avec ATTENTION aux détails
+- Identifiez chaque culture visible
+- Détectez TOUTE maladie, ravageur ou problème visible
+- Si AUCUN problème: écrivez "Aucune maladie détectée"
+- Donnez une confiance entre 0.0 (aucune certitude) et 1.0 (certitude totale)
+- IMPORTANT: Répondez UNIQUEMENT avec du JSON valide, rien d'autre
+
+FORMAT JSON REQUIS (copiez-collez et remplissez):
 {
-    "disease_detected": "Nom de la maladie ou 'Aucune'",
-    "confidence": 0.0 à 1.0,
+    "disease_detected": "Maladie identifiée ou 'Aucune'",
+    "confidence": 0.85,
     "symptoms": ["Symptôme 1", "Symptôme 2"],
-    "treatment": "Recommandations de traitement",
-    "urgency": "low/medium/high",
-    "prevents": "Mesures de prévention",
-    "visual_observations": ["Observation 1", "Observation 2"],
-    "analysis": "Analyse détaillée en français"
+    "treatment": "Action recommandée",
+    "urgency": "low|medium|high",
+    "prevents": "Prévention",
+    "visual_observations": ["Détail observé"],
+    "analysis": "Explication détaillée en français"
 }"""
             elif category == "elevage":
-                context_prompt = """Analysez cette photo d'animal pour identifier:
-1. L'état de l'animal
-2. Toute maladie, blessure ou problème visible
-3. Les recommandations urgentes
+                context_prompt = """TÂCHE: Analyser une photo d'animal pour identifier les maladies et problèmes de santé.
 
-Répondez en JSON avec ce format:
+INSTRUCTIONS IMPORTANTES:
+- Analysez la photo avec ATTENTION
+- Identifiez l'espèce et l'état de l'animal
+- Détectez TOUTE maladie, blessure ou anomalie
+- Si AUCUN problème visible: écrivez "Aucun"
+- Donnez une confiance entre 0.0 et 1.0
+- IMPORTANT: Répondez UNIQUEMENT avec du JSON valide, rien d'autre
+
+FORMAT JSON REQUIS (copiez-collez et remplissez):
 {
-    "disease_detected": "Problème identifié ou 'Aucun'",
-    "confidence": 0.0 à 1.0,
-    "symptoms": ["Symptôme visible 1", "Symptôme 2"],
-    "treatment": "Recommandations de traitement/action",
-    "urgency": "low/medium/high",
-    "prevents": "Mesures de prévention",
-    "visual_observations": ["Observation 1", "Observation 2"],
+    "disease_detected": "Maladie ou 'Aucun'",
+    "confidence": 0.85,
+    "symptoms": ["Symptôme visible"],
+    "treatment": "Action de traitement/aide",
+    "urgency": "low|medium|high",
+    "prevents": "Prévention future",
+    "visual_observations": ["Observation"],
     "analysis": "Analyse détaillée en français"
 }"""
             else:
-                context_prompt = """Analysez cette image et fournissez une analyse détaillée en JSON:
+                context_prompt = """TÂCHE: Analyser cette image pour identifier tout problème de santé/maladie.
+
+INSTRUCTIONS:
+- Analysez soigneusement
+- Identifiez problèmes visibles
+- Donnez confiance 0.0 à 1.0
+- RÉPONDEZ UNIQUEMENT EN JSON, PAS DE TEXTE SUPPLÉMENTAIRE
+
+FORMAT JSON:
 {
-    "disease_detected": "Problème identifié ou 'Aucun'",
-    "confidence": 0.0 à 1.0,
-    "symptoms": ["Observation 1", "Observation 2"],
-    "treatment": "Recommandations",
-    "urgency": "low/medium/high",
+    "disease_detected": "Problème ou 'Aucun'",
+    "confidence": 0.85,
+    "symptoms": ["Symptôme"],
+    "treatment": "Recommandation",
+    "urgency": "low|medium|high",
     "prevents": "Prévention",
-    "visual_observations": ["Détail 1", "Détail 2"],
+    "visual_observations": ["Observation"],
     "analysis": "Analyse en français"
 }"""
             
@@ -1532,18 +1560,21 @@ Répondez en JSON avec ce format:
             content = [
                 {
                     "type": "text",
-                    "text": context_prompt + (f"\n\nContext utilisateur: {text_description}" if text_description else "")
+                    "text": context_prompt + (f"\n\nContext supplémentaire: {text_description}" if text_description else "")
                 }
             ]
             
             # Ajouter les images
-            for img_b64 in images_base64:
+            for idx, img_b64 in enumerate(images_base64):
+                print(f"📸 Image {idx + 1}: {len(img_b64)} bytes ({len(img_b64)/1024:.1f}KB) - {category} mode")
                 content.append({
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/jpeg;base64,{img_b64}"
                     }
                 })
+            
+            print(f"📤 Envoi à GPT-4o: {len(content)} éléments (1 texte + {len(images_base64)} images)")
             
             # Appeler GPT-4o avec vision
             response = self.client.chat.completions.create(
@@ -1558,31 +1589,54 @@ Répondez en JSON avec ce format:
                 temperature=0.7
             )
             
+            print(f"✅ Réponse GPT-4o reçue")
+            
             # Parser la réponse
             response_text = response.choices[0].message.content
+            print(f"📝 Réponse brute GPT-4o: {response_text[:300]}...")
             
             # Extraire le JSON de la réponse
+            analysis_json = None
             try:
                 # Chercher le JSON dans la réponse
-                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
                 if json_match:
-                    analysis_json = json.loads(json_match.group())
+                    json_str = json_match.group()
+                    analysis_json = json.loads(json_str)
+                    print(f"✅ JSON parsé avec succès: {analysis_json.get('disease_detected', 'N/A')}")
                 else:
-                    # Fallback si pas de JSON
-                    analysis_json = {
-                        "disease_detected": "Analyse incomplète",
-                        "confidence": 0.5,
-                        "analysis": response_text,
-                        "urgency": "medium",
-                        "requires_expert": True
-                    }
-            except json.JSONDecodeError:
+                    print(f"⚠️ Pas de JSON trouvé dans la réponse")
+                    
+            except json.JSONDecodeError as je:
+                print(f"⚠️ JSON parsing error: {je}")
+                # Essayer de nettoyer et re-parser
+                try:
+                    # Remplacer characteres problématiques
+                    cleaned = response_text.replace('\n', ' ').replace('  ', ' ')
+                    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                    if json_match:
+                        analysis_json = json.loads(json_match.group())
+                        print(f"✅ JSON parsé après nettoyage: {analysis_json.get('disease_detected', 'N/A')}")
+                except:
+                    print(f"❌ Impossible de parser JSON après nettoyage")
+            
+            # Si toujours pas de JSON valide, créer response par défaut
+            if not analysis_json:
+                # Essayer d'extraire quelques mots-clés utiles
+                disease_keywords = ['maladie', 'malade', 'blessure', 'infection', 'aucun', 'aucune', 'normal', 'sain']
+                detected = 'Non identifiée'
+                for keyword in disease_keywords:
+                    if keyword in response_text.lower():
+                        detected = 'Détecté' if keyword not in ['aucun', 'aucune', 'normal', 'sain'] else 'Aucune maladie'
+                        break
+                
+                print(f"⚠️ Utilisant response par défaut avec keyword matching")
                 analysis_json = {
-                    "disease_detected": "Erreur parsing",
-                    "confidence": 0.3,
-                    "analysis": response_text,
+                    "disease_detected": detected,
+                    "confidence": 0.4,
+                    "analysis": response_text[:300] if response_text else "Analyse incomplète",
                     "urgency": "medium",
-                    "requires_expert": True
+                    "requires_expert": False
                 }
             
             # Enrichir avec métadonnées
@@ -1601,7 +1655,9 @@ Répondez en JSON avec ce format:
             return analysis_json
             
         except Exception as e:
-            print(f"❌ Erreur GPT-4 Vision: {e}")
+            print(f"❌ Erreur GPT-4o Vision: {e}")
+            import traceback
+            print(traceback.format_exc())
             return {
                 "disease_detected": "Erreur analyse",
                 "confidence": 0,
@@ -1613,7 +1669,7 @@ Répondez en JSON avec ce format:
             }
 
 
-cv_engine = GPTVisionEngine(openai_client) if openai_client else LocalComputerVision()
+cv_engine = GeminiVisionEngine(GEMINI_API_KEY) if GEMINI_API_KEY else (GPTVisionEngine(openai_client) if openai_client else LocalComputerVision())
 
 # ==========================================
 # MODULE IA TEXTE (NLP Local) - RESTAURÉ
@@ -1879,6 +1935,39 @@ def _validate_user_credentials(phone_number: str, password: str) -> None:
 # BASE DE CONNAISSANCE (RAG SIMPLE)
 # ==========================================
 
+# INITIALISATION AU DÉMARRAGE
+# ==========================================
+
+@app.on_event("startup")
+async def startup_seed_data():
+    """Initialiser les données minimales au démarrage, y compris sous Gunicorn."""
+    try:
+        db = SessionLocal()
+        existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
+        if not existing:
+            expert = Expert(
+                email="test@resolvehub.bf",
+                password_hash=hash_password("test123"),
+                full_name="Expert Test IA",
+                specialization="agriculture",
+                is_active=True
+            )
+            db.add(expert)
+            db.commit()
+            print("✓ Expert test créé: test@resolvehub.bf / test123")
+
+        try:
+            load_knowledge_from_json(db)
+            total_items = db.query(KnowledgeItem).count()
+            print(f"✓ Base de connaissances chargée ({total_items} fiches)")
+        except Exception as e_load:
+            print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[WARN] Erreur initialisation startup: {e}")
+
+
 def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json") -> None:
     """Charger une base de connaissances simple à partir d'un fichier JSON.
 
@@ -1898,38 +1987,6 @@ def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json"
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if not os.path.isabs(file_path):
         file_path = os.path.join(base_dir, file_path)
-    # INITIALISATION AU DÉMARRAGE
-    # ==========================================
-
-    @app.on_event("startup")
-    async def startup_seed_data():
-        """Initialiser les données minimales au démarrage, y compris sous Gunicorn."""
-        try:
-            db = SessionLocal()
-            existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
-            if not existing:
-                expert = Expert(
-                    email="test@resolvehub.bf",
-                    password_hash=hash_password("test123"),
-                    full_name="Expert Test IA",
-                    specialization="agriculture",
-                    is_active=True
-                )
-                db.add(expert)
-                db.commit()
-                print("✓ Expert test créé: test@resolvehub.bf / test123")
-
-            try:
-                load_knowledge_from_json(db)
-                total_items = db.query(KnowledgeItem).count()
-                print(f"✓ Base de connaissances chargée ({total_items} fiches)")
-            except Exception as e_load:
-                print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
-            finally:
-                db.close()
-        except Exception as e:
-            print(f"⚠️ Erreur initialisation startup: {e}")
-
 
     if not os.path.exists(file_path):
         return
