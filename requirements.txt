@@ -1,30 +1,31 @@
-# RESOLVE HUB v2.0 - Backend FastAPI (Configuration Render)
-# ========================================================
+# RESOLVE HUB v3.0 - Backend FastAPI + Gemini Vision
+# =====================================================
 
 # 1. CORE WEB FRAMEWORK
 fastapi==0.104.1
-uvicorn[standard]==0.23.2          # Version légèrement antérieure, très stable
+uvicorn[standard]==0.23.2
 sqlalchemy==2.0.23
 
 # 2. FILE UPLOAD & FORM DATA
 python-multipart==0.0.7
 
-# 3. COMPUTER VISION & IMAGE PROCESSING (IA LOCALE)
-# --only-binary=:all: : IMPORTANT ! Force l'installation du paquet pré-compilé
+# 3. COMPUTER VISION & IMAGE PROCESSING
 Pillow==10.4.0 
 numpy==1.26.2
 
-# 4. BUILD TOOLS & UTILITIES (Stabilise l'environnement de build)
-setuptools==70.0.0                 # Rend le processus d'installation plus fiable
-python-dotenv==1.0.0               # Pour gérer les variables d'environnement
+# 4. BUILD TOOLS & UTILITIES
+setuptools==70.0.0
+python-dotenv==1.0.0
 PyJWT==2.10.1
 
-# 6. LLM / ChatGPT (pour reformulation contrôlée des réponses RAG)
+# 5. LLM / GENERATIVE AI
+# OpenAI for text analysis and fallback
 openai==1.59.7
 
-# 7. GOOGLE GEMINI (pour analyse photos - scanner)
+# Google Gemini for photo analysis (PRIMARY)
 google-generativeai==0.8.2
 
-# 5. FUTURE AI/ML (Décommentez quand prêt)
+# 6. OPTIONAL/FUTURE
 # tensorflow==2.15.0
-# opencv-python-headless==4.8.1.78  # Utilisez 'headless' pour le serveur
+# opencv-python-headless==4.8.1.78
+# requests==2.31.0  # Si vous testez l'API

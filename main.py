@@ -2407,12 +2407,15 @@ def generate_llm_answer_with_general_knowledge(
     language: str,
     domain: str,
     conversation_context: Optional[List[Dict[str, str]]] = None,
+    photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Assistant rural utilisant la connaissance générale de ChatGPT.
     
     Quand il n'y a pas de fiche dans la base de connaissances locale,
     Songra utilise ses connaissances générales pour aider la communauté.
     Elle reste un assistant rural accessible et pratique.
+    
+    📷 Si une photo a été analysée, son diagnostic guide la réponse.
     """
     if not openai_client or not OPENAI_API_KEY:
         return None
@@ -2427,6 +2430,36 @@ def generate_llm_answer_with_general_knowledge(
                 serialized_turns.append(f"{role}: {content}")
         if serialized_turns:
             conversation_text = "\n\nContexte de la conversation :\n" + "\n".join(serialized_turns) + "\n"
+
+    # Construire le diagnostic photo s'il existe
+    photo_diagnosis_section = ""
+    if photo_analysis:
+        diagnosis_parts = []
+        
+        if photo_analysis.get("disease_detected"):
+            diagnosis_parts.append(f"- Problème détecté : {photo_analysis.get('disease_detected')}")
+        
+        if photo_analysis.get("detected_subject"):
+            diagnosis_parts.append(f"- Sujet identifié : {photo_analysis.get('detected_subject')}")
+        
+        if photo_analysis.get("observations"):
+            diagnosis_parts.append(f"- Observations visuelles : {photo_analysis.get('observations')}")
+        
+        if photo_analysis.get("urgency"):
+            urgency_fr = {
+                "immediate": "IMMÉDIATE",
+                "high": "ÉLEVÉE",
+                "medium": "MOYENNE",
+                "low": "BASSE"
+            }.get(photo_analysis.get("urgency"), photo_analysis.get("urgency"))
+            diagnosis_parts.append(f"- Urgence : {urgency_fr}")
+        
+        if diagnosis_parts:
+            photo_diagnosis_section = (
+                "\n⚠️ DIAGNOSTIC PHOTO :\n"
+                + "\n".join(diagnosis_parts) + 
+                "\n\n📌 Base ta réponse sur ce diagnostic spécifique.\n"
+            )
 
     domain_description = {
         "agriculture": "l'agriculture et les cultures",
@@ -2453,6 +2486,7 @@ def generate_llm_answer_with_general_knowledge(
     user_prompt = (
         f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
         f"Question : {question}\n"
+        f"{photo_diagnosis_section}"
         f"{conversation_text}\n"
         "Tâche : Aide cette personne de manière pratique et simple. \n"
         "- Explique ce que tu comprends du problème (2-3 phrases). \n"
@@ -2487,6 +2521,7 @@ def resolve_knowledge_answer(
     conversation_context: Optional[List[Dict[str, str]]] = None,
     limit: int = 5,
     focus_context: Optional[Dict[str, Any]] = None,
+    photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Répondre via fallback amélioré : RAG strict (moins strict) → Connaissances générales.
 
@@ -2497,6 +2532,9 @@ def resolve_knowledge_answer(
     
     ⚠️ SUPPRESSION VOLONTAIRE : La phase "RAG expanded" qui mélangeait les catégories
     a été enlevée. On passe directement à la connaissances générales de Songra.
+    
+    📷 AMÉLIORATION PHOTO : Le diagnostic photo (si disponible) est maintenant passé
+    au LLM pour enrichir la réponse et forcer la précision sur le diagnostic détecté.
     """
     # ÉTAPE 1 : Recherche RAG strict dans le domaine demandé (avec limit augmenté)
     # Augmenter limit pour chercher plus de fiches dans le bon domaine
@@ -2519,6 +2557,7 @@ def resolve_knowledge_answer(
             knowledge_items=rag_items,
             conversation_context=conversation_context,
             focus_context=focus_context,
+            photo_analysis=photo_analysis,
         )
         return {
             "rag_items": rag_items,
@@ -2539,6 +2578,7 @@ def resolve_knowledge_answer(
             language=language,
             domain=domain,
             conversation_context=conversation_context,
+            photo_analysis=photo_analysis,
         )
         if general_answer:
             return {
@@ -2566,6 +2606,7 @@ def generate_llm_answer(
     knowledge_items: List[Dict[str, Any]],
     conversation_context: Optional[List[Dict[str, str]]] = None,
     focus_context: Optional[Dict[str, Any]] = None,
+    photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Songra (Yingr-AI) reformule et raisonne à partir de la base RAG validée localement au Burkina Faso.
 
@@ -2573,6 +2614,7 @@ def generate_llm_answer(
     - S'il n'y a pas assez de fiches, Songra le dit clairement.
     - Toutes les réponses doivent respecter le contexte socio-climatique du BF.
     - Songra reste humble et recommande toujours un expert local si doute.
+    - SI une photo a été analysée, sa diagnosis DOIT être au cœur de la réponse.
     """
     if not knowledge_items:
         # Pas de base de connaissance pertinente, on ne force pas le modèle
@@ -2674,9 +2716,44 @@ def generate_llm_answer(
         if serialized_turns:
             conversation_text = "\n\nContexte de la conversation en cours :\n" + "\n".join(serialized_turns) + "\n"
 
+    # Construire le diagnostic photo détaillé pour enrichir le prompt
+    photo_diagnosis_section = ""
+    if photo_analysis:
+        diagnosis_parts = []
+        
+        if photo_analysis.get("disease_detected"):
+            diagnosis_parts.append(f"- Maladie/Problème détecté : {photo_analysis.get('disease_detected')}")
+        
+        if photo_analysis.get("detected_subject"):
+            diagnosis_parts.append(f"- Sujet identifié : {photo_analysis.get('detected_subject')}")
+        
+        if photo_analysis.get("observations"):
+            diagnosis_parts.append(f"- Observations visuelles : {photo_analysis.get('observations')}")
+        
+        if photo_analysis.get("urgency"):
+            urgency_fr = {
+                "immediate": "IMMÉDIATE - Danger grave",
+                "high": "ÉLEVÉE - Intervention rapide conseillée",
+                "medium": "MOYENNE - À adresser dans les jours",
+                "low": "BASSE - Situation stable"
+            }.get(photo_analysis.get("urgency"), photo_analysis.get("urgency"))
+            diagnosis_parts.append(f"- Niveau d'urgence : {urgency_fr}")
+        
+        if photo_analysis.get("confidence"):
+            diagnosis_parts.append(f"- Confiance d'analyse : {photo_analysis.get('confidence')}%")
+        
+        if diagnosis_parts:
+            photo_diagnosis_section = (
+                "\n⚠️ DIAGNOSTIC PHOTO (analyse IA de vision assistée) :\n"
+                + "\n".join(diagnosis_parts) + 
+                "\n\n📌 IMPORTANT : Ta réponse DOIT être centrée sur ce diagnostic photo spécifique. "
+                "Ne généralise pas au-delà de ce qui a été détecté. Si le diagnostic n'est pas assez clair pour répondre précisément, dis-le.\n"
+            )
+
     user_prompt = (
         f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
         f"Question actuelle de l'utilisateur : {question}\n"
+        f"{photo_diagnosis_section}"
         f"{conversation_text}\n"
         f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
         f"{focus_instruction}"
@@ -2841,6 +2918,45 @@ async def get_user_dashboard(
             for message in community_messages
         ],
     }
+
+
+@app.post("/api/scanner/analyze")
+async def analyze_scanner_photo(
+    data: MobileQuestionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Analyse UNIQUEMENT une photo du scanner - pas de ticket, pas de chat IA."""
+    
+    # Collecter les photos
+    photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
+    
+    if not photo_payloads:
+        raise HTTPException(status_code=400, detail="Aucune photo fournie")
+    
+    try:
+        # Analyser les photos avec Gemini
+        photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
+        photo_analysis = cv_engine.analyze_images(
+            photo_data_list, 
+            data.content or "", 
+            data.category or "agriculture"
+        )
+        
+        return {
+            "status": "success",
+            "analysis": photo_analysis,
+            "category": data.category,
+            "model": photo_analysis.get("model", "gemini-2.5-flash")
+        }
+        
+    except Exception as e:
+        print(f"[ERROR] Analyse scanner photo: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "analysis": {"error": str(e), "requires_expert": True}
+        }
 
 
 @app.get("/api/questions")
@@ -3120,6 +3236,7 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
         question=data.content,
         language="fr",
         focus_context=focus_context,
+        photo_analysis=photo_analysis_payload,
     )
     rag_items = knowledge_result["rag_items"]
     llm_answer = knowledge_result["llm_answer"]
@@ -3355,6 +3472,47 @@ async def reply_to_ticket(
     
     db.commit()
     return {"status": "success"}
+
+@app.post("/api/tickets/{ticket_id}/send-to-expert")
+async def send_ticket_to_expert(
+    ticket_id: int,
+    db: Session = Depends(get_db)
+):
+    """Envoie un ticket à un expert humain (enregistre la demande)."""
+    
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # Assigner à un expert (ID 1 par défaut, ou le premier expert disponible)
+    if not ticket.expert_id:
+        expert = db.query(Expert).filter(Expert.is_active == True).first()
+        if expert:
+            ticket.expert_id = expert.id
+        else:
+            ticket.expert_id = 1  # Fallback
+    
+    # Marquer comme "awaiting_expert"
+    ticket.status = "awaiting_expert"
+    
+    # Créer un message système pour tracer
+    message = Message(
+        ticket_id=ticket_id,
+        sender_type="system",
+        sender_id=None,
+        content="[SYSTEME] Aide d'expert demandee par l'utilisateur",
+        channel="app"
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(ticket)
+    
+    return {
+        "status": "success",
+        "ticket_id": ticket.id,
+        "expert_assigned": ticket.expert_id,
+        "message": "Votre demande a ete envoyee a un expert. Un expert humain vous contactera bientot."
+    }
 
 @app.post("/api/tickets/{ticket_id}/resolve")
 async def resolve_ticket(ticket_id: int, db: Session = Depends(get_db)):
