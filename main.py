@@ -1466,7 +1466,7 @@ class GPTVisionEngine:
     
     def __init__(self, openai_client):
         self.client = openai_client
-        self.model = "gpt-4-turbo"
+        self.model = "gpt-4o"
     
     def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
         """Analyser les images via GPT-4 Vision API"""
@@ -1545,9 +1545,9 @@ Répondez en JSON avec ce format:
                     }
                 })
             
-            # Appeler GPT-4 Turbo avec vision
+            # Appeler GPT-4o avec vision
             response = self.client.chat.completions.create(
-                model="gpt-4-turbo",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "user",
