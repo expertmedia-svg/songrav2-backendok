@@ -2432,33 +2432,36 @@ def generate_llm_answer_with_general_knowledge(
             conversation_text = "\n\nContexte de la conversation :\n" + "\n".join(serialized_turns) + "\n"
 
     # Construire le diagnostic photo s'il existe
+    # ⚠️ SI UNE PHOTO, C'EST LE CŒUR DE LA RÉPONSE
     photo_diagnosis_section = ""
-    if photo_analysis:
+    has_photo_diagnosis = False
+    if photo_analysis and (photo_analysis.get("disease_detected") or photo_analysis.get("observations")):
+        has_photo_diagnosis = True
         diagnosis_parts = []
         
         if photo_analysis.get("disease_detected"):
-            diagnosis_parts.append(f"- Problème détecté : {photo_analysis.get('disease_detected')}")
+            diagnosis_parts.append(f"Problème : {photo_analysis.get('disease_detected')}")
         
         if photo_analysis.get("detected_subject"):
-            diagnosis_parts.append(f"- Sujet identifié : {photo_analysis.get('detected_subject')}")
+            diagnosis_parts.append(f"Sujet : {photo_analysis.get('detected_subject')}")
         
         if photo_analysis.get("observations"):
-            diagnosis_parts.append(f"- Observations visuelles : {photo_analysis.get('observations')}")
+            diagnosis_parts.append(f"Observations : {photo_analysis.get('observations')}")
         
         if photo_analysis.get("urgency"):
             urgency_fr = {
-                "immediate": "IMMÉDIATE",
-                "high": "ÉLEVÉE",
+                "immediate": "IMMÉDIATE 🚨",
+                "high": "ÉLEVÉE ⚠️",
                 "medium": "MOYENNE",
                 "low": "BASSE"
             }.get(photo_analysis.get("urgency"), photo_analysis.get("urgency"))
-            diagnosis_parts.append(f"- Urgence : {urgency_fr}")
+            diagnosis_parts.append(f"Urgence : {urgency_fr}")
         
         if diagnosis_parts:
             photo_diagnosis_section = (
-                "\n⚠️ DIAGNOSTIC PHOTO :\n"
-                + "\n".join(diagnosis_parts) + 
-                "\n\n📌 Base ta réponse sur ce diagnostic spécifique.\n"
+                "📸 DIAGNOSTIC DE TA PHOTO :\n"
+                + " | ".join(diagnosis_parts) + 
+                "\n"
             )
 
     domain_description = {
@@ -2483,20 +2486,37 @@ def generate_llm_answer_with_general_knowledge(
         "Tu n'inventes jamais, tu dis toujours si tu n'es pas sûr. \n"
     )
 
-    user_prompt = (
-        f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
-        f"Question : {question}\n"
-        f"{photo_diagnosis_section}"
-        f"{conversation_text}\n"
-        "Tâche : Aide cette personne de manière pratique et simple. \n"
-        "- Explique ce que tu comprends du problème (2-3 phrases). \n"
-        "- Donne des conseils concrets qu'on peut faire tout de suite (numérotés). \n"
-        "- Dis si tu penses qu'il faut l'aide d'un expert et pourquoi. \n"
-        "- Sois honnête si tu n'es pas totalement sûr. \n"
-        "- Utilise un langage simple et pratique. \n"
-        "- Limite à 10-15 phrases maximum. \n\n"
-        "Réponds TOUJOURS de manière pratique pour aider la communauté à résoudre ses difficultés."
-    )
+    # Construire le prompt selon qu'on a une photo ou pas
+    if has_photo_diagnosis:
+        # PHOTO ANALYSÉE = point de départ obligatoire
+        user_prompt = (
+            f"Domaine: {domain}. Langue: {language or 'fr'}.\n\n"
+            f"🎯 TU DOIS COMMENCER PAR :\n"
+            f"{photo_diagnosis_section}\n"
+            "Tâche uniquement :\n"
+            "1️⃣ Commence par : 'D'après l'analyse de ta photo :'\n"
+            "2️⃣ Décris ce problème (2-3 phrases claires)\n"
+            "3️⃣ Actions concrètes & pratiques (numérotées)\n"
+            "4️⃣ Dis si expert est VRAIMENT nécessaire\n"
+            "5️⃣ Max 10-15 phrases. Langage SIMPLE.\n"
+            "6️⃣ Ne dévie JAMAIS du diagnostic photo.\n\n"
+            f"{conversation_text}\n"
+        )
+    else:
+        # Sans photo = question textuelle normale
+        user_prompt = (
+            f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
+            f"Question : {question}\n"
+            f"{conversation_text}\n"
+            "Tâche : Aide cette personne de manière pratique et simple. \n"
+            "- Explique ce que tu comprends du problème (2-3 phrases). \n"
+            "- Donne des conseils concrets qu'on peut faire tout de suite (numérotés). \n"
+            "- Dis si tu penses qu'il faut l'aide d'un expert et pourquoi. \n"
+            "- Sois honnête si tu n'es pas totalement sûr. \n"
+            "- Utilise un langage simple et pratique. \n"
+            "- Limite à 10-15 phrases maximum. \n\n"
+            "Réponds TOUJOURS de manière pratique pour aider la communauté à résoudre ses difficultés."
+        )
 
     try:
         completion = openai_client.chat.completions.create(
@@ -2717,55 +2737,78 @@ def generate_llm_answer(
             conversation_text = "\n\nContexte de la conversation en cours :\n" + "\n".join(serialized_turns) + "\n"
 
     # Construire le diagnostic photo détaillé pour enrichir le prompt
+    # ⚠️ SI UNE PHOTO EST ANALYSÉE, C'EST LE POINT DE DÉPART OBLIGATOIRE
     photo_diagnosis_section = ""
-    if photo_analysis:
+    has_photo_diagnosis = False
+    if photo_analysis and (photo_analysis.get("disease_detected") or photo_analysis.get("observations")):
+        has_photo_diagnosis = True
         diagnosis_parts = []
         
         if photo_analysis.get("disease_detected"):
-            diagnosis_parts.append(f"- Maladie/Problème détecté : {photo_analysis.get('disease_detected')}")
+            diagnosis_parts.append(f"Problème détecté : {photo_analysis.get('disease_detected')}")
         
         if photo_analysis.get("detected_subject"):
-            diagnosis_parts.append(f"- Sujet identifié : {photo_analysis.get('detected_subject')}")
+            diagnosis_parts.append(f"Sujet identifié : {photo_analysis.get('detected_subject')}")
         
         if photo_analysis.get("observations"):
-            diagnosis_parts.append(f"- Observations visuelles : {photo_analysis.get('observations')}")
+            diagnosis_parts.append(f"Observations : {photo_analysis.get('observations')}")
         
         if photo_analysis.get("urgency"):
             urgency_fr = {
-                "immediate": "IMMÉDIATE - Danger grave",
-                "high": "ÉLEVÉE - Intervention rapide conseillée",
-                "medium": "MOYENNE - À adresser dans les jours",
-                "low": "BASSE - Situation stable"
+                "immediate": "IMMÉDIATE 🚨",
+                "high": "ÉLEVÉE ⚠️",
+                "medium": "MOYENNE",
+                "low": "BASSE"
             }.get(photo_analysis.get("urgency"), photo_analysis.get("urgency"))
-            diagnosis_parts.append(f"- Niveau d'urgence : {urgency_fr}")
+            diagnosis_parts.append(f"Urgence : {urgency_fr}")
         
         if photo_analysis.get("confidence"):
-            diagnosis_parts.append(f"- Confiance d'analyse : {photo_analysis.get('confidence')}%")
+            diagnosis_parts.append(f"Confiance : {photo_analysis.get('confidence')}%")
         
         if diagnosis_parts:
             photo_diagnosis_section = (
-                "\n⚠️ DIAGNOSTIC PHOTO (analyse IA de vision assistée) :\n"
-                + "\n".join(diagnosis_parts) + 
-                "\n\n📌 IMPORTANT : Ta réponse DOIT être centrée sur ce diagnostic photo spécifique. "
-                "Ne généralise pas au-delà de ce qui a été détecté. Si le diagnostic n'est pas assez clair pour répondre précisément, dis-le.\n"
+                "📸 DIAGNOSTIC PHOTO ANALYSÉE PAR IA :\n"
+                + " | ".join(diagnosis_parts) + 
+                "\n"
             )
 
-    user_prompt = (
-        f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
-        f"Question actuelle de l'utilisateur : {question}\n"
-        f"{photo_diagnosis_section}"
-        f"{conversation_text}\n"
-        f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
-        f"{focus_instruction}"
-        "Tâche : en utilisant UNIQUEMENT ces fiches : \n"
-        "- Donne une réponse courte (10 à 15 phrases max). \n"
-        "- Structure ta réponse ainsi : \n"
-        "  1) Ce que tu comprends du problème (2-3 phrases). \n"
-        "  2) Conseils PRATIQUES en étapes numérotées (1., 2., 3., ...), adaptés à un agriculteur ou éleveur. \n"
-        "  3) Quand il faut absolument appeler un expert humain, un vétérinaire ou un service local. \n"
-        "- Si la question actuelle est une relance, tiens compte du contexte précédent et évite de répéter inutilement la réponse déjà donnée. \n"
-        "Si les fiches ne couvrent pas bien la situation, dis clairement que tu n'as pas assez d'informations et conseille de voir un expert local."
-    )
+    user_prompt = ""
+    
+    # SI photo analysée, c'est LA PRIORITÉ - elle guide TOUT
+    if has_photo_diagnosis:
+        user_prompt = (
+            f"Domaine: {domain}. Langue: {language or 'fr'}.\n\n"
+            f"🎯 POINT DE DÉPART OBLIGATOIRE - Analyse photo :\n"
+            f"{photo_diagnosis_section}\n"
+            f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
+            "INSTRUCTIONS STRICTES :\n"
+            "1️⃣ Commence OBLIGATOIREMENT par : 'D'après l'analyse de ta photo :'\n"
+            "2️⃣ Expose d'abord le diagnostic détecté\n"
+            "3️⃣ Donne des actions CONCRÈTES basées sur ce diagnostic\n"
+            "4️⃣ Dis clairement si expert est nécessaire\n"
+            "5️⃣ Max 10-15 phrases. Langage SIMPLE.\n"
+            "6️⃣ Ne varie PAS du diagnostic. S'il y a des fiches pertinentes, base-toi dessus.\n"
+            "Si tu n'as pas assez d'infos des fiches, dis-le franchement.\n\n"
+            f"{focus_instruction}"
+            f"{conversation_text}"
+        )
+    else:
+        # Sans photo analysée, question textuelle normale
+        user_prompt = (
+            f"Langue demandée: {language or 'fr'}. Domaine: {domain}.\n"
+            f"Question actuelle de l'utilisateur : {question}\n"
+            f"{conversation_text}\n"
+            f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
+            f"{focus_instruction}"
+            "Tâche : en utilisant UNIQUEMENT ces fiches : \n"
+            "- Donne une réponse courte (10 à 15 phrases max). \n"
+            "- Structure ta réponse ainsi : \n"
+            "  1) Ce que tu comprends du problème (2-3 phrases). \n"
+            "  2) Conseils PRATIQUES en étapes numérotées (1., 2., 3., ...), adaptés à un agriculteur ou éleveur. \n"
+            "  3) Quand il faut absolument appeler un expert humain, un vétérinaire ou un service local. \n"
+            "- Si la question actuelle est une relance, tiens compte du contexte précédent et évite de répéter inutilement la réponse déjà donnée. \n"
+            "Si les fiches ne couvrent pas bien la situation, dis clairement que tu n'as pas assez d'informations et conseille de voir un expert local."
+        )
 
     try:
         # Utiliser un modèle GPT standard largement disponible
