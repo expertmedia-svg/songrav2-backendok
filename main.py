@@ -59,6 +59,288 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
 
 # ==========================================
+# DÉTECTION D'URGENCE - SOS/ACCIDENTS CRITIQUES
+# ==========================================
+
+def detect_emergency(text: str, category: Optional[str] = None) -> Dict[str, Any]:
+    """Détecte automatiquement les situations d'urgence/critiques.
+    
+    Retourne:
+    {
+        "is_emergency": True/False,
+        "severity": "critical" | "high" | "medium" | "normal",
+        "emergency_type": "accident" | "saignement" | "inconscience" | "empoisonnement" | etc.,
+        "protocol": "protocole de premiers secours spécifique",
+        "immediate_actions": ["action 1", "action 2", ...],
+        "call_emergency_number": "15 ou 17 ou 112 (FR: SAMU/Police/Ambulance)",
+        "warning_alert": "Alerte à afficher à l'utilisateur"
+    }
+    """
+    text_lower = text.lower().strip()
+    
+    # Mots-clés CRITIQUES - VIE OU MORT
+    critical_keywords = {
+        # Accidents
+        "accident": "accident",
+        "chute": "accident", 
+        "collision": "accident",
+        "fracture": "accident",
+        "coup": "accident",
+        "blessure grave": "accident",
+        
+        # Saignements graves
+        "saigne": "saignement",
+        "saignement": "saignement",
+        "hémorragie": "saignement",
+        "saigne de la tete": "saignement_tete",
+        "saigne de la face": "saignement_tete",
+        
+        # État de conscience
+        "inconscient": "inconscience",
+        "perd connaissance": "inconscience",
+        "évanoui": "inconscience",
+        "coma": "inconscience",
+        
+        # Respiratoire
+        "asphyxie": "respiratoire",
+        "étouffement": "respiratoire",
+        "ne respire pas": "respiratoire",
+        "difficulté respirer": "respiratoire",
+        "étranglement": "respiratoire",
+        
+        # Empoisonnement/Ingestion
+        "poison": "empoisonnement",
+        "empoisonnement": "empoisonnement",
+        "intoxication": "empoisonnement",
+        "avalé": "empoisonnement",
+        "intoxiqué": "empoisonnement",
+        
+        # Brûlures graves
+        "brûlure grave": "brulure",
+        "brûlé": "brulure",
+        "embrasé": "brulure",
+        
+        # Électrocution
+        "électrocuté": "electrocution",
+        "électrochoc": "electrocution",
+        "courant électrique": "electrocution",
+        
+        # Choc/Arrêt cardiaque
+        "arrêt cardiaque": "arrêt_cardiaque",
+        "crise cardiaque": "arrêt_cardiaque",
+        "infarctus": "arrêt_cardiaque",
+        "choc": "choc",
+        
+        # Convulsions
+        "convulsion": "convulsion",
+        "crise": "convulsion",
+        "tremblements": "convulsion",
+    }
+    
+    # Vérifier les mots-clés
+    detected_type = None
+    for keyword, emergency_type in critical_keywords.items():
+        if keyword in text_lower:
+            detected_type = emergency_type
+            break
+    
+    if not detected_type:
+        # Pas d'urgence détectée
+        return {
+            "is_emergency": False,
+            "severity": "normal",
+            "emergency_type": None,
+            "protocol": None,
+            "immediate_actions": [],
+            "call_emergency_number": None,
+            "warning_alert": None
+        }
+    
+    # PROTOCOLES DE PREMIERS SECOURS
+    protocols = {
+        "accident": {
+            "severity": "critical",
+            "call": "112 (SAMU/Ambulance)",
+            "immediate_actions": [
+                "🚨 APPELEZ IMMÉDIATEMENT le 112 ou l'ambulance locale",
+                "1️⃣ Placez la personne en position stable sur le côté (si inconsciente mais respire)",
+                "2️⃣ Vérifiez la respiration et le pouls",
+                "3️⃣ Maintenez la personne au chaud avec vêtements/couvertures",
+                "4️⃣ NE BOUGEZ PAS la colonne vertébrale (risque de paralysie)",
+                "5️⃣ Contrôlez les saignements visibles avec compresses propres",
+                "6️⃣ Restez avec la personne jusqu'à l'arrivée des secours"
+            ],
+            "warning": "🚨 SITUATIONS D'URGENCE CRITIQUE - APPELEZ IMMÉDIATEMENT LES SECOURS (112)"
+        },
+        
+        "saignement": {
+            "severity": "high",
+            "call": "112 (SAMU)",
+            "immediate_actions": [
+                "🚨 SAIGNEMENT GRAVE - Appelez le 112 immédiatement",
+                "1️⃣ Écartez la personne du danger (si possible)",
+                "2️⃣ Nettoyez avec EAU PROPRE si possible",
+                "3️⃣ Appuyez FERMEMENT avec gaze/tissu propre PENDANT 10-15 minutes",
+                "4️⃣ NE RETIREZ PAS la gaze, ajoutez-la par-dessus si saignement continue",
+                "5️⃣ Surélevez la zone blessée au-dessus du cœur si possible",
+                "6️⃣ Maintenez la pression jusqu'à l'arrivée des secours"
+            ],
+            "warning": "🚨 SAIGNEMENT GRAVE - APPELEZ LES SECOURS (112) ET APPUYEZ FERMEMENT"
+        },
+        
+        "saignement_tete": {
+            "severity": "critical",
+            "call": "112 (SAMU)",
+            "immediate_actions": [
+                "🚨 BLESSURE À LA TÊTE AVEC SAIGNEMENT - Appelez le 112 IMMÉDIATEMENT",
+                "1️⃣ Installez la personne en position semi-assise (45°) pour éviter étouffement",
+                "2️⃣ Appuyez DOUCEMENT sur la plaie avec gaze propre (attention: ne pas appuyer trop si fracture du crâne)",
+                "3️⃣ Si perte de conscience: mettez en position latérale stable",
+                "4️⃣ Nettoyez doucement avec eau propre SANS APPUYER",
+                "5️⃣ Surveillez la conscience et la respiration - le saignement peut continuer longtemps",
+                "6️⃣ ATTENTION: Si sommeil anormal, vomissements ou troubles vision → très grave, ambulance URGENTE"
+            ],
+            "warning": "🚨 BLESSURE À LA TÊTE CRITIQUE - APPELEZ LE 112 URGENTEMENT"
+        },
+        
+        "inconscience": {
+            "severity": "critical",
+            "call": "112 (SAMU/Ambulance)",
+            "immediate_actions": [
+                "🚨 PERTE DE CONSCIENCE - Appelez le 112 IMMÉDIATEMENT",
+                "1️⃣ Vérifiez si la personne RESPIRE (regardez le thorax, écoutez)",
+                "2️⃣ SI RESPIRE: Position latérale stable (couché sur le côté - tête vers l'arrière)",
+                "3️⃣ SI NE RESPIRE PAS: Commencez le massage cardiaque",
+                "   - Appuyer au centre du thorax, 100-120 compressions/minute",
+                "   - Alterner: 30 compressions, 2 respirations bouche-à-bouche",
+                "4️⃣ Continuez jusqu'à l'arrivée des secours",
+                "5️⃣ Réchauffez avec couvertures"
+            ],
+            "warning": "🚨 PERSONNE INCONSCIENTE - APPELEZ LE 112 ET METTEZ EN POSITION LATÉRALE STABLE"
+        },
+        
+        "respiratoire": {
+            "severity": "critical",
+            "call": "112 (Ambulance)",
+            "immediate_actions": [
+                "🚨 PROBLÈME RESPIRATOIRE GRAVE - Appelez le 112 MAINTENANT",
+                "1️⃣ Desserrez les vêtements autour du cou/poitrine",
+                "2️⃣ Mettez la personne EN POSITION ASSISE (penché vers l'avant)",
+                "3️⃣ Ouvrez grand la bouche pour vérifier obstruction (débris, aliment)",
+                "4️⃣ Si objet visible: enlevez DOUCEMENT avec doigt",
+                "5️⃣ Apaisez la personne - respiration calme aide",
+                "6️⃣ Si perte de conscience + pas de respiration: faire massage cardiaque"
+            ],
+            "warning": "🚨 ASPHYXIE/ÉTOUFFEMENT - APPELEZ LE 112 ET LIBÉREZ LES VOIES RESPIRATOIRES"
+        },
+        
+        "empoisonnement": {
+            "severity": "critical",
+            "call": "112 ou Centre antipoison",
+            "immediate_actions": [
+                "🚨 EMPOISONNEMENT/INTOXICATION - Appelez le 112 ou 15",
+                "1️⃣ Notez EXACTEMENT ce qui a été ingéré (nom, quantité)",
+                "2️⃣ NE FAITES PAS VOMIR sauf si indicateur sur l'étiquette",
+                "3️⃣ Placez en position assise si conscient, latérale si inconscient",
+                "4️⃣ Si conscience perdue: vérifiez respiration",
+                "5️⃣ Apportez le flacon/emballage du poison à l'ambulance",
+                "6️⃣ Surveillez signes: vomissements, convulsions, difficulté respirer"
+            ],
+            "warning": "🚨 EMPOISONNEMENT - APPELEZ LE 112/15 ET NOTEZ LE POISON INGÉRÉ"
+        },
+        
+        "brulure": {
+            "severity": "high",
+            "call": "112 (SAMU) si brûlure grave",
+            "immediate_actions": [
+                "🚨 BRÛLURE GRAVE - Pour brûlures importantes, appelez le 112",
+                "1️⃣ Refroidissez avec EAU FROIDE (ou laissez sous douche) PENDANT 10-20 minutes",
+                "2️⃣ Ne pas utiliser eau glacée - juste froide",
+                "3️⃣ Enlevez les vêtements non collants (ATTENTION: ne pas arracher si collé)",
+                "4️⃣ Couvrez avec tissu PROPRE (gaze, coton stérile)",
+                "5️⃣ NE METTEZ PAS de beurre, huile, pommade",
+                "6️⃣ Donnez eau à boire (petites gorgées) si conscient"
+            ],
+            "warning": "🚨 BRÛLURE GRAVE - REFROIDISSEZ À L'EAU FROIDE ET APPELEZ LE 112"
+        },
+        
+        "electrocution": {
+            "severity": "critical",
+            "call": "112 (SAMU)",
+            "immediate_actions": [
+                "🚨 ÉLECTROCUTION - Appelez le 112 IMMÉDIATEMENT",
+                "1️⃣ ÉLOIGNEZ-VOUS du danger électrique (coupez l'électricité si sûr)",
+                "2️⃣ NE TOUCHEZ PAS la personne si elle touche le courant",
+                "3️⃣ Utilisez un objet NON MÉTALLIQUE pour dégager le contact",
+                "4️⃣ Vérifiez respiration et perte de conscience",
+                "5️⃣ Si inconscient mais respire: position latérale stable",
+                "6️⃣ Si ne respire pas: massage cardiaque immédiat"
+            ],
+            "warning": "🚨 ÉLECTROCUTION - COUPEZ L'ÉLECTRICITÉ ET APPELEZ LE 112"
+        },
+        
+        "arrêt_cardiaque": {
+            "severity": "critical",
+            "call": "112 (SAMU)",
+            "immediate_actions": [
+                "🚨 ARRÊT CARDIAQUE - Appelez le 112 IMMÉDIATEMENT",
+                "1️⃣ Vérifiez respiration et pouls (10 secondes max)",
+                "2️⃣ COMMENCEZ LE MASSAGE CARDIAQUE:",
+                "   - Position: coeur (centre poitrine)",
+                "   - Force: appuyer fermement, 100-120 compressions/minute",
+                "3️⃣ Alterner: 30 compressions + 2 respirations bouche-à-bouche",
+                "4️⃣ Continuez SANS ARRÊT jusqu'à:",
+                "   - Arrivée ambulance",
+                "   - Reprise conscience/respiration",
+                "5️⃣ Si DEA (défibrillateur) disponible: utilisez immédiatement"
+            ],
+            "warning": "🚨 ARRÊT CARDIAQUE - APPELEZ LE 112 ET COMMENCEZ MASSAGE CARDIAQUE"
+        },
+        
+        "choc": {
+            "severity": "high",
+            "call": "112 si état s'aggrave",
+            "immediate_actions": [
+                "🚨 CHOC (état grave) - Appelez le 112",
+                "1️⃣ Allongez la personne sur le dos",
+                "2️⃣ Soulevez les jambes (30cm) pour irriguer le cerveau",
+                "3️⃣ Maintenez au chaud avec couvertures",
+                "4️⃣ Nettoyez les plaies visibles, arrêtez saignements",
+                "5️⃣ Rassurez la personne - parlez calmement",
+                "6️⃣ Si vomissements: tournez la tête sur le côté"
+            ],
+            "warning": "🚨 CHOC - ALLONGEZ À PLAT, ÉLEVEZ LES JAMBES, APPELEZ LE 112"
+        },
+        
+        "convulsion": {
+            "severity": "high",
+            "call": "112 après convulsions",
+            "immediate_actions": [
+                "🚨 CONVULSIONS - Ne paniquez pas",
+                "1️⃣ ÉCARTEZ les objets tranchants/dangereux autour",
+                "2️⃣ NE RETENEZ PAS les mouvements, laissez convulser",
+                "3️⃣ Placez quelque chose de mou SOUS la tête",
+                "4️⃣ Tournez la tête sur le côté (écume peut s'écouler)",
+                "5️⃣ Une fois convulsions terms: position latérale stable",
+                "6️⃣ Appelez le 112 et restez avec la personne"
+            ],
+            "warning": "🚨 CONVULSIONS - ÉCARTEZ LES OBJETS DANGEREUX, LAISSER CONVULSER, POSITION LATÉRALE APRÈS"
+        }
+    }
+    
+    protocol = protocols.get(detected_type, protocols["accident"])
+    
+    return {
+        "is_emergency": True,
+        "severity": protocol["severity"],
+        "emergency_type": detected_type,
+        "protocol": protocol.get("warning"),
+        "immediate_actions": protocol.get("immediate_actions", []),
+        "call_emergency_number": protocol.get("call"),
+        "warning_alert": protocol.get("warning")
+    }
+
+# ==========================================
 # MODÈLES (Compatibles avec base existante)
 # ==========================================
 
@@ -3256,6 +3538,101 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     else:
         kb_domain = "agriculture"
     
+    # ✅ DÉTECTION D'URGENCE - CRITÈRE AUTOMATIQUE AVANT RAG
+    print("\n[EMERGENCY-CHECK] Vérification d'urgence critique...")
+    emergency_info = detect_emergency(data.content, chosen_category)
+    
+    if emergency_info["is_emergency"]:
+        print(f"🚨 [EMERGENCY-DETECTED] Type: {emergency_info['emergency_type']}, Sévérité: {emergency_info['severity']}")
+        print(f"   Actions: {len(emergency_info['immediate_actions'])} étapes numérotées")
+        print(f"   Numéro secours: {emergency_info['call_emergency_number']}")
+        
+        # Créer la réponse d'urgence avec protocoles de premiers secours
+        emergency_response = f"""🚨🚨🚨 SITUATION D'URGENCE CRITIQUE 🚨🚨🚨
+
+{emergency_info['warning_alert']}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**ACTIONS IMMÉDIATES À FAIRE MAINTENANT:**
+
+"""
+        for idx, action in enumerate(emergency_info['immediate_actions'], 1):
+            emergency_response += f"{action}\n"
+        
+        emergency_response += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**APPELEZ IMMÉDIATEMENT LES SECOURS:**
+🚑 {emergency_info['call_emergency_number']}
+
+⏱️ CHAQUE MINUTE EST CRUCIALE
+Ne perdez pas de temps à discuter - commencez les gestes de premiers secours MAINTENANT
+Appelez les secours pendant que vous effectuez ces gestes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+        
+        # Créer le ticket normalement mais marquer comme URGENCE CRITIQUE
+        ticket = Ticket(
+            user_id=user.id,
+            category=chosen_category,
+            urgency="critical",
+            ai_confidence_score=100,
+            ai_extracted_keywords=json.dumps(["urgence", "SOS", emergency_info["emergency_type"]], ensure_ascii=False),
+            ai_photo_analysis=None,
+            photo_path=None,
+            status="emergency",
+            internal_notes=json.dumps({
+                "emergency_type": emergency_info["emergency_type"],
+                "severity": emergency_info["severity"],
+                "protocol": emergency_info["emergency_type"],
+                "auto_detected": True
+            }, ensure_ascii=False)
+        )
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        
+        # Créer le message utilisateur
+        message = Message(
+            ticket_id=ticket.id,
+            sender_type="user",
+            sender_id=user.id,
+            content=data.content,
+            channel=data.channel
+        )
+        db.add(message)
+        db.commit()
+        
+        # Créer le message de réponse d'urgence
+        ai_message = Message(
+            ticket_id=ticket.id,
+            sender_type="assistant",
+            sender_id=None,
+            content=emergency_response,
+            channel=data.channel,
+            is_ai_generated=True
+        )
+        db.add(ai_message)
+        db.commit()
+        
+        # Retourner la réponse d'urgence
+        return {
+            "status": "success",
+            "ticket_id": ticket.id,
+            "is_emergency": True,
+            "severity": emergency_info["severity"],
+            "emergency_type": emergency_info["emergency_type"],
+            "llm_answer": emergency_response,
+            "ai_analysis": {
+                "category": chosen_category,
+                "urgency": "critical",
+                "confidence": 100,
+                "emergency_detected": True,
+                "emergency_protocol": emergency_info["emergency_type"]
+            }
+        }
+    
     # 3. Analyse photo si présente (RESTAURÉ)
     photo_analysis = None
     photo_path = None
@@ -3349,12 +3726,24 @@ async def incoming_sms(data: MessageCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(ticket)
     
-    # 5. Créer message
+    # 5. Créer message - si photo_analysis existe, sauvegarder l'analyse formatée comme premier message
+    # Car l'analyse de l'image EST la première demande, pas le texte générique "Question 1"
+    message_content = data.content
+    if photo_analysis_payload:
+        # Formater l'analyse de l'image comme premier message utilisateur
+        message_content = f"""📸 ANALYSE DE L'IMAGE - {photo_analysis_payload.get('disease_detected', 'Analyse détectée')}
+
+**Diagnostic:** {photo_analysis_payload.get('disease_detected', 'Non identifié')}
+**Confiance:** {(photo_analysis_payload.get('confidence', 0) * 100):.0f}%
+**Urgence:** {photo_analysis_payload.get('urgency', 'Normal')}
+
+{photo_analysis_payload.get('analysis', photo_analysis_payload.get('recommendations', 'Voir analyse complète ci-dessous'))}"""
+    
     message = Message(
         ticket_id=ticket.id,
         sender_type="user",
         sender_id=user.id,
-        content=data.content,
+        content=message_content,
         channel=data.channel
     )
     db.add(message)
@@ -3674,6 +4063,13 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
     
     result = []
     for ticket in tickets:
+        # Récupérer le PREMIER message utilisateur (la demande initiale, y compris analyse d'image)
+        first_user_msg = db.query(Message).filter(
+            Message.ticket_id == ticket.id,
+            Message.sender_type == 'user'
+        ).order_by(Message.sent_at.asc()).first()
+        
+        # Récupérer le DERNIER message (pour savoir le statut de la conversation)
         last_msg = db.query(Message).filter(
             Message.ticket_id == ticket.id
         ).order_by(Message.sent_at.desc()).first()
@@ -3685,16 +4081,28 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         photo_paths = _load_json_list(ticket.photo_paths_json)
         photo_urls = [_build_upload_url(path) for path in photo_paths if path]
         
+        # Gérer l'analyse photo
+        photo_analysis = None
+        if ticket.ai_photo_analysis:
+            try:
+                if isinstance(ticket.ai_photo_analysis, str):
+                    photo_analysis = json.loads(ticket.ai_photo_analysis)
+                else:
+                    photo_analysis = ticket.ai_photo_analysis
+            except:
+                photo_analysis = None
+        
         result.append({
             "id": ticket.id,
             "category": ticket.category or "agriculture",
             "urgency": ticket.urgency or "low",
             "status": ticket.status or "open",
             "created_at": ticket.created_at,
-            "last_message": last_msg.content if last_msg else "Aucun message",
+            "last_message": (first_user_msg.content if first_user_msg else None) or (last_msg.content if last_msg else "Aucun message"),
             "has_photo": ticket.photo_path is not None,
             "photo_url": photo_url,
             "photo_urls": photo_urls,
+            "photo_analysis": photo_analysis,
         })
     
     return result
