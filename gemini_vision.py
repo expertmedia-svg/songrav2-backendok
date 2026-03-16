@@ -33,51 +33,93 @@ class GeminiVisionEngine:
         try:
             # Créer le prompt contextuel
             if category == "agriculture":
-                context_prompt = """CONSULTATION EN LIGNE - DIAGNOSTIC AGRICOLE - BURKINA FASO
+                context_prompt = """CONSULTATION EN LIGNE - DIAGNOSTIC AGRICOLE COMPLET - BURKINA FASO
 
-TÂCHE: Analyser une photo agricole pour identifier maladies/problèmes et recommander traitement.
+TÂCHE: Analyser une photo agricole en 3 ÉTAPES OBLIGATOIRES:
+  ÉTAPE 1 - OBSERVATION: Décrire précisément ce que vous voyez sur la photo
+  ÉTAPE 2 - CARENCES & MALADIES: Détecter carences nutritionnelles, maladies, ravageurs
+  ÉTAPE 3 - DIAGNOSTIC & TRAITEMENT: Diagnostic complet avec solutions adaptées
 
 CONTEXTE BURKINABÈ:
 - Climat sahélien, sécheresses périodiques
-- Cultures: mil, sorgho, maïs, arachide, coton
+- Cultures: mil, sorgho, maïs, arachide, coton, niébé, sésame
 - Ressources limitées, solutions locales prioritaires
 - Accès aux experts parfois difficile
 
+CARENCES À DÉTECTER (signes visuels clés):
+- Carence Azote (N): feuilles jaunes depuis le bas, croissance ralentie, tiges fines
+- Carence Phosphore (P): feuilles violacées/rougeâtres, racines peu développées
+- Carence Potassium (K): bords feuilles brûlés/jaunis, fruits anormaux
+- Carence Fer (Fe): jaunissement entre nervures (chlorose internervaire) sur jeunes feuilles
+- Carence Magnésium (Mg): jaunissement entre nervures sur vieilles feuilles
+- Carence Calcium (Ca): déformation jeunes feuilles, pourriture apicale
+- Carence Zinc (Zn): petites feuilles, entre-nœuds courts, taches bronze
+- Carence Soufre (S): jaunissement uniforme des jeunes feuilles
+- Carence Manganèse (Mn): taches grises/beiges entre nervures
+- Surhydratation ou Sécheresse: signes de stress hydrique
+
+MALADIES & RAVAGEURS COURANTS BF:
+- Mildiou, Rouille, Anthracnose, Fusariose
+- Chenilles légionnaires, Pucerons, Acariens, Criquets
+- Pourriture des racines, Fonte des semis
+
 ANALYSE REQUISE:
-1. Identifier la culture visible
-2. Détecter chaque maladie, ravageur, anomalie
-3. Évaluer gravité et urgence
-4. Proposer traitement adapté au contexte BF
-5. Recommander prévention future
+1. Décrire précisément la plante et l'état du champ (couleur, forme, stade)
+2. Lister TOUS les symptômes visibles (couleurs anormales, taches, déformations)
+3. Identifier carence(s) probable(s) avec niveau de confiance
+4. Identifier maladies/ravageurs présents
+5. Évaluer gravité, urgence et impact sur récolte
+6. Proposer traitement adapté au contexte BF (produits locaux + chimiques si nécessaire)
+7. Recommander prévention future
 
 IMPORTANT: Répondez UNIQUEMENT avec du JSON valide, RIEN d'autre.
 
-FORMAT JSON COMPLET (exemple):
+FORMAT JSON COMPLET:
 {
-    "consultation_type": "Diagnostic agricole",
+    "consultation_type": "Diagnostic agricole complet",
+    "what_i_see": "Description précise et détaillée de ce qui est visible sur la photo: type de plante, couleur des feuilles, état général, stade de croissance, conditions du champ, etc. C'est la première chose à dire avant tout diagnostic.",
     "culture_detected": "Maïs",
-    "disease_detected": "Rouille ou 'Sain'",
+    "growth_stage": "Végétatif / Floraison / Fructification / Maturité",
+    "general_plant_condition": "Bon / Moyen / Mauvais / Critique",
+    "disease_detected": "Rouille foliacée ou 'Aucun problème détecté'",
+    "deficiencies_detected": [
+        {
+            "deficiency": "Carence en Azote (N)",
+            "confidence": 0.80,
+            "symptoms_observed": ["Jaunissement des vieilles feuilles", "Feuilles jaunes en V depuis la pointe"],
+            "impact": "Perte de rendement estimée 20-40% si non corrigée"
+        }
+    ],
+    "all_symptoms": ["Taches oranges sur feuilles", "Jaunissement des bords", "Tige fine"],
     "confidence": 0.85,
     "severity": "modérée",
-    "symptoms": ["Taches oranges sur feuilles", "Progression rapide"],
-    "diagnosis": "Description complète du problème détecté",
-    "treatment_steps": [
-        "1. Nettoyer feuilles affectées",
-        "2. Appliquer traitement local (soufre, eau de savon)",
-        "3. Isoler la zone si possible",
-        "4. Surveiller progression quotidiennement"
-    ],
-    "local_remedies": ["Eau + savon (insecticide naturel)", "Cendre de bois comme fongicide"],
-    "when_to_call_expert": "Si progression rapide ou 50% de la récolte affectée",
     "urgency": "medium",
-    "prevention": "Rotation des cultures, semences saines, nettoyage des outils",
-    "visual_observations": ["Détail 1", "Détail 2"],
-    "analysis": "Analyse détaillée en français simple, adapté au contexte burkinabè"
+    "diagnosis": "Explication complète et claire du ou des problèmes détectés: ce qui se passe dans la plante, pourquoi ces symptômes apparaissent, et les risques si non traité.",
+    "treatment_steps": [
+        "1. Action immédiate: ...",
+        "2. Apporter engrais/traitement: ...",
+        "3. Surveiller l'évolution",
+        "4. Fréquence d'application"
+    ],
+    "deficiency_corrections": [
+        "Pour carence Azote: urée (46-0-0) ou compost bien décomposé, 50kg/ha",
+        "Pour carence Fer: sulfate ferreux en pulvérisation foliaire si disponible"
+    ],
+    "local_remedies": ["Compost de déchets ménagers", "Cendre de bois (potasse)", "Urine fermentée (azote)", "Fumier de parc"],
+    "chemical_treatments": ["Engrais NPK disponible au marché local", "Fongicide cuivrique si maladie fongique"],
+    "when_to_call_expert": "Si progression rapide ou plus de 50% de la récolte affectée",
+    "prevention": "Rotation des cultures, amendement organique, semences certifiées, gestion de l'eau",
+    "visual_observations": ["Couleur réelle des feuilles", "Zones affectées précises", "Stade de la plante"],
+    "harvest_risk": "Risque faible / modéré / élevé sur la récolte actuelle",
+    "analysis": "Résumé complet en français simple: Ce que j'observe → Ce que cela signifie → Ce qu'il faut faire MAINTENANT → Ce qu'il faut faire dans 1-2 semaines. Adapté à un agriculteur burkinabè sans formation spécialisée."
 }"""
             elif category == "elevage":
-                context_prompt = """CONSULTATION EN LIGNE - DIAGNOSTIC VÉTÉRINAIRE - BURKINA FASO
+                context_prompt = """CONSULTATION EN LIGNE - DIAGNOSTIC VÉTÉRINAIRE COMPLET - BURKINA FASO
 
-TÂCHE: Analyser photo animal pour identifier maladies/problèmes de santé et traitement recommandé.
+TÂCHE: Analyser photo animal en 3 ÉTAPES OBLIGATOIRES:
+  ÉTAPE 1 - OBSERVATION: Décrire précisément ce que vous voyez (espèce, état, anomalies visibles)
+  ÉTAPE 2 - SYMPTÔMES: Identifier chaque signe anormal et sa signification médicale
+  ÉTAPE 3 - DIAGNOSTIC & TRAITEMENT: Diagnostic complet avec solutions adaptées
 
 CONTEXTE BURKINABÈ:
 - Élevages: bovins, ovins, caprins, volailles adaptés climat sahélien
@@ -87,8 +129,8 @@ CONTEXTE BURKINABÈ:
 - Nombreux petits éleveurs sans accès direct aux vétérinaires
 
 ANALYSE REQUISE:
-1. Identifier l'espèce et l'état général
-2. Détecter CHAQUE signe de maladie/blessure/anomalie
+1. Décrire l'animal (espèce, âge apparent, état corporel, comportement visible)
+2. Détecter CHAQUE signe de maladie/blessure/anomalie avec localisation précise
 3. Évaluer gravité (critique, sérieux, modéré, léger)
 4. Proposer traitement adapté ressources locales
 5. Indiquer quand appeler un vétérinaire
@@ -98,6 +140,7 @@ IMPORTANT: Répondez UNIQUEMENT avec du JSON valide, RIEN d'autre.
 FORMAT JSON COMPLET (exemple):
 {
     "consultation_type": "Diagnostic vétérinaire",
+    "what_i_see": "Description précise et détaillée de l'animal sur la photo: espèce, taille, couleur du pelage/plumage, état général visible, posture, zones anormales observées, conditions environnement.",
     "animal_species": "Chèvre",
     "animal_condition": "Description générale: âge apparent, état corporel, comportement",
     "disease_detected": "Gale ou 'Aucun problème visible'",
@@ -226,24 +269,25 @@ FORMAT JSON:
     "analysis": "Explication simple du danger et pourquoi c'est une arnaque"
 }"""
             else:
-                context_prompt = """TÂCHE: Analyser cette image pour identifier tout problème de santé/maladie.
+                context_prompt = """TÂCHE: Analyser cette image pour identifier tout problème visible.
 
 INSTRUCTIONS:
-- Analysez soigneusement
-- Identifiez problèmes visibles
+- D'abord décrire ce que vous voyez (étape observation)
+- Ensuite identifier les problèmes
 - Donnez confiance 0.0 à 1.0
 - RÉPONDEZ UNIQUEMENT EN JSON, PAS DE TEXTE SUPPLÉMENTAIRE
 
 FORMAT JSON:
 {
+    "what_i_see": "Description précise de ce qui est visible sur la photo avant tout diagnostic",
     "disease_detected": "Problème ou 'Aucun'",
     "confidence": 0.85,
-    "symptoms": ["Symptôme"],
-    "treatment": "Recommandation",
+    "symptoms": ["Symptôme visible"],
+    "treatment": "Recommandation concrète",
     "urgency": "low|medium|high",
-    "prevents": "Prévention",
-    "visual_observations": ["Observation"],
-    "analysis": "Analyse en français"
+    "prevention": "Prévention",
+    "visual_observations": ["Observation détaillée 1", "Observation détaillée 2"],
+    "analysis": "Résumé: Ce que je vois → Ce que cela signifie → Ce qu'il faut faire"
 }"""
             
             # Construire le contenu du message
