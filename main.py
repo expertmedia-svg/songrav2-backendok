@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import google.generativeai as genai
 from gemini_vision import GeminiVisionEngine
+import v2_services
 
 # ==========================================
 # CONFIGURATION
@@ -2801,17 +2802,13 @@ def generate_llm_answer_with_general_knowledge(
         )
 
     try:
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.7,  # Plus naturel et pratique
-        )
-        return completion.choices[0].message.content
+        # Utiliser Gemini au lieu d'OpenAI
+        full_prompt = system_prompt + "\n\n" + user_prompt
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        result = model.generate_content(full_prompt)
+        return result.text
     except Exception as e:
-        print("⚠️ Erreur appel OpenAI (generate_llm_answer_with_general_knowledge):", repr(e))
+        print("⚠️ Erreur appel Gemini (generate_llm_answer_with_general_knowledge):", repr(e))
         return None
 
 
@@ -2872,24 +2869,45 @@ def resolve_knowledge_answer(
     # ÉTAPE 2 : SAUTÉE (ancien RAG expanded qui mélangeait les catégories)
     # On va directement aux connaissances générales de Songra
 
-    # ÉTAPE 3 : Aucune fiche trouvée → Utiliser connaissances générales du LLM
-    # C'est Songra qui répond avec sa propre connaissance, sans inventer de catégories
-    if openai_client and OPENAI_API_KEY:
-        general_answer = generate_llm_answer_with_general_knowledge(
-            question=question,
-            language=language,
-            domain=domain,
-            conversation_context=conversation_context,
-            photo_analysis=photo_analysis,
-        )
-        if general_answer:
-            return {
-                "rag_items": [],
-                "llm_answer": general_answer,
-                "rag_fallback_answer": None,
-                "knowledge_mode": "llm_general_knowledge",  # Songra avec ses connaissances générales
-                "knowledge_fallback_used": True,
-            }
+    # ÉTAPE 3 : Aucune fiche trouvée → Utiliser connaissances générales (Gemini)
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                general_answer = pool.submit(
+                    asyncio.run,
+                    v2_services.gemini_llm_general_knowledge(
+                        question=question,
+                        language=language,
+                        domain=domain,
+                        conversation_context=conversation_context,
+                        photo_analysis=photo_analysis,
+                    )
+                ).result()
+        else:
+            general_answer = asyncio.run(
+                v2_services.gemini_llm_general_knowledge(
+                    question=question,
+                    language=language,
+                    domain=domain,
+                    conversation_context=conversation_context,
+                    photo_analysis=photo_analysis,
+                )
+            )
+    except Exception as e:
+        print(f"[WARN] Gemini general knowledge fallback error: {e}")
+        general_answer = None
+
+    if general_answer:
+        return {
+            "rag_items": [],
+            "llm_answer": general_answer,
+            "rag_fallback_answer": None,
+            "knowledge_mode": "llm_general_knowledge",
+            "knowledge_fallback_used": True,
+        }
 
     # ÉTAPE 4 : Fallback ultime - aucune source d'info disponible
     return {
@@ -2956,9 +2974,8 @@ def generate_llm_answer(
         )
         return "\n\n".join(parts)
 
-    # Si pas de client OpenAI (clé manquante ou désactivée), on renvoie tout
-    # de suite la version structurée basée uniquement sur le RAG.
-    if not openai_client or not OPENAI_API_KEY:
+    # Si Gemini n'est pas configuré, on renvoie la version structurée basée sur le RAG.
+    if not GEMINI_API_KEY:
         return build_structured_from_rag()
 
     context_blocks = []
@@ -3114,21 +3131,14 @@ def generate_llm_answer(
         )
 
     try:
-        # Utiliser un modèle GPT standard largement disponible
-        completion = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-        )
-        return completion.choices[0].message.content
+        # Utiliser Gemini au lieu d'OpenAI
+        full_prompt = system_prompt + "\n\n" + user_prompt
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        result = model.generate_content(full_prompt)
+        return result.text
     except Exception as e:
-        # Log détaillé pour diagnostiquer les problèmes de modèle / de clé
-        print("⚠️ Erreur appel OpenAI (generate_llm_answer):", repr(e))
-        # En cas d'erreur LLM (quota, réseau, modèle indisponible...), on
-        # revient à la réponse structurée 100% basée sur la fiche locale.
+        print("⚠️ Erreur appel Gemini (generate_llm_answer):", repr(e))
+        # En cas d'erreur LLM, on revient à la réponse structurée basée sur la fiche locale.
         return build_structured_from_rag()
 
 # ==========================================
@@ -5379,6 +5389,302 @@ async def send_message(request: SendMessageRequest, db: Session = Depends(get_db
     
     return {"success": True, "message": "Message envoyé"}
 
+
+# ==========================================
+# ROUTES API V2 (Pipeline unifié Gemini)
+# ==========================================
+
+class V2AnalyzeRequest(BaseModel):
+    text: Optional[str] = ""
+    content: Optional[str] = ""
+    category: Optional[str] = "agriculture"
+    photo_base64: Optional[str] = None
+    photo_base64_list: Optional[List[str]] = None
+    generate_media: Optional[bool] = True
+
+class V2EntreprendreRequest(BaseModel):
+    text: Optional[str] = ""
+    content: Optional[str] = ""
+    category: Optional[str] = "agriculture"
+    photo_base64: Optional[str] = None
+    photo_base64_list: Optional[List[str]] = None
+    generate_media: Optional[bool] = True
+
+class V2VideoIllustrationRequest(BaseModel):
+    diagnostic: str
+    steps: Optional[List[str]] = []
+    category: Optional[str] = "agriculture"
+
+def _normalize_category(cat: Optional[str]) -> str:
+    if not cat:
+        return "agriculture"
+    cat = cat.lower().strip()
+    if cat in ("elevage", "élevage"):
+        return "elevage"
+    if cat in ("urgence", "sos_accident", "sos", "health"):
+        return "urgence"
+    return "agriculture"
+
+def _collect_images_b64(photo_base64: Optional[str], photo_base64_list: Optional[List[str]]) -> List[str]:
+    """Collecte et nettoie les images base64"""
+    images = []
+    for payload in ([photo_base64] if photo_base64 else []) + (photo_base64_list or []):
+        if not payload:
+            continue
+        # Retirer le prefix data:image/...;base64, si présent
+        if "," in payload:
+            payload = payload.split(",", 1)[1]
+        if payload not in images:
+            images.append(payload)
+    return images[:3]
+
+
+@app.post("/api/v2/analyze")
+async def v2_analyze(
+    data: V2AnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Pipeline v2 complet : texte + photos → Gemini → décision → médias → réponse unique"""
+    import time as _time
+    start_time = _time.time()
+
+    text = data.text or data.content or ""
+    category = _normalize_category(data.category)
+    generate_media = data.generate_media is not False
+    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+
+    if not text.strip() and not images_b64:
+        raise HTTPException(status_code=400, detail="Envoyez au moins du texte ou une photo pour obtenir un diagnostic.")
+
+    # ÉTAPE 1 : Analyse Gemini unifiée
+    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
+
+    # ÉTAPE 2 : Décision (image? vidéo? urgence?)
+    decision = v2_services.decide(analysis)
+
+    # ÉTAPE 3 : Génération médias (si demandé)
+    image_result = None
+    video_result = None
+
+    if generate_media:
+        import asyncio
+        tasks = []
+
+        if decision["generer_image"] and decision["prompt_image"]:
+            style = "schema" if decision["mode_urgence"] else "illustration"
+            tasks.append(("image", v2_services.generate_image(decision["prompt_image"], style=style)))
+
+        if decision["generer_video"] and decision["prompt_video"]:
+            tasks.append(("video", v2_services.generate_video(
+                decision["prompt_video"],
+                gemini_api_key=GEMINI_API_KEY,
+                duration_sec=5 if decision["mode_urgence"] else 8,
+                is_urgency=decision["mode_urgence"],
+            )))
+
+        for label, coro in tasks:
+            try:
+                result = await coro
+                if label == "image":
+                    image_result = result
+                else:
+                    video_result = result
+            except Exception as e:
+                print(f"[MEDIA] Erreur {label}: {e}")
+
+    # ÉTAPE 4 : Réponse unique
+    final_response = v2_services.build_response(
+        analysis=analysis,
+        decision=decision,
+        image_result=image_result,
+        video_result=video_result,
+    )
+
+    duration = int((_time.time() - start_time) * 1000)
+
+    return {
+        "status": "success",
+        **final_response,
+        "_meta": {
+            "duration_ms": duration,
+            "model": "gemini-2.5-flash",
+            "from_cache": analysis.get("from_cache", False),
+        },
+    }
+
+
+@app.post("/api/v2/scanner/analyze")
+async def v2_scanner_analyze(
+    data: V2AnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Scanner v2 : au moins 1 photo requise"""
+    text = data.text or data.content or ""
+    category = _normalize_category(data.category)
+    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+
+    if not images_b64:
+        raise HTTPException(status_code=400, detail="Le scanner nécessite au moins une photo.")
+
+    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
+    decision = v2_services.decide(analysis)
+    final_response = v2_services.build_response(analysis=analysis, decision=decision)
+
+    return {"status": "success", **final_response}
+
+
+@app.post("/api/v2/assistant/query")
+async def v2_assistant_query(
+    data: V2AnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
+    text = data.text or data.content or ""
+    category = _normalize_category(data.category)
+    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+
+    if not text.strip() and not images_b64:
+        raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
+
+    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
+    decision = v2_services.decide(analysis)
+    final_response = v2_services.build_response(analysis=analysis, decision=decision)
+
+    return {"status": "success", **final_response}
+
+
+@app.post("/api/v2/entreprendre")
+async def v2_entreprendre(
+    data: V2EntreprendreRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Analyse entrepreneuriale d'un terrain → propositions business"""
+    import time as _time
+    start_time = _time.time()
+
+    text = data.text or data.content or ""
+    category = _normalize_category(data.category)
+    generate_media = data.generate_media is not False
+    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+
+    # Analyse entrepreneuriale via Gemini
+    entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
+        text=text, images_b64=images_b64, category=category
+    )
+
+    # Génération image du plan de découpage
+    image_result = None
+    if generate_media and entrepreneurship.get("besoin_image"):
+        cat_label = "d'élevage" if category == "elevage" else "agricole"
+        img_prompt = (
+            f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
+            f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
+            f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
+            "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
+        )
+        try:
+            image_result = await v2_services.generate_image(img_prompt, style="schema")
+        except Exception as e:
+            print(f"[ENTREPRENDRE] Erreur image: {e}")
+
+    duration = int((_time.time() - start_time) * 1000)
+
+    return {
+        "status": "success",
+        **entrepreneurship,
+        "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+        "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+        "image_description": image_result.get("fallback_description") if image_result else None,
+        "_meta": {
+            "duration_ms": duration,
+            "model": "gemini-2.5-flash",
+        },
+    }
+
+
+@app.get("/api/v2/health")
+async def v2_health():
+    """Health check v2"""
+    return {
+        "status": "ok",
+        "service": "songra-v2",
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/v2/generate-video-illustration")
+async def v2_generate_video_illustration(
+    data: V2VideoIllustrationRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Génération on-demand d'une vidéo illustrée"""
+    import time as _time
+    start_time = _time.time()
+
+    diagnostic = data.diagnostic
+    steps_list = (data.steps or [])[:5]
+    cat = _normalize_category(data.category)
+
+    # Tentative 1 : Veo (vraie vidéo)
+    video_result = None
+    try:
+        if cat == "agriculture":
+            video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les gestes techniques pour traiter : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : champ en Afrique sahélienne."
+        elif cat == "elevage":
+            video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les soins pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : élevage rural Burkina Faso."
+        else:
+            video_prompt = f"Vidéo courte (5-8 secondes) montrant les gestes d'urgence pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : village africain."
+
+        video_result = await v2_services.generate_video(
+            video_prompt,
+            gemini_api_key=GEMINI_API_KEY,
+            duration_sec=5 if cat == "urgence" else 8,
+            is_urgency=cat == "urgence",
+        )
+    except Exception as e:
+        print(f"[VIDEO-ILLUS] Veo échoué: {e}")
+
+    # Si Veo a réussi
+    if video_result and video_result.get("success"):
+        return {
+            "status": "success",
+            "type": "video",
+            "video_base64": video_result.get("video_base64"),
+            "video_url": video_result.get("video_url"),
+            "video_mime_type": video_result.get("mime_type", "video/mp4"),
+            "duration_sec": video_result.get("duration_sec"),
+        }
+
+    # Fallback : image infographique étape par étape
+    steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
+
+    if cat == "agriculture":
+        infographic_prompt = f"Infographie pédagogique agricole en 3-4 vignettes montrant les étapes pour traiter : {diagnostic}. {steps_text}. Style bande-dessinée simple, personnages africains. Pas de texte."
+    elif cat == "elevage":
+        infographic_prompt = f"Infographie pédagogique vétérinaire en 3-4 vignettes montrant les soins pour : {diagnostic}. {steps_text}. Style illustration simple. Pas de texte."
+    else:
+        infographic_prompt = f"Infographie premiers secours en 3-4 vignettes montrant les gestes pour : {diagnostic}. {steps_text}. Style schématique clair. Pas de texte."
+
+    try:
+        img_result = await v2_services.generate_image(infographic_prompt, style="schema")
+        if img_result and img_result.get("success"):
+            return {
+                "status": "success",
+                "type": "image_steps",
+                "steps": [{"image_base64": img_result["image_base64"], "mime_type": img_result.get("mime_type", "image/png"), "description": diagnostic}],
+            }
+    except Exception as e:
+        print(f"[VIDEO-ILLUS] Image fallback échoué: {e}")
+
+    # Fallback ultime : texte
+    return {
+        "status": "success",
+        "type": "text_steps",
+        "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
+    }
+
+
 # ==========================================
 # LANCEMENT
 # ==========================================
@@ -5387,10 +5693,11 @@ if __name__ == "__main__":
     import uvicorn
     
     print("=" * 50)
-    print("SONGRA - Backend avec IA complète")
-    print("Version 5.0 - Analyse IA texte + photo")
+    print("SONGRA - Backend unifié v2 (Gemini)")
+    print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
     print("=" * 50)
-    print("Serveur démarré sur http://localhost:8000")
+    print("Serveur démarré sur http://localhost:3000")
+    print("API v2: /api/v2/analyze, /api/v2/entreprendre, /api/v2/scanner/analyze")
     print("Test expert: test@resolvehub.bf / test123")
     print("=" * 50)
     
@@ -5422,4 +5729,4 @@ if __name__ == "__main__":
     
     # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
     # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=3000, reload=False)
