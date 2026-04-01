@@ -19,9 +19,14 @@ import time
 import asyncio
 from typing import Optional, List, Dict, Any
 import google.generativeai as genai
-from google import genai as google_genai
-from google.genai import types as genai_types
 from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
+
+try:
+    import google.genai as google_genai
+    from google.genai import types as genai_types
+except ImportError:
+    google_genai = None
+    genai_types = None
 
 # ══════════════════════════════════════════════════════
 # CONFIGURATION
@@ -229,6 +234,9 @@ def _get_model(model_name: str = GEMINI_MODEL):
 
 def _get_media_client(api_key: Optional[str] = None):
     """Client google.genai dédié aux générations image/vidéo."""
+    if google_genai is None or genai_types is None:
+        raise RuntimeError("google-genai indisponible dans cet environnement")
+
     key = api_key or os.environ.get("GEMINI_API_KEY") or _gemini_key
     if not key:
         raise ValueError("GEMINI_API_KEY non definie")
