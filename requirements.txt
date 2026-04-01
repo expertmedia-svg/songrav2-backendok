@@ -20,12 +20,13 @@ PyJWT==2.10.1
 
 # 5. LLM / GENERATIVE AI
 # Google Gemini for ALL AI (PRIMARY - replaces OpenAI)
-google-generativeai==0.8.2
+google-generativeai==0.8.6
+google-genai==1.69.0
 
 # OpenAI (optional fallback - not required)
 openai==1.59.7
 
-# HTTP client for Veo video generation
+# HTTP client for auxiliary HTTP calls
 httpx==0.27.0
 
 # 6. OPTIONAL/FUTURE

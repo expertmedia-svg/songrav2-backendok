@@ -13,21 +13,28 @@ Modules :
 
 import base64
 import json
+import os
 import re
 import time
 import asyncio
-import httpx
 from typing import Optional, List, Dict, Any
 import google.generativeai as genai
+from google import genai as google_genai
+from google.genai import types as genai_types
+from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 
 # ══════════════════════════════════════════════════════
 # CONFIGURATION
 # ══════════════════════════════════════════════════════
 
+# S'assurer que genai est configuré même si importé avant main.py
+_gemini_key = os.environ.get("GEMINI_API_KEY")
+if _gemini_key:
+    genai.configure(api_key=_gemini_key)
+
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_IMAGE_MODEL = "gemini-2.5-flash"  # pour la génération d'images
-VEO_MODEL = "veo-2.0-generate-001"
-VEO_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+VEO_MODEL = "veo-3.1-generate-preview"
 MAX_PHOTOS = 3
 GEMINI_TIMEOUT = 60  # secondes
 CACHE_TTL = 300  # 5 minutes
@@ -36,6 +43,14 @@ EMERGENCY_NUMBERS = {"pompiers": "18", "police": "17", "samu": "112"}
 
 # Cache simple en mémoire
 _analysis_cache: Dict[str, Dict] = {}
+
+CATEGORY_EXPERTISE = {
+    "agriculture": "agronome-conseil de terrain specialise des cultures vivrieres et maraicheres du Burkina Faso",
+    "elevage": "agent veterinaire de terrain specialise en elevage rural au Burkina Faso",
+    "urgence": "secouriste communautaire de terrain specialise en premiers gestes qui sauvent au Burkina Faso",
+    "sos_accident": "secouriste communautaire de terrain specialise en premiers gestes qui sauvent au Burkina Faso",
+    "cybersecurity": "conseiller local en securite numerique qui explique simplement les arnaques, piratages et bons reflexes mobiles",
+}
 
 
 # ══════════════════════════════════════════════════════
@@ -55,6 +70,10 @@ RÈGLES ABSOLUES :
 4. Adapte-toi au climat sahélien, aux ressources limitées, au faible accès aux hôpitaux/vétérinaires
 5. Priorise toujours les solutions locales avant les solutions chimiques
 6. En cas d'urgence vitale, les gestes qui sauvent la vie passent EN PREMIER
+7. Reste strictement dans la catégorie demandée : agriculture, élevage, urgence ou cybersécurité
+8. Réponds comme un expert local crédible, habitué aux réalités des villages et quartiers du Burkina Faso
+9. Quand tu proposes un visuel ou une vidéo, imagine toujours des personnes, vêtements, habitats et paysages cohérents avec le Burkina Faso rural ou périurbain
+10. Les visuels et vidéos doivent être pédagogiques, calmes, non choquants et utiles pour apprendre un geste ou reconnaître un signe
 
 CONTEXTE TERRAIN :
 - Climat chaud et sec, saison des pluies courte
@@ -62,6 +81,52 @@ CONTEXTE TERRAIN :
 - Centres de santé parfois à des heures de route
 - Eau propre pas toujours disponible
 - Réseau mobile faible - réponses compactes nécessaires"""
+
+
+def _category_expertise(category: str) -> str:
+    return CATEGORY_EXPERTISE.get(category, "expert local de terrain du Burkina Faso")
+
+
+def _category_context_hint(category: str) -> str:
+    if category == "elevage":
+        return (
+            "CONTEXTE : problème lié à un animal d'élevage au Burkina Faso. "
+            "Réponds comme un agent vétérinaire de proximité. "
+            "Reste centré sur l'animal, les soins accessibles localement et le moment où il faut vite consulter."
+        )
+    if category in ("urgence", "sos_accident"):
+        return (
+            "CONTEXTE : situation d'urgence / accident / blessure humaine au Burkina Faso. "
+            "Réponds comme un secouriste local. PRIORITE AUX GESTES QUI SAUVENT LA VIE. "
+            "Aucun conseil dangereux, aucun geste complexe sans supervision."
+        )
+    if category == "cybersecurity":
+        return (
+            "CONTEXTE : sécurité numérique d'un utilisateur mobile au Burkina Faso. "
+            "Réponds comme un conseiller local en cybersécurité. "
+            "Reste centré sur les bons réflexes téléphone, WhatsApp, SMS, Mobile Money et mots de passe."
+        )
+    return (
+        "CONTEXTE : problème agricole (culture, parcelle, sol) au Burkina Faso. "
+        "Réponds comme un agronome de terrain. "
+        "Reste centré sur les cultures, le sol, l'eau, les ravageurs et les traitements accessibles localement."
+    )
+
+
+def _visual_context_block(category: str, is_urgency: bool = False) -> str:
+    base_context = (
+        "Toujours situer la scene au Burkina Faso, dans un environnement rural ou periurbain credible. "
+        "Montrer des personnes africaines, des habits simples du quotidien, des outils locaux, des concessions, champs, enclos ou centres de sante realistes. "
+        "Le rendu doit etre pedagogique, calme, utile pour apprendre, sans element choquant ni sensationnaliste. "
+        "Aucun texte incruste dans l'image ou la video."
+    )
+    if category == "elevage":
+        return base_context + " Montrer un eleveur, un enclos propre, des animaux courants du Burkina Faso et des gestes de soin simples."
+    if category in ("urgence", "sos_accident") or is_urgency:
+        return base_context + " Montrer un cadre de premiers secours realiste, propre et non graphique, avec des gestes lents et rassurants."
+    if category == "cybersecurity":
+        return base_context + " Si un visuel est demande, montrer un telephone, un SMS, une interface Mobile Money ou WhatsApp de facon simple et non anxiogene."
+    return base_context + " Montrer des cultures, outils et gestes agricoles realistes pour le Burkina Faso."
 
 ANALYSIS_PROMPT = SYSTEM_PROMPT + """
 
@@ -90,7 +155,8 @@ RETOURNE UNIQUEMENT un objet JSON valide avec cette structure EXACTE :
 IMPORTANT :
 - Retourne UNIQUEMENT le JSON, pas de texte avant ni après
 - Pas de commentaires, pas de markdown, juste le JSON pur
-- En cas d'urgence vitale (gravite = "critique"), les actions_immediates doivent être des gestes de survie numérotés"""
+- En cas d'urgence vitale (gravite = "critique"), les actions_immediates doivent être des gestes de survie numérotés
+- Le diagnostic et les actions doivent rester strictement dans la catégorie demandée et refléter les réalités du Burkina Faso"""
 
 
 ENTREPRENDRE_PROMPT = SYSTEM_PROMPT + """
@@ -148,6 +214,7 @@ IMPORTANT :
 - Inclus toujours un projet à faible investissement (< 25000 FCFA)
 - Donne des chiffres réalistes pour le Burkina Faso
 - Le calendrier doit suivre les saisons du Sahel (sèche oct-mai, pluies juin-sept)
+- Si tu proposes un visuel ou une vidéo, ils doivent montrer un terrain et des personnes cohérents avec le Burkina Faso
 - Retourne UNIQUEMENT le JSON, pas de texte avant ni après"""
 
 
@@ -158,6 +225,42 @@ IMPORTANT :
 def _get_model(model_name: str = GEMINI_MODEL):
     """Obtenir un modèle Gemini configuré"""
     return genai.GenerativeModel(model_name)
+
+
+def _get_media_client(api_key: Optional[str] = None):
+    """Client google.genai dédié aux générations image/vidéo."""
+    key = api_key or os.environ.get("GEMINI_API_KEY") or _gemini_key
+    if not key:
+        raise ValueError("GEMINI_API_KEY non definie")
+    return google_genai.Client(api_key=key)
+
+
+def _image_aspect_ratio(style: str) -> str:
+    if style == "schema":
+        return "1:1"
+    if style == "photo_realiste":
+        return "16:9"
+    return "4:3"
+
+
+def _sanitize_visual_prompt(prompt: str, is_urgency: bool) -> str:
+    cleaned = " ".join((prompt or "").split())
+    if not is_urgency:
+        return cleaned
+    return (
+        "Illustration ou animation pédagogique non graphique de premiers secours. "
+        "Ne montrer ni sang, ni plaie ouverte, ni blessure choquante. "
+        "Montrer seulement les mains, le tissu propre, le bandage, la position du corps et le geste sûr. "
+        f"Sujet: {cleaned}"
+    )
+
+
+def _normalize_video_duration(duration_sec: int) -> int:
+    if duration_sec <= 4:
+        return 4
+    if duration_sec <= 6:
+        return 6
+    return 8
 
 
 def _parse_gemini_json(response_text: str) -> dict:
@@ -257,6 +360,220 @@ def _get_cache_key(text: str, category: str, has_image: bool) -> str:
     return f"{category}:{'img' if has_image else 'txt'}:{normalized}"
 
 
+def _should_use_resilient_fallback(error: Exception) -> bool:
+    if isinstance(error, (ResourceExhausted, GoogleAPICallError, TimeoutError)):
+        return True
+
+    message = str(error).lower()
+    fallback_markers = [
+        "spending cap",
+        "resourceexhausted",
+        "quota",
+        "rate limit",
+        "429",
+        "service unavailable",
+        "deadline exceeded",
+        "timed out",
+        "impossible de parser la réponse gemini",
+    ]
+    return any(marker in message for marker in fallback_markers)
+
+
+def _build_analysis_fallback(text: str, category: str, has_image: bool, error: Exception) -> dict:
+    normalized_text = (text or "").lower()
+    type_probleme = "urgence" if category in ("urgence", "sos_accident") else category
+    description_visuelle = "Photo reçue mais analyse visuelle avancée temporairement indisponible." if has_image else ""
+
+    if type_probleme == "urgence":
+        return {
+            "type_probleme": "urgence",
+            "description_visuelle": description_visuelle,
+            "diagnostic": "Mode secours activé: la situation doit être évaluée prudemment. En cas de douleur forte, saignement, perte de connaissance, difficulté à respirer ou aggravation rapide, cherchez immédiatement une aide médicale.",
+            "gravite": "critique",
+            "confiance": 0.35,
+            "causes_probables": [
+                "Analyse IA distante temporairement indisponible",
+                "Le problème exact ne peut pas être confirmé sans examen plus précis",
+            ],
+            "actions_immediates": [
+                "Mettre la personne en sécurité et l'éloigner du danger immédiat.",
+                "Observer respiration, conscience et saignement.",
+                "Appeler ou rejoindre rapidement un centre de santé si l'état paraît grave.",
+            ],
+            "actions_detaillees": [
+                "Utiliser seulement de l'eau propre et un tissu propre pour protéger la zone touchée.",
+                "Éviter les gestes risqués ou les produits agressifs sans avis soignant.",
+            ],
+            "actions_preventives": [
+                "Refaire une demande avec plus de détails sur l'accident ou une photo plus nette si possible.",
+            ],
+            "besoin_image": False,
+            "besoin_video": False,
+            "consulter_expert": True,
+            "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
+            "from_fallback": True,
+            "fallback_reason": str(error),
+        }
+
+    if type_probleme == "elevage":
+        return {
+            "type_probleme": "elevage",
+            "description_visuelle": description_visuelle,
+            "diagnostic": "Mode secours activé: le problème semble concerner la santé ou l'état de l'animal, mais le diagnostic précis ne peut pas être confirmé pour le moment.",
+            "gravite": "moyenne",
+            "confiance": 0.4,
+            "causes_probables": [
+                "Infection ou blessure locale",
+                "Stress, chaleur ou hygiène insuffisante",
+                "Analyse IA distante temporairement indisponible",
+            ],
+            "actions_immediates": [
+                "Isoler l'animal si son état semble contagieux ou s'il est très affaibli.",
+                "Vérifier s'il mange, boit, boite, saigne ou respire mal.",
+            ],
+            "actions_detaillees": [
+                "Nettoyer doucement la zone anormale si elle est visible, avec un produit adapté si disponible.",
+                "Garder l'abri propre, sec et calme.",
+                "Refaire une photo nette de la zone touchée et décrire les signes observés.",
+            ],
+            "actions_preventives": [
+                "Surveiller les autres animaux du lot.",
+                "Désinfecter le matériel de soin et les abreuvoirs si nécessaire.",
+            ],
+            "besoin_image": False,
+            "besoin_video": False,
+            "consulter_expert": True,
+            "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
+            "from_fallback": True,
+            "fallback_reason": str(error),
+        }
+
+    causes = [
+        "Carence nutritive ou épuisement du sol",
+        "Stress hydrique ou drainage insuffisant",
+        "Début de maladie foliaire ou attaque de ravageurs",
+    ]
+    diagnostic = "Mode secours activé: la culture montre un stress végétal qui demande vérification locale."
+    immediate_actions = [
+        "Observer si le problème touche seulement quelques plants ou toute la parcelle.",
+        "Vérifier l'humidité du sol au pied des plants.",
+    ]
+    detailed_actions = [
+        "Retirer les feuilles très abîmées si elles sont sèches ou fortement tachées.",
+        "Éviter d'arroser le feuillage tard le soir et privilégier l'arrosage au pied.",
+        "Refaire une photo nette d'une feuille entière et du pied du plant.",
+    ]
+    preventive_actions = [
+        "Surveiller l'évolution sur 24 à 48 heures.",
+        "Prévoir un apport organique ou un complément adapté si le sol paraît pauvre.",
+    ]
+
+    if any(marker in normalized_text for marker in ["jaune", "jaun", "feuille"]):
+        diagnostic = "Le jaunissement des feuilles évoque surtout un stress de culture, souvent lié à une carence nutritive, un manque ou excès d'eau, ou un début de maladie foliaire."
+        causes = [
+            "Carence en azote ou sol appauvri",
+            "Excès d'eau ou manque d'eau",
+            "Début de maladie sur les feuilles",
+        ]
+        detailed_actions.insert(0, "Comparer les feuilles du bas et du haut pour voir si le jaunissement commence par la base.")
+
+    return {
+        "type_probleme": "agriculture",
+        "description_visuelle": description_visuelle,
+        "diagnostic": diagnostic,
+        "gravite": "moyenne",
+        "confiance": 0.42,
+        "causes_probables": causes,
+        "actions_immediates": immediate_actions,
+        "actions_detaillees": detailed_actions,
+        "actions_preventives": preventive_actions,
+        "besoin_image": False,
+        "besoin_video": False,
+        "consulter_expert": False,
+        "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
+        "from_fallback": True,
+        "fallback_reason": str(error),
+    }
+
+
+def _build_entrepreneurship_fallback(category: str, has_image: bool, error: Exception) -> dict:
+    if category == "elevage":
+        propositions = [
+            {
+                "titre": "Petit élevage de volailles amélioré",
+                "description": "Commencer avec un petit lot, un abri propre, eau et alimentation régulières.",
+                "investissement": "20000 à 50000 FCFA",
+                "revenu_estime": "15000 à 40000 FCFA par cycle",
+                "duree_retour": "2 à 3 mois",
+                "difficulte": "facile",
+            },
+            {
+                "titre": "Embouche de petits ruminants",
+                "description": "Valoriser un petit espace avec quelques animaux et une alimentation suivie.",
+                "investissement": "50000 à 150000 FCFA",
+                "revenu_estime": "30000 à 80000 FCFA selon le cycle",
+                "duree_retour": "3 à 6 mois",
+                "difficulte": "moyen",
+            },
+        ]
+    else:
+        propositions = [
+            {
+                "titre": "Maraîchage à petite échelle",
+                "description": "Exploiter une petite surface avec des cultures à rotation rapide et arrosage maîtrisé.",
+                "investissement": "15000 à 40000 FCFA",
+                "revenu_estime": "20000 à 60000 FCFA par cycle",
+                "duree_retour": "1 à 3 mois",
+                "difficulte": "facile",
+            },
+            {
+                "titre": "Culture vivrière avec compost local",
+                "description": "Associer culture principale et apport organique pour réduire les coûts.",
+                "investissement": "10000 à 30000 FCFA",
+                "revenu_estime": "25000 à 70000 FCFA par saison",
+                "duree_retour": "3 à 5 mois",
+                "difficulte": "moyen",
+            },
+        ]
+
+    return {
+        "description_terrain": "Mode secours activé: le terrain ne peut pas être analysé finement pour le moment, mais des pistes locales à faible coût restent proposées.",
+        "surface_estimee": "Non estimée",
+        "type_sol": "À confirmer sur place",
+        "potentiel": "moyen",
+        "propositions": propositions,
+        "decoupage_terrain": "Prévoir une petite zone de test, une zone principale de production et un espace de stockage/eau si possible.",
+        "calendrier_cultural": [
+            {"mois": "début de saison", "activite": "préparer le terrain", "details": "Nettoyer, délimiter et sécuriser l'eau ou l'abri."},
+            {"mois": "mise en place", "activite": "lancer un petit projet pilote", "details": "Commencer petit pour mesurer coûts, mortalité ou rendement."},
+        ],
+        "gestion_eau": {
+            "sources": ["pluie", "réserve locale", "puits si disponible"],
+            "techniques": ["paillage", "arrosage ciblé", "récupération d'eau"],
+            "conseils": "Sécuriser d'abord une solution d'eau minimale avant d'agrandir le projet.",
+        },
+        "engrais_et_semences": {
+            "quand_semer": "Selon la pluie et la disponibilité en eau",
+            "quand_engrais": "Après reprise correcte des plants ou du projet",
+            "types_engrais": ["compost", "fumier bien décomposé"],
+            "semences_recommandees": ["variétés locales adaptées"],
+        },
+        "astuces_locales": [
+            "Commencer petit pour valider la rentabilité avant d'investir davantage.",
+            "Choisir un projet facile à suivre avec les moyens réellement disponibles.",
+        ],
+        "risques": [
+            "Manque d'eau ou alimentation insuffisante",
+            "Sous-estimation des coûts de départ",
+            "Analyse IA avancée temporairement indisponible",
+        ],
+        "besoin_image": False,
+        "besoin_video": False,
+        "from_fallback": True,
+        "fallback_reason": str(error),
+    }
+
+
 # ══════════════════════════════════════════════════════
 # SERVICE D'ANALYSE GEMINI UNIFIÉ
 # ══════════════════════════════════════════════════════
@@ -283,16 +600,11 @@ async def gemini_analyze(
 
     model = _get_model()
 
-    context_hint = ""
-    if category == "elevage":
-        context_hint = "\nCONTEXTE : problème lié à un animal d'élevage au Burkina Faso."
-    elif category in ("urgence", "sos_accident"):
-        context_hint = "\nCONTEXTE : situation d'urgence / accident / blessure humaine. PRIORITÉ AUX GESTES QUI SAUVENT LA VIE."
-    else:
-        context_hint = "\nCONTEXTE : problème agricole (culture, parcelle, sol) au Burkina Faso."
+    context_hint = f"\n{_category_context_hint(category)}"
+    expertise_hint = f"\nPOSTURE : parle comme un {_category_expertise(category)}."
 
     user_message = f"\nDescription de l'utilisateur : {text}" if has_text else "\n(Pas de description textuelle - analyse basée sur l'image uniquement)"
-    full_prompt = ANALYSIS_PROMPT + context_hint + user_message
+    full_prompt = ANALYSIS_PROMPT + context_hint + expertise_hint + user_message
 
     content_parts = [full_prompt]
     for img_b64 in images_b64[:MAX_PHOTOS]:
@@ -301,10 +613,16 @@ async def gemini_analyze(
             "data": img_b64,
         })
 
-    result = await asyncio.to_thread(model.generate_content, content_parts)
-    response_text = result.text
-    raw_json = _parse_gemini_json(response_text)
-    analysis = _validate_analysis(raw_json)
+    try:
+        result = await asyncio.to_thread(model.generate_content, content_parts)
+        response_text = result.text
+        raw_json = _parse_gemini_json(response_text)
+        analysis = _validate_analysis(raw_json)
+    except Exception as error:
+        if not _should_use_resilient_fallback(error):
+            raise
+        print(f"[gemini_analyze] Fallback local active: {error}")
+        analysis = _build_analysis_fallback(text=text, category=category, has_image=has_image, error=error)
 
     if category in ("urgence", "sos_accident"):
         analysis["type_probleme"] = "urgence"
@@ -335,11 +653,10 @@ async def gemini_analyze_entrepreneurship(
 
     model = _get_model()
 
-    context_hint = ""
     if category == "elevage":
-        context_hint = "\nCONTEXTE : terrain destiné à l'élevage au Burkina Faso. Propose des projets d'élevage ET de culture mixte."
+        context_hint = "\nCONTEXTE : terrain destiné à l'élevage au Burkina Faso. Propose des projets d'élevage ET de culture mixte. Réponds comme un conseiller local qui connaît les marchés, l'eau et les contraintes réelles du terrain."
     else:
-        context_hint = "\nCONTEXTE : terrain agricole au Burkina Faso. Propose des projets de culture ET éventuellement d'élevage complémentaire."
+        context_hint = "\nCONTEXTE : terrain agricole au Burkina Faso. Propose des projets de culture ET éventuellement d'élevage complémentaire. Réponds comme un conseiller local qui connaît les saisons, les sols et les débouchés réels."
 
     user_message = f"\nDescription de l'utilisateur : {text}" if has_text else "\n(Pas de description textuelle - analyse basée sur l'image uniquement)"
     full_prompt = ENTREPRENDRE_PROMPT + context_hint + user_message
@@ -351,10 +668,16 @@ async def gemini_analyze_entrepreneurship(
             "data": img_b64,
         })
 
-    result = await asyncio.to_thread(model.generate_content, content_parts)
-    response_text = result.text
-    raw_json = _parse_gemini_json(response_text)
-    return _validate_entrepreneurship(raw_json)
+    try:
+        result = await asyncio.to_thread(model.generate_content, content_parts)
+        response_text = result.text
+        raw_json = _parse_gemini_json(response_text)
+        return _validate_entrepreneurship(raw_json)
+    except Exception as error:
+        if not _should_use_resilient_fallback(error):
+            raise
+        print(f"[gemini_analyze_entrepreneurship] Fallback local active: {error}")
+        return _build_entrepreneurship_fallback(category=category, has_image=has_image, error=error)
 
 
 # ══════════════════════════════════════════════════════
@@ -385,10 +708,17 @@ def decide(analysis: dict) -> dict:
         decision["format_reponse"] = "urgence"
         decision["priorite"] = 1
         decision["generer_image"] = True
-        decision["prompt_image"] = f"Illustration simple et claire montrant le geste de premier secours pour : {analysis['diagnostic']}. Style schématique, couleurs vives, compréhensible sans savoir lire. Contexte africain rural."
+        decision["prompt_image"] = (
+            f"Illustration simple et claire montrant le geste de premier secours pour : {analysis['diagnostic']}. "
+            "Style schématique, couleurs vives, compréhensible sans savoir lire. "
+            "Contexte : Burkina Faso, premiers secours locaux, posture calme et pédagogique."
+        )
         decision["generer_video"] = True
         actions_text = ". ".join(analysis.get("actions_immediates", []))
-        decision["prompt_video"] = f"Vidéo courte de premiers secours (5-8 secondes) montrant les gestes d'urgence pour : {analysis['diagnostic']}. Actions : {actions_text}. Style simple, contexte : village africain."
+        decision["prompt_video"] = (
+            f"Vidéo courte de premiers secours (5-8 secondes) montrant les gestes d'urgence pour : {analysis['diagnostic']}. "
+            f"Actions : {actions_text}. Style simple, contexte : Burkina Faso, village ou quartier local, démonstration pédagogique non graphique."
+        )
         return decision
 
     # GRAVITÉ MOYENNE
@@ -402,22 +732,46 @@ def decide(analysis: dict) -> dict:
     if consulter_expert:
         decision["transfert_expert"] = True
 
-    # TOUJOURS générer image + vidéo pédagogique
+    # En mode standard, on garde l'image auto mais la vidéo reste à la demande
+    # via /api/v2/generate-video-illustration pour éviter de bloquer l'analyse.
     decision["generer_image"] = True
-    decision["generer_video"] = True
+    decision["generer_video"] = False
 
     if type_probleme == "agriculture":
-        decision["prompt_image"] = f"Illustration pédagogique agricole montrant : {analysis['diagnostic']}. Montrer les symptômes sur la plante et le traitement recommandé. Style dessin simple, adapté pour des agriculteurs au Burkina Faso."
+        decision["prompt_image"] = (
+            f"Illustration pédagogique agricole montrant : {analysis['diagnostic']}. "
+            "Montrer les symptômes sur la plante et le traitement recommandé. "
+            "Style dessin simple, adapté pour des agriculteurs du Burkina Faso."
+        )
         actions_text = ". ".join(analysis.get("actions_detaillees", [])[:3])
-        decision["prompt_video"] = f"Vidéo pédagogique courte (5-10 secondes) montrant les gestes techniques pour traiter : {analysis['diagnostic']}. Étapes : {actions_text}. Contexte : champ en Afrique sahélienne."
+        decision["prompt_video"] = (
+            f"Vidéo pédagogique courte (5-10 secondes) montrant les gestes techniques pour traiter : {analysis['diagnostic']}. "
+            f"Étapes : {actions_text}. Contexte : champ sahélien au Burkina Faso, démonstration locale claire."
+        )
     elif type_probleme == "elevage":
-        decision["prompt_image"] = f"Illustration vétérinaire simple montrant : {analysis['diagnostic']}. Montrer les signes à observer sur l'animal et les soins de base. Style schématique, adapté éleveurs ruraux Burkina Faso."
+        decision["prompt_image"] = (
+            f"Illustration vétérinaire simple montrant : {analysis['diagnostic']}. "
+            "Montrer les signes à observer sur l'animal et les soins de base. "
+            "Style schématique, adapté aux éleveurs ruraux du Burkina Faso."
+        )
         actions_text = ". ".join(analysis.get("actions_detaillees", [])[:3])
-        decision["prompt_video"] = f"Vidéo pédagogique courte (5-10 secondes) montrant les soins de base pour : {analysis['diagnostic']}. Étapes : {actions_text}. Contexte : élevage rural Burkina Faso."
+        decision["prompt_video"] = (
+            f"Vidéo pédagogique courte (5-10 secondes) montrant les soins de base pour : {analysis['diagnostic']}. "
+            f"Étapes : {actions_text}. Contexte : élevage rural au Burkina Faso, gestes simples et locaux."
+        )
     else:
-        decision["prompt_image"] = f"Illustration explicative simple pour : {analysis['diagnostic']}. Style clair, compréhensible par tous."
+        decision["prompt_image"] = (
+            f"Illustration explicative simple pour : {analysis['diagnostic']}. "
+            "Style clair, compréhensible par tous, ancré dans le Burkina Faso."
+        )
         actions_text = ". ".join(analysis.get("actions_detaillees", [])[:3])
-        decision["prompt_video"] = f"Vidéo pédagogique courte (5-10 secondes) pour : {analysis['diagnostic']}. Étapes : {actions_text}."
+        decision["prompt_video"] = (
+            f"Vidéo pédagogique courte (5-10 secondes) pour : {analysis['diagnostic']}. "
+            f"Étapes : {actions_text}. Contexte local, démonstration simple et utile."
+        )
+
+    if not decision["generer_video"]:
+        decision["prompt_video"] = None
 
     return decision
 
@@ -426,7 +780,7 @@ def decide(analysis: dict) -> dict:
 # GÉNÉRATEUR D'IMAGES (Gemini)
 # ══════════════════════════════════════════════════════
 
-async def generate_image(prompt: str, style: str = "illustration") -> dict:
+async def generate_image(prompt: str, style: str = "illustration", category: str = "agriculture") -> dict:
     """Génère une image explicative via Gemini"""
     if not prompt or not prompt.strip():
         return {"success": False, "error": "Prompt image requis"}
@@ -437,30 +791,38 @@ async def generate_image(prompt: str, style: str = "illustration") -> dict:
         "photo_realiste": "Style photo-réaliste, contexte rural africain, éclairage naturel.",
     }
 
-    enriched_prompt = f"{prompt}\n\n{style_instructions.get(style, style_instructions['illustration'])}\n\nIMPORTANT: Pas de texte dans l'image. Uniquement des visuels."
+    is_urgency = style == "schema"
+    visual_prompt = _sanitize_visual_prompt(prompt, is_urgency=is_urgency)
+    enriched_prompt = (
+        f"{visual_prompt}\n\n"
+        f"{style_instructions.get(style, style_instructions['illustration'])}\n\n"
+        f"{_visual_context_block(category, is_urgency=is_urgency)}\n\n"
+        "IMPORTANT: Pas de texte dans l'image. Uniquement des visuels simples, utiles et non choquants."
+    )
 
     try:
-        model = _get_model(GEMINI_IMAGE_MODEL)
-
-        result = await asyncio.to_thread(
-            model.generate_content,
-            {
-                "contents": [{"role": "user", "parts": [{"text": enriched_prompt}]}],
-                "generation_config": {"response_modalities": ["TEXT", "IMAGE"]},
-            },
+        client = _get_media_client()
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=GEMINI_IMAGE_MODEL,
+            contents=[enriched_prompt],
+            config=genai_types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=genai_types.ImageConfig(
+                    aspect_ratio=_image_aspect_ratio(style),
+                ),
+            ),
         )
 
-        response = result
         image_base64 = None
         mime_type = "image/png"
 
-        if hasattr(response, "candidates") and response.candidates:
-            parts = response.candidates[0].content.parts or []
-            for part in parts:
-                if hasattr(part, "inline_data") and part.inline_data:
-                    image_base64 = base64.b64encode(part.inline_data.data).decode("utf-8")
-                    mime_type = part.inline_data.mime_type or "image/png"
-                    break
+        for part in getattr(response, "parts", []) or []:
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data and getattr(inline_data, "data", None):
+                image_base64 = base64.b64encode(inline_data.data).decode("utf-8")
+                mime_type = inline_data.mime_type or "image/png"
+                break
 
         if not image_base64:
             return {
@@ -487,86 +849,78 @@ async def generate_image(prompt: str, style: str = "illustration") -> dict:
 # GÉNÉRATEUR DE VIDÉOS (Veo via REST)
 # ══════════════════════════════════════════════════════
 
-async def generate_video(prompt: str, gemini_api_key: str, duration_sec: int = 5, is_urgency: bool = False) -> dict:
+async def generate_video(
+    prompt: str,
+    gemini_api_key: str,
+    duration_sec: int = 5,
+    is_urgency: bool = False,
+    category: str = "agriculture",
+) -> dict:
     """Génère une courte vidéo pédagogique via Veo"""
     if not prompt or not prompt.strip():
         return _video_fallback(prompt, duration_sec)
 
-    duration_sec = max(3, min(10, duration_sec))
-
+    duration_sec = _normalize_video_duration(duration_sec)
+    aspect_ratio = "9:16" if is_urgency else "16:9"
+    visual_prompt = _sanitize_visual_prompt(prompt, is_urgency=is_urgency)
     enriched_prompt = (
-        f"Vidéo d'urgence de {duration_sec} secondes. {prompt} Mouvements lents et clairs, gestes de premiers secours visibles. Pas de texte. Contexte : village africain."
+        f"Vidéo pédagogique d'urgence de {duration_sec} secondes. {visual_prompt} "
+        "Montrer un geste calme, non graphique, démontré par des mains propres ou un mannequin de formation. "
+        f"{_visual_context_block('urgence', is_urgency=True)} "
+        "Aucun sang, aucune plaie visible, aucun texte à l'écran. Mouvement lent et clair."
         if is_urgency
-        else f"Vidéo pédagogique de {duration_sec} secondes. {prompt} Gestes simples et lents, faciles à reproduire. Pas de texte. Contexte rural Burkina Faso."
+        else f"Vidéo pédagogique de {duration_sec} secondes. {visual_prompt} "
+        f"{_visual_context_block(category, is_urgency=False)} "
+        "Montrer une démonstration simple, propre, étape par étape. Aucun texte à l'écran."
     )
 
     try:
-        start_url = f"{VEO_API_BASE}/models/{VEO_MODEL}:predictLongRunning?key={gemini_api_key}"
+        client = _get_media_client(gemini_api_key)
+        operation = await asyncio.to_thread(
+            client.models.generate_videos,
+            model=VEO_MODEL,
+            prompt=enriched_prompt,
+            config=genai_types.GenerateVideosConfig(
+                duration_seconds=duration_sec,
+                aspect_ratio=aspect_ratio,
+            ),
+        )
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            start_res = await client.post(
-                start_url,
-                json={
-                    "instances": [{"prompt": enriched_prompt}],
-                    "parameters": {"sampleCount": 1},
-                },
-            )
+        max_wait = 90 if is_urgency else 120
+        start_time = time.time()
 
-            if start_res.status_code != 200:
-                raise ValueError(f"Veo API {start_res.status_code}: {start_res.text[:200]}")
+        while not getattr(operation, "done", False) and (time.time() - start_time) < max_wait:
+            await asyncio.sleep(10)
+            operation = await asyncio.to_thread(client.operations.get, operation)
 
-            operation = start_res.json()
-            op_name = operation.get("name")
-            if not op_name:
-                raise ValueError("Veo : pas de nom d'opération retourné")
+        if not getattr(operation, "done", False):
+            return _video_fallback(prompt, duration_sec, error="Délai Veo dépassé")
 
-            # Polling (max ~90s avec backoff)
-            max_wait = 60 if is_urgency else 90
-            start_time = time.time()
-            poll_delay = 5
+        response = getattr(operation, "response", None)
+        generated_videos = getattr(response, "generated_videos", None) or []
+        if generated_videos:
+            video = generated_videos[0]
+            video_bytes = await asyncio.to_thread(client.files.download, file=video.video)
+            return {
+                "success": True,
+                "video_base64": base64.b64encode(video_bytes).decode("utf-8"),
+                "video_url": None,
+                "mime_type": "video/mp4",
+                "duration_sec": duration_sec,
+            }
 
-            while time.time() - start_time < max_wait:
-                await asyncio.sleep(poll_delay)
-                poll_delay = min(poll_delay * 1.5, 15)
+        filtered_reasons = getattr(response, "rai_media_filtered_reasons", None) or []
+        if filtered_reasons:
+            return _video_fallback(prompt, duration_sec, error=" ; ".join(filtered_reasons))
 
-                poll_url = f"{VEO_API_BASE}/{op_name}?key={gemini_api_key}"
-                poll_res = await client.get(poll_url)
-                if poll_res.status_code != 200:
-                    continue
-
-                poll_data = poll_res.json()
-                if not poll_data.get("done"):
-                    continue
-
-                predictions = (poll_data.get("response") or {}).get("predictions", [])
-                for pred in predictions:
-                    if pred.get("bytesBase64Encoded"):
-                        return {
-                            "success": True,
-                            "video_base64": pred["bytesBase64Encoded"],
-                            "video_url": None,
-                            "mime_type": pred.get("mimeType", "video/mp4"),
-                            "duration_sec": duration_sec,
-                        }
-                    if pred.get("videoUri"):
-                        return {
-                            "success": True,
-                            "video_base64": None,
-                            "video_url": pred["videoUri"],
-                            "mime_type": "video/mp4",
-                            "duration_sec": duration_sec,
-                        }
-
-                return _video_fallback(prompt, duration_sec)
-
-            return _video_fallback(prompt, duration_sec)
+        return _video_fallback(prompt, duration_sec, error="Aucune vidéo retournée par Veo")
 
     except Exception as e:
         print(f"[videoGenerator] Erreur: {e}")
-        return _video_fallback(prompt, duration_sec)
+        return _video_fallback(prompt, duration_sec, error=str(e))
 
 
-def _video_fallback(prompt: str, duration_sec: int) -> dict:
+def _video_fallback(prompt: str, duration_sec: int, error: Optional[str] = None) -> dict:
     return {
         "success": False,
         "fallback": True,
@@ -577,7 +931,7 @@ def _video_fallback(prompt: str, duration_sec: int) -> dict:
             "Étape 3 : Suivez les gestes décrits lentement",
         ],
         "duration_sec": duration_sec,
-        "error": "Génération vidéo non disponible - utilisez les instructions étape par étape",
+        "error": error or "Génération vidéo non disponible - utilisez les instructions étape par étape",
     }
 
 
@@ -701,7 +1055,7 @@ def _build_actions_list(analysis: dict, decision: dict) -> list:
     for action in analysis.get("actions_preventives", []):
         if action.lower().strip() not in existing:
             existing.add(action.lower().strip())
-            actions.append({"numero": index, "texte": action, "type": "preventif", "priorite": "normale"})
+            actions.append({"numero": index, "texte": action, "type": "prevention", "priorite": "conseil"})
             index += 1
 
     return actions
@@ -750,6 +1104,7 @@ async def gemini_llm_answer(
         "- Tu dois répondre UNIQUEMENT avec les fiches ci-dessous. \n"
         "- Si les fiches ne suffisent pas, dis-le clairement. \n"
         "- Langage TRÈS simple, phrases courtes, concret, sans jargon. \n"
+        f"- Tu parles comme un {_category_expertise(domain)}. \n"
         "- TOUJOURS recommander de vérifier avec un expert local. \n"
     )
 
@@ -827,6 +1182,7 @@ async def gemini_llm_general_knowledge(
     system_prompt = (
         "Tu es Songra, un assistant rural qui aide les communautés du Burkina Faso. \n"
         f"Spécialité actuelle : {domain_description}. \n"
+        f"Tu parles comme un {_category_expertise(domain)}. \n"
         "Réponses SIMPLES, PRATIQUES, HONNÊTES. \n"
         "Tu n'as pas de fiche spécialisée, tu utilises tes connaissances générales. \n"
     )

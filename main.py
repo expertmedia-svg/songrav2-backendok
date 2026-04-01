@@ -11,7 +11,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import os
 import jwt
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, func, or_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import hashlib
@@ -32,10 +32,11 @@ import v2_services
 # CONFIGURATION
 # ==========================================
 
-# Charger les variables d'environnement depuis un fichier .env (dev / prod)
-# override=True permet de remplacer une éventuelle variable OPENAI_API_KEY déjà
-# définie dans l'environnement Windows (ancienne clé) par la valeur du .env.
-load_dotenv(override=True)
+# Charger les variables d'environnement depuis un fichier .env (dev / prod).
+# Les variables deja definies dans l'environnement du systeme gardent la priorite.
+# Cela permet d'utiliser une nouvelle cle Gemini active sans etre ecrasee par
+# une ancienne valeur conservee dans backend/.env.
+load_dotenv(override=False)
 
 os.makedirs("uploads", exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./resolvehub.db")
@@ -423,6 +424,24 @@ class KnowledgeItem(Base):
     media = Column(Text, nullable=True)  # JSON list of media items (images / videos)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OfflineKnowledgeEntryDB(Base):
+    __tablename__ = "offline_knowledge_entries"
+    id = Column(Integer, primary_key=True, index=True)
+    fingerprint = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, nullable=True)
+    domain = Column(String, nullable=False)
+    source_kind = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    question = Column(Text, nullable=True)
+    answer = Column(Text, nullable=False)
+    tags_json = Column(Text, nullable=True)
+    response_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class EmergencyNumber(Base):
     __tablename__ = "emergency_numbers"
     id = Column(Integer, primary_key=True, index=True)
@@ -446,8 +465,20 @@ def _ensure_user_auth_columns() -> None:
             result = conn.exec_driver_sql("PRAGMA table_info(users)")
             columns = [row[1] for row in result]
 
-            if "password_hash" not in columns:
-                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            migrations = {
+                "password_hash": "ALTER TABLE users ADD COLUMN password_hash TEXT",
+                "is_anonymized": "ALTER TABLE users ADD COLUMN is_anonymized BOOLEAN DEFAULT 0",
+                "is_premium": "ALTER TABLE users ADD COLUMN is_premium BOOLEAN DEFAULT 0",
+                "premium_expires_at": "ALTER TABLE users ADD COLUMN premium_expires_at DATETIME",
+                "messages_used": "ALTER TABLE users ADD COLUMN messages_used INTEGER DEFAULT 0",
+                "messages_limit": "ALTER TABLE users ADD COLUMN messages_limit INTEGER DEFAULT 1",
+            }
+
+            for col, sql in migrations.items():
+                if col not in columns:
+                    conn.exec_driver_sql(sql)
+                    print(f"  ✓ Colonne '{col}' ajoutée à users")
+            conn.commit()
     except Exception as e:
         print(f"⚠️ Impossible d'ajouter les colonnes d'auth utilisateur: {e}")
 
@@ -515,6 +546,7 @@ class MessageCreate(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
+    generate_media: Optional[bool] = False
 
 class ExpertLogin(BaseModel):
     email: str
@@ -1703,7 +1735,16 @@ def _load_json_list(raw: Optional[str]) -> List[Any]:
 def _build_upload_url(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
-    return f"http://localhost:8000/{path}"
+    public_base = os.getenv("PUBLIC_API_BASE_URL", "http://localhost:3000").rstrip("/")
+    return f"{public_base}/{path}"
+
+
+def _history_sort_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 def _store_photo_payloads(owner_id: int, photo_data_list: List[bytes], prefix: str = "photo") -> List[str]:
@@ -1748,6 +1789,525 @@ def _serialize_photo_history_record(record: PhotoAnalysisHistoryDB) -> Dict[str,
         "analysis": analysis,
         "photos": photos,
         "source_ticket_id": record.source_ticket_id,
+    }
+
+
+def _normalize_offline_domain(category: Optional[str]) -> str:
+    normalized = (category or "").lower().strip()
+    if normalized in ("elevage", "élevage"):
+        return "elevage"
+    if normalized in ("urgence", "sos_accident", "sos", "health"):
+        return "health"
+    if normalized == "cybersecurity":
+        return "cybersecurity"
+    return "agriculture"
+
+
+def _normalize_search_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text or "")
+    normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return normalized.lower()
+
+
+def _extract_offline_keywords(*values: Any, limit: int = 18) -> List[str]:
+    stopwords = {
+        "avec", "dans", "pour", "sans", "mais", "dont", "cette", "cette", "votre", "leurs",
+        "vous", "nous", "elles", "comme", "plus", "tres", "trop", "etre", "fait", "faire",
+        "faut", "cela", "alors", "apres", "avant", "entre", "sous", "chez", "vers", "aussi",
+        "cest", "cette", "quand", "quoi", "parce", "dans", "pourquoi", "comment", "the", "and",
+    }
+    ordered: List[str] = []
+    seen = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, list):
+            iterable = value
+        else:
+            iterable = [value]
+        for item in iterable:
+            text = _normalize_search_text(str(item))
+            for token in re.findall(r"[a-z0-9_]{3,}", text):
+                if token in stopwords or token in seen:
+                    continue
+                seen.add(token)
+                ordered.append(token)
+                if len(ordered) >= limit:
+                    return ordered
+    return ordered
+
+
+def _compact_response_for_offline(payload: Dict[str, Any], source_kind: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        compact = json.loads(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        return {}
+
+    fields_to_clear = [
+        "video_base64",
+        "image_url",
+    ]
+
+    if source_kind == "entreprendre":
+        fields_to_clear = [
+            "video_base64",
+            "image_url",
+        ]
+
+    for field in fields_to_clear:
+        if field in compact:
+            compact[field] = None
+    return compact
+
+
+def _build_entrepreneurship_offline_answer(payload: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    if payload.get("description_terrain"):
+        parts.append(f"Terrain: {payload['description_terrain']}")
+
+    propositions = payload.get("propositions") or []
+    if propositions:
+        snippets = []
+        for item in propositions[:3]:
+            if not isinstance(item, dict):
+                continue
+            titre = item.get("titre") or "Projet"
+            description = item.get("description") or ""
+            investissement = item.get("investissement") or ""
+            revenu = item.get("revenu_estime") or ""
+            snippets.append(
+                f"{titre}: {description} Investissement {investissement}. Revenu estime {revenu}."
+            )
+        if snippets:
+            parts.append("Propositions: " + " ".join(snippets))
+
+    if payload.get("decoupage_terrain"):
+        parts.append(f"Decoupage: {payload['decoupage_terrain']}")
+
+    gestion_eau = payload.get("gestion_eau") or {}
+    if isinstance(gestion_eau, dict) and gestion_eau.get("conseils"):
+        parts.append(f"Eau: {gestion_eau['conseils']}")
+
+    risques = payload.get("risques") or []
+    if risques:
+        parts.append("Risques: " + "; ".join(str(risk) for risk in risques[:3]))
+
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def _build_offline_entry_payload(
+    *,
+    source_kind: str,
+    category: str,
+    question_text: str,
+    response_payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    domain = _normalize_offline_domain(category)
+    clean_question = (question_text or "").strip()
+    compact_payload = _compact_response_for_offline(response_payload, source_kind=source_kind)
+
+    if source_kind == "entreprendre":
+        answer = _build_entrepreneurship_offline_answer(compact_payload)
+        propositions = compact_payload.get("propositions") or []
+        first_title = ""
+        if propositions and isinstance(propositions[0], dict):
+            first_title = str(propositions[0].get("titre") or "").strip()
+        title = first_title or (compact_payload.get("description_terrain") or "Plan terrain Songra")
+        keyword_inputs = [
+            category,
+            clean_question,
+            compact_payload.get("description_terrain"),
+            [item.get("titre") for item in propositions if isinstance(item, dict)],
+            compact_payload.get("decoupage_terrain"),
+            compact_payload.get("risques"),
+        ]
+    else:
+        diagnostic = compact_payload.get("diagnostic") or {}
+        if not isinstance(diagnostic, dict):
+            diagnostic = {}
+        answer = str(compact_payload.get("message") or diagnostic.get("description") or "").strip()
+        title = str(
+            diagnostic.get("description")
+            or clean_question
+            or f"Conseil Songra {domain}"
+        ).strip()
+        keyword_inputs = [
+            category,
+            clean_question,
+            title,
+            answer,
+            diagnostic.get("type"),
+            diagnostic.get("causes"),
+            [action.get("texte") for action in (compact_payload.get("actions") or []) if isinstance(action, dict)],
+        ]
+
+    if not answer:
+        return None
+
+    title = title[:180] if title else f"Conseil Songra {domain}"
+    tags = _extract_offline_keywords(*keyword_inputs)
+    return {
+        "domain": domain,
+        "title": title,
+        "question": clean_question or None,
+        "answer": answer,
+        "tags": tags,
+        "response_json": compact_payload,
+    }
+
+
+def _persist_offline_knowledge_entry(
+    *,
+    db: Session,
+    user_id: Optional[int],
+    source_kind: str,
+    category: str,
+    question_text: str,
+    response_payload: Dict[str, Any],
+) -> None:
+    payload = _build_offline_entry_payload(
+        source_kind=source_kind,
+        category=category,
+        question_text=question_text,
+        response_payload=response_payload,
+    )
+    if not payload:
+        return
+
+    fingerprint_source = "|".join(
+        [
+            payload["domain"],
+            source_kind,
+            _normalize_search_text(payload.get("question") or payload["title"]),
+            _normalize_search_text(payload["answer"][:400]),
+        ]
+    )
+    fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
+
+    existing = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(OfflineKnowledgeEntryDB.fingerprint == fingerprint)
+        .first()
+    )
+
+    if existing is None:
+        existing = OfflineKnowledgeEntryDB(
+            fingerprint=fingerprint,
+            user_id=user_id,
+            source_kind=source_kind,
+            domain=payload["domain"],
+            title=payload["title"],
+            question=payload.get("question"),
+            answer=payload["answer"],
+            tags_json=json.dumps(payload["tags"], ensure_ascii=False),
+            response_json=json.dumps(payload["response_json"], ensure_ascii=False),
+        )
+        db.add(existing)
+    else:
+        existing.user_id = user_id or existing.user_id
+        existing.source_kind = source_kind
+        existing.domain = payload["domain"]
+        existing.title = payload["title"]
+        existing.question = payload.get("question")
+        existing.answer = payload["answer"]
+        existing.tags_json = json.dumps(payload["tags"], ensure_ascii=False)
+        existing.response_json = json.dumps(payload["response_json"], ensure_ascii=False)
+        existing.updated_at = datetime.utcnow()
+
+    db.commit()
+
+
+def _serialize_offline_entry_for_rag(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    response_payload = _parse_offline_response_json(entry)
+    return {
+        "id": f"generated-{entry.id}",
+        "domain": entry.domain,
+        "title": entry.title,
+        "question": entry.question,
+        "answer": entry.answer,
+        "tags": _load_json_list(entry.tags_json),
+        "source": f"generated:{entry.source_kind}",
+        "response_json": response_payload,
+        "source_kind": entry.source_kind,
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+    }
+
+
+def _trusted_shared_rag_source_kinds() -> List[str]:
+    # Garde-fou anti-boucle: seules les réponses validées par résolution humaine
+    # sont réinjectées dans le RAG partagé général.
+    return ["resolved_ticket"]
+
+
+def _trusted_shared_reuse_source_kinds() -> List[str]:
+    # Réutilisation directe en ligne: limiter aux cas validés humainement.
+    return ["resolved_ticket"]
+
+
+def _find_reusable_offline_entry(
+    db: Session,
+    *,
+    domain: str,
+    source_kinds: List[str],
+    question_text: str,
+    limit: int = 120,
+) -> Optional[OfflineKnowledgeEntryDB]:
+    normalized_question = _normalize_search_text(question_text)
+    if not normalized_question:
+        return None
+
+    question_tokens = set(_tokenize(question_text))
+    candidates = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(
+            OfflineKnowledgeEntryDB.domain == domain,
+            OfflineKnowledgeEntryDB.source_kind.in_(source_kinds),
+        )
+        .order_by(OfflineKnowledgeEntryDB.updated_at.desc(), OfflineKnowledgeEntryDB.id.desc())
+        .limit(max(1, min(limit, 300)))
+        .all()
+    )
+
+    best_entry: Optional[OfflineKnowledgeEntryDB] = None
+    best_score = 0.0
+
+    for entry in candidates:
+        candidate_text = entry.question or entry.title or ""
+        normalized_candidate = _normalize_search_text(candidate_text)
+        if not normalized_candidate:
+            continue
+
+        score = 0.0
+        if normalized_candidate == normalized_question:
+            score += 100.0
+        elif normalized_question in normalized_candidate or normalized_candidate in normalized_question:
+            score += 60.0
+
+        candidate_tokens = set(_tokenize(
+            f"{entry.title or ''} {entry.question or ''} {entry.answer or ''} {' '.join(_load_json_list(entry.tags_json))}"
+        ))
+        overlap = len(question_tokens & candidate_tokens)
+        if overlap:
+            score += overlap * 6.0
+            score += overlap / max(len(question_tokens), 1)
+
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+
+    if best_entry is None:
+        return None
+
+    if best_score >= 100.0:
+        return best_entry
+
+    min_overlap_score = max(12.0, min(24.0, len(question_tokens) * 4.0))
+    return best_entry if best_score >= min_overlap_score else None
+
+
+def _build_media_cache_question(diagnostic: str, steps: List[str]) -> str:
+    clean_steps = [step.strip() for step in steps if step and step.strip()]
+    if clean_steps:
+        return f"{diagnostic.strip()}\n" + "\n".join(clean_steps[:5])
+    return diagnostic.strip()
+
+
+def _build_media_offline_payload(
+    *,
+    diagnostic: str,
+    steps: List[str],
+    image_result: Optional[Dict[str, Any]] = None,
+    video_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "message": diagnostic,
+        "diagnostic": {
+            "description": diagnostic,
+            "type": "illustration",
+            "causes": steps[:5],
+        },
+        "steps": steps[:5],
+    }
+
+    if image_result:
+        payload.update(
+            {
+                "image_base64": image_result.get("image_base64"),
+                "image_mime_type": image_result.get("mime_type") or image_result.get("image_mime_type"),
+                "image_description": image_result.get("fallback_description")
+                or image_result.get("image_description")
+                or diagnostic,
+            }
+        )
+
+    if video_result:
+        payload.update(
+            {
+                "video_base64": video_result.get("video_base64"),
+                "video_url": video_result.get("video_url"),
+                "video_mime_type": video_result.get("mime_type") or video_result.get("video_mime_type"),
+                "video_duration": video_result.get("duration_sec") or video_result.get("video_duration"),
+                "video_description": video_result.get("video_description") or diagnostic,
+                "video_steps": video_result.get("steps_visuelles") or video_result.get("video_steps") or steps[:5],
+            }
+        )
+        if video_result.get("type") == "image_steps":
+            payload["steps"] = video_result.get("steps") or payload["steps"]
+
+    return payload
+
+
+def _serialize_offline_generated_entry(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    tags = _load_json_list(entry.tags_json)
+    response_payload = _parse_offline_response_json(entry)
+    keywords = _extract_offline_keywords(tags, entry.title, entry.question, entry.answer)
+    return {
+        "id": f"generated-{entry.id}",
+        "domain": entry.domain,
+        "title": entry.title,
+        "question": entry.question,
+        "answer": entry.answer,
+        "tags": tags,
+        "keywords": keywords,
+        "language": "fr",
+        "source": f"generated:{entry.source_kind}",
+        "source_kind": entry.source_kind,
+        "has_image": bool(response_payload.get("image_base64")),
+        "has_video": bool(response_payload.get("video_url") or response_payload.get("video_base64") or response_payload.get("video_steps")),
+        "image_description": response_payload.get("image_description"),
+        "video_description": response_payload.get("video_description"),
+        "video_steps": response_payload.get("video_steps"),
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+    }
+
+
+def _parse_offline_response_json(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    if not entry.response_json:
+        return {}
+    try:
+        parsed = json.loads(entry.response_json)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _serialize_entreprendre_history_entry(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    response_payload = _parse_offline_response_json(entry)
+    return {
+        "id": f"entreprendre-{entry.id}",
+        "history_type": "entreprendre",
+        "category": entry.domain,
+        "urgency": "low",
+        "status": "shared",
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+        "last_message": entry.title or entry.answer,
+        "has_photo": bool(response_payload.get("input_photo_base64")),
+        "photo_url": response_payload.get("input_photo_base64"),
+        "photo_urls": [response_payload.get("input_photo_base64")] if response_payload.get("input_photo_base64") else [],
+        "problem": entry.question,
+        "result": response_payload,
+    }
+
+
+def _serialize_v2_history_entry(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    response_payload = _parse_offline_response_json(entry)
+    diagnostic = response_payload.get("diagnostic") or {}
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+
+    domain_to_category = {
+        "agriculture": "agriculture",
+        "elevage": "elevage",
+        "health": "sos_accident",
+        "urgence": "sos_accident",
+        "cybersecurity": "cybersecurity",
+    }
+    category = domain_to_category.get(entry.domain, entry.domain or "agriculture")
+
+    return {
+        "id": f"consultation-{entry.id}",
+        "history_type": "consultation",
+        "category": category,
+        "urgency": "high" if response_payload.get("urgence") else ("medium" if response_payload.get("priorite") == 2 else "low"),
+        "status": "shared",
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+        "last_message": diagnostic.get("description") or response_payload.get("message") or entry.title,
+        "has_photo": bool(response_payload.get("input_photo_base64")),
+        "photo_url": response_payload.get("input_photo_base64"),
+        "photo_urls": [response_payload.get("input_photo_base64")] if response_payload.get("input_photo_base64") else [],
+        "problem": entry.question,
+        "v2_response": response_payload,
+        "result": response_payload,
+    }
+
+
+def _build_offline_cache_payload(
+    db: Session,
+    *,
+    domain: Optional[str] = None,
+    language: str = "fr",
+    limit: int = 100,
+) -> Dict[str, Any]:
+    safe_limit = max(1, min(limit, 500))
+    normalized_domain = _normalize_offline_domain(domain) if domain else None
+
+    knowledge_query = db.query(KnowledgeItem).filter(KnowledgeItem.language == language)
+    generated_query = db.query(OfflineKnowledgeEntryDB)
+
+    if normalized_domain:
+        knowledge_query = knowledge_query.filter(KnowledgeItem.domain == normalized_domain)
+        generated_query = generated_query.filter(OfflineKnowledgeEntryDB.domain == normalized_domain)
+
+    knowledge_items = knowledge_query.order_by(KnowledgeItem.updated_at.desc()).limit(safe_limit).all()
+    generated_items = generated_query.order_by(OfflineKnowledgeEntryDB.updated_at.desc()).limit(min(safe_limit, 250)).all()
+
+    serialized_items: List[Dict[str, Any]] = []
+    dedupe_keys = set()
+
+    for item in generated_items:
+        serialized = _serialize_offline_generated_entry(item)
+        dedupe_key = (
+            serialized.get("domain"),
+            _normalize_search_text(serialized.get("question") or ""),
+            _normalize_search_text(serialized.get("answer") or ""),
+        )
+        if dedupe_key in dedupe_keys:
+            continue
+        dedupe_keys.add(dedupe_key)
+        serialized_items.append(serialized)
+
+    for item in knowledge_items:
+        serialized = {
+            "id": item.id,
+            "domain": item.domain,
+            "title": item.title,
+            "question": item.question,
+            "answer": item.answer,
+            "tags": _load_json_list(item.tags),
+            "keywords": _extract_offline_keywords(item.title, item.question, item.answer, _load_json_list(item.tags)),
+            "language": item.language or "fr",
+            "source": item.source or "knowledge_base",
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        }
+        dedupe_key = (
+            serialized.get("domain"),
+            _normalize_search_text(serialized.get("question") or serialized.get("title") or ""),
+            _normalize_search_text(serialized.get("answer") or ""),
+        )
+        if dedupe_key in dedupe_keys:
+            continue
+        dedupe_keys.add(dedupe_key)
+        serialized_items.append(serialized)
+
+    return {
+        "items": serialized_items,
+        "total": len(serialized_items),
+        "cached_at": datetime.utcnow().isoformat(),
     }
 
 
@@ -2094,10 +2654,21 @@ app = FastAPI(
     description="Plateforme d'assistance avec IA locale pour l'analyse de photos"
 )
 
-# CORS - AUTORISER TOUT
+# CORS - origines locales explicites pour le front web et mobile
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "capacitor://localhost",
+        "ionic://localhost",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2147,11 +2718,30 @@ def _extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
+def _get_or_create_user_by_phone(phone_number: str, db: Session) -> User:
+    normalized_phone = (phone_number or "").strip()
+    if not normalized_phone:
+        raise HTTPException(status_code=401, detail="Phone number is required")
+
+    user = db.query(User).filter(User.phone_number == normalized_phone).first()
+    if user:
+        return user
+
+    user = User(phone_number=normalized_phone)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 def get_current_user(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User:
     token = _extract_bearer_token(authorization)
+
+    if token.startswith("phone:"):
+        return _get_or_create_user_by_phone(token.split(":", 1)[1], db)
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -2245,6 +2835,12 @@ async def startup_seed_data():
             print(f"✓ Base de connaissances chargée ({total_items} fiches)")
         except Exception as e_load:
             print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+
+        try:
+            backfilled = _backfill_resolved_tickets_to_offline_corpus(db)
+            print(f"✓ Corpus offline enrichi depuis {backfilled} tickets resolus")
+        except Exception as e_backfill:
+            print(f"⚠️ Erreur backfill tickets resolus: {e_backfill}")
         finally:
             db.close()
     except Exception as e:
@@ -2558,20 +3154,35 @@ def retrieve_knowledge(
     focus_subject_terms = focus_subject.get("terms", []) if focus_subject else []
     focus_issue_terms = focus_issue.get("terms", []) if focus_issue else []
 
-    def score_items(items: List[KnowledgeItem]) -> List[Dict[str, Any]]:
+    def serialize_knowledge_item(it: KnowledgeItem) -> Dict[str, Any]:
+        media_data: Optional[Any] = None
+        if it.media:
+            try:
+                media_data = json.loads(it.media)
+            except Exception:
+                media_data = None
+
+        return {
+            "id": it.id,
+            "domain": it.domain,
+            "title": it.title,
+            "question": it.question,
+            "answer": it.answer,
+            "tags": _load_json_list(it.tags),
+            "language": it.language,
+            "source": it.source,
+            "media": media_data,
+        }
+
+    def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         scored_local: List[Dict[str, Any]] = []
         for it in items:
             # Séparer les zones de texte pour mieux pondérer
-            title_tokens = set(_tokenize(it.title or ""))
-            question_tokens = set(_tokenize(it.question or ""))
-            answer_tokens = set(_tokenize(it.answer or ""))
+            title_tokens = set(_tokenize(it.get("title") or ""))
+            question_tokens = set(_tokenize(it.get("question") or ""))
+            answer_tokens = set(_tokenize(it.get("answer") or ""))
 
-            tags_list: List[str] = []
-            if it.tags:
-                try:
-                    tags_list = json.loads(it.tags)
-                except Exception:
-                    tags_list = []
+            tags_list = [str(tag) for tag in (it.get("tags") or []) if str(tag).strip()]
             tags_tokens = set(_tokenize(" ".join(tags_list))) if tags_list else set()
 
             overlap_title = len(query_tokens & title_tokens)
@@ -2588,7 +3199,7 @@ def retrieve_knowledge(
             )
 
             combined_text = _normalize_free_text(
-                f"{it.title}\n{it.question or ''}\n{it.answer}\n{' '.join(tags_list)}"
+                f"{it.get('title') or ''}\n{it.get('question') or ''}\n{it.get('answer') or ''}\n{' '.join(tags_list)}"
             )
             subject_match = any(term in combined_text for term in focus_subject_terms) if focus_subject_terms else False
             issue_match = any(term in combined_text for term in focus_issue_terms) if focus_issue_terms else False
@@ -2610,21 +3221,37 @@ def retrieve_knowledge(
 
         return scored_local
 
-    # 1) Fiches strictement dans le domaine demandé
-    primary_query = db.query(KnowledgeItem).filter(KnowledgeItem.domain == domain)
+    generated_source_kinds = _trusted_shared_rag_source_kinds()
 
-    primary_items = primary_query.all()
+    def fetch_generated_items(target_domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        query_builder = db.query(OfflineKnowledgeEntryDB).filter(
+            OfflineKnowledgeEntryDB.source_kind.in_(generated_source_kinds)
+        )
+        if target_domain:
+            query_builder = query_builder.filter(OfflineKnowledgeEntryDB.domain == target_domain)
+        return [_serialize_offline_entry_for_rag(item) for item in query_builder.all()]
+
+    # 1) Fiches strictement dans le domaine demandé
+    primary_items = [
+        serialize_knowledge_item(item)
+        for item in db.query(KnowledgeItem).filter(KnowledgeItem.domain == domain).all()
+    ]
+    primary_items.extend(fetch_generated_items(domain))
     scored = score_items(primary_items)
 
     # 2) Fallback global optionnel : si rien trouvé, on regarde toutes les fiches
     if not scored and expand_scope:
-        all_items = db.query(KnowledgeItem).all()
+        all_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
+        all_items.extend(fetch_generated_items())
         scored = score_items(all_items)
 
     # 3) Dernier recours : recherche par sous-chaîne, soit dans le domaine
     # strict, soit sur toute la base si l'élargissement est autorisé.
     if not scored:
-        fallback_items = primary_items if not expand_scope else db.query(KnowledgeItem).all()
+        fallback_items = primary_items
+        if expand_scope:
+            fallback_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
+            fallback_items.extend(fetch_generated_items())
 
         def normalize_text(text: str) -> str:
             if not text:
@@ -2634,12 +3261,9 @@ def retrieve_knowledge(
 
         norm_query_parts = list(query_tokens)
         for it in fallback_items:
-            big_text = f"{it.title}\n{it.question or ''}\n{it.answer}\n"
-            if it.tags:
-                try:
-                    tags_list = json.loads(it.tags)
-                except Exception:
-                    tags_list = []
+            tags_list = [str(tag) for tag in (it.get("tags") or []) if str(tag).strip()]
+            big_text = f"{it.get('title') or ''}\n{it.get('question') or ''}\n{it.get('answer') or ''}\n"
+            if tags_list:
                 big_text += " ".join(tags_list)
             norm_text = normalize_text(big_text)
             if any(part in norm_text for part in norm_query_parts):
@@ -2649,7 +3273,7 @@ def retrieve_knowledge(
         scored = [
             entry
             for entry in scored
-            if (entry["item"].domain or "").strip().lower() == domain.strip().lower()
+            if (entry["item"].get("domain") or "").strip().lower() == domain.strip().lower()
         ]
 
     if focus_subject_terms and any(entry.get("subject_match") for entry in scored):
@@ -2663,24 +3287,7 @@ def retrieve_knowledge(
 
     results: List[Dict[str, Any]] = []
     for it in top_items:
-        media_data: Optional[Any] = None
-        if it.media:
-            try:
-                media_data = json.loads(it.media)
-            except Exception:
-                media_data = None
-
-        results.append({
-            "id": it.id,
-            "domain": it.domain,
-            "title": it.title,
-            "question": it.question,
-            "answer": it.answer,
-            "tags": _load_json_list(it.tags),
-            "language": it.language,
-            "source": it.source,
-            "media": media_data,
-        })
+        results.append(dict(it))
 
     return results
 
@@ -3401,9 +4008,7 @@ async def get_tickets(
         ).order_by(Message.sent_at.desc()).first()
         
         # Construire l'URL de la photo
-        photo_url = None
-        if ticket.photo_path:
-            photo_url = f"http://localhost:8000/{ticket.photo_path}"
+        photo_url = _build_upload_url(ticket.photo_path)
         photo_paths = _load_json_list(ticket.photo_paths_json)
         photo_urls = [_build_upload_url(path) for path in photo_paths if path]
         
@@ -3473,9 +4078,7 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
             photo_analysis = {"error": "Failed to parse analysis"}
     
     # Construire l'URL de la photo
-    photo_url = None
-    if ticket.photo_path:
-        photo_url = f"http://localhost:8000/{ticket.photo_path}"
+    photo_url = _build_upload_url(ticket.photo_path)
     photo_paths = _load_json_list(ticket.photo_paths_json)
     photo_urls = [_build_upload_url(path) for path in photo_paths if path]
     
@@ -3777,7 +4380,7 @@ Appelez les secours pendant que vous effectuez ces gestes
     
     # Ajouter l'URL de la photo
     if photo_path:
-        response["photo_url"] = f"http://localhost:8000/{photo_path}"
+        response["photo_url"] = _build_upload_url(photo_path)
     if photo_paths:
         response["photo_urls"] = [_build_upload_url(path) for path in photo_paths]
 
@@ -3874,6 +4477,49 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     rag_items = knowledge_result["rag_items"]
     llm_answer = knowledge_result["llm_answer"]
 
+    image_result = None
+    video_result = None
+
+    if data.generate_media:
+        try:
+            media_category = _normalize_category(chosen_category)
+            media_images = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+            media_seed_parts = [
+                data.content,
+                llm_answer,
+                knowledge_result.get("rag_fallback_answer"),
+                photo_analysis.get("analysis") if isinstance(photo_analysis, dict) else None,
+                photo_analysis.get("diagnosis") if isinstance(photo_analysis, dict) else None,
+                photo_analysis.get("observations") if isinstance(photo_analysis, dict) else None,
+            ]
+            media_seed_text = "\n".join(part.strip() for part in media_seed_parts if isinstance(part, str) and part.strip())
+
+            media_analysis = await v2_services.gemini_analyze(
+                text=media_seed_text or data.content or "Diagnostic Songra",
+                images_b64=media_images,
+                category=media_category,
+            )
+            media_decision = v2_services.decide(media_analysis)
+
+            if media_decision.get("generer_image") and media_decision.get("prompt_image"):
+                style = "schema" if media_decision.get("mode_urgence") else "illustration"
+                image_result = await v2_services.generate_image(
+                    media_decision["prompt_image"],
+                    style=style,
+                    category=media_category,
+                )
+
+            if media_decision.get("generer_video") and media_decision.get("prompt_video"):
+                video_result = await v2_services.generate_video(
+                    media_decision["prompt_video"],
+                    gemini_api_key=GEMINI_API_KEY,
+                    duration_sec=5 if media_decision.get("mode_urgence") else 8,
+                    is_urgency=media_decision.get("mode_urgence", False),
+                    category=media_category,
+                )
+        except Exception as e:
+            print(f"[ASSISTANT] Erreur génération média: {e}")
+
     # Log the knowledge source
     try:
         knowledge_mode = knowledge_result['knowledge_mode']
@@ -3907,6 +4553,21 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         response["llm_answer"] = llm_answer
     elif knowledge_result["rag_fallback_answer"]:
         response["rag_fallback_answer"] = knowledge_result["rag_fallback_answer"]
+
+    if image_result and image_result.get("success"):
+        response["image_base64"] = image_result.get("image_base64")
+        response["image_mime_type"] = image_result.get("mime_type", "image/png")
+    elif image_result and image_result.get("fallback_description"):
+        response["image_description"] = image_result.get("fallback_description")
+
+    if video_result and video_result.get("success"):
+        response["video_base64"] = video_result.get("video_base64")
+        response["video_url"] = video_result.get("video_url")
+        response["video_mime_type"] = video_result.get("mime_type", "video/mp4")
+        response["video_duration"] = video_result.get("duration_sec")
+    elif video_result and video_result.get("fallback"):
+        response["video_description"] = video_result.get("video_description")
+        response["video_steps"] = video_result.get("steps_visuelles")
 
     return response
 
@@ -3996,6 +4657,32 @@ async def resolve_ticket(ticket_id: int, db: Session = Depends(get_db)):
     db.add(message)
     
     db.commit()
+
+    try:
+        payload = _build_offline_payload_from_resolved_ticket(ticket, db)
+        if payload:
+            user_messages = (
+                db.query(Message)
+                .filter(Message.ticket_id == ticket.id, Message.sender_type == "user")
+                .order_by(Message.sent_at.asc(), Message.id.asc())
+                .all()
+            )
+            question_text = "\n".join(
+                msg.content.strip()
+                for msg in user_messages
+                if (msg.content or "").strip()
+            ).strip() or "Ticket resolu Songra"
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=ticket.user_id,
+                source_kind="resolved_ticket",
+                category=ticket.category or "agriculture",
+                question_text=question_text,
+                response_payload=payload,
+            )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance ticket resolu {ticket.id}: {e}")
+
     return {"status": "success"}
 
 
@@ -4061,6 +4748,133 @@ async def get_ticket_ai_summary(ticket_id: int, db: Session = Depends(get_db)):
         "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
     }
 
+
+def _extract_text_from_photo_analysis(raw_analysis: Optional[str]) -> str:
+    if not raw_analysis:
+        return ""
+    try:
+        parsed = json.loads(raw_analysis)
+    except Exception:
+        return raw_analysis.strip()
+
+    if not isinstance(parsed, dict):
+        return str(parsed).strip()
+
+    parts: List[str] = []
+    for key in (
+        "disease_detected",
+        "analysis",
+        "observations",
+        "treatment",
+        "recommendations",
+        "when_to_call_expert",
+    ):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        elif isinstance(value, list) and value:
+            parts.append("; ".join(str(item).strip() for item in value if str(item).strip()))
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def _build_offline_payload_from_resolved_ticket(ticket: Ticket, db: Session) -> Optional[Dict[str, Any]]:
+    user_messages = (
+        db.query(Message)
+        .filter(Message.ticket_id == ticket.id, Message.sender_type == "user")
+        .order_by(Message.sent_at.asc(), Message.id.asc())
+        .all()
+    )
+    if not user_messages:
+        return None
+
+    latest_expert_message = (
+        db.query(Message)
+        .filter(Message.ticket_id == ticket.id, Message.sender_type == "expert")
+        .order_by(Message.sent_at.desc(), Message.id.desc())
+        .first()
+    )
+
+    question_text = "\n".join(
+        message.content.strip()
+        for message in user_messages
+        if (message.content or "").strip()
+    ).strip()
+    if not question_text:
+        return None
+
+    answer_text = ""
+    if latest_expert_message and (latest_expert_message.content or "").strip():
+        answer_text = latest_expert_message.content.strip()
+    elif (ticket.resolution_notes or "").strip():
+        answer_text = ticket.resolution_notes.strip()
+    else:
+        answer_text = _extract_text_from_photo_analysis(ticket.ai_photo_analysis)
+
+    if not answer_text:
+        return None
+
+    return {
+        "message": answer_text,
+        "diagnostic": {
+            "type": _normalize_category(ticket.category),
+            "description": answer_text[:240],
+            "gravite": "moyenne",
+            "confiance": 0.95 if latest_expert_message else 0.75,
+            "causes": _extract_offline_keywords(question_text)[:5],
+        },
+        "actions": [],
+        "consulter_expert": False,
+        "ticket_id": ticket.id,
+        "resolved_at": ticket.resolved_at.isoformat() if ticket.resolved_at else None,
+    }
+
+
+def _backfill_resolved_tickets_to_offline_corpus(db: Session) -> int:
+    resolved_tickets = (
+        db.query(Ticket)
+        .filter(Ticket.status == "resolved")
+        .order_by(Ticket.resolved_at.desc().nullslast(), Ticket.id.desc())
+        .all()
+    )
+
+    persisted = 0
+    for ticket in resolved_tickets:
+        payload = _build_offline_payload_from_resolved_ticket(ticket, db)
+        if not payload:
+            continue
+        try:
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=ticket.user_id,
+                source_kind="resolved_ticket",
+                category=ticket.category or "agriculture",
+                question_text=payload.get("diagnostic", {}).get("description") and "\n".join(
+                    message.content.strip()
+                    for message in db.query(Message)
+                    .filter(Message.ticket_id == ticket.id, Message.sender_type == "user")
+                    .order_by(Message.sent_at.asc(), Message.id.asc())
+                    .all()
+                    if (message.content or "").strip()
+                ) or "Ticket resolu Songra",
+                response_payload=payload,
+            )
+            persisted += 1
+        except Exception as e:
+            print(f"[OFFLINE-CORPUS] Ticket resolu {ticket.id} ignore: {e}")
+    return persisted
+
+
+@app.post("/api/admin/offline-corpus/backfill-resolved-tickets")
+async def backfill_resolved_tickets_offline_corpus(
+    db: Session = Depends(get_db),
+):
+    count = _backfill_resolved_tickets_to_offline_corpus(db)
+    return {
+        "status": "success",
+        "backfilled": count,
+        "scope": "resolved_tickets_only",
+    }
+
 @app.get("/api/user-tickets")
 async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.phone_number == phone).first()
@@ -4085,9 +4899,7 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         ).order_by(Message.sent_at.desc()).first()
         
         # Construire l'URL de la photo
-        photo_url = None
-        if ticket.photo_path:
-            photo_url = f"http://localhost:8000/{ticket.photo_path}"
+        photo_url = _build_upload_url(ticket.photo_path)
         photo_paths = _load_json_list(ticket.photo_paths_json)
         photo_urls = [_build_upload_url(path) for path in photo_paths if path]
         
@@ -4107,7 +4919,7 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
             "category": ticket.category or "agriculture",
             "urgency": ticket.urgency or "low",
             "status": ticket.status or "open",
-            "created_at": ticket.created_at,
+            "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
             "last_message": (first_user_msg.content if first_user_msg else None) or (last_msg.content if last_msg else "Aucun message"),
             "has_photo": ticket.photo_path is not None,
             "photo_url": photo_url,
@@ -4116,6 +4928,48 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         })
     
     return result
+
+
+@app.get("/api/user-history")
+async def get_user_history(phone: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.phone_number == phone).first()
+    if not user:
+        return []
+
+    tickets = await get_user_tickets(phone, db)
+
+    entreprendre_entries = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(
+            OfflineKnowledgeEntryDB.user_id == user.id,
+            OfflineKnowledgeEntryDB.source_kind == "entreprendre",
+        )
+        .order_by(OfflineKnowledgeEntryDB.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    consultation_entries = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(
+            OfflineKnowledgeEntryDB.user_id == user.id,
+            OfflineKnowledgeEntryDB.source_kind.in_(["v2_analyze", "v2_scanner", "v2_assistant_query"]),
+        )
+        .order_by(OfflineKnowledgeEntryDB.updated_at.desc())
+        .limit(100)
+        .all()
+    )
+
+    merged = [
+        *tickets,
+        *[_serialize_entreprendre_history_entry(entry) for entry in entreprendre_entries],
+        *[_serialize_v2_history_entry(entry) for entry in consultation_entries],
+    ]
+    merged.sort(
+        key=lambda item: _history_sort_value(item.get("updated_at") or item.get("created_at")),
+        reverse=True,
+    )
+    return merged
 
 
 @app.get("/api/photo-analyses")
@@ -4197,25 +5051,17 @@ async def save_photo_analysis_history(
 
 @app.get("/api/knowledge/offline-cache")
 async def knowledge_offline_cache(
+    domain: Optional[str] = None,
+    language: str = "fr",
+    limit: int = Query(default=100, le=500),
     db: Session = Depends(get_db),
 ):
-    """
-    Base de connaissances formatée pour mise en cache offline côté app.
-    Retourne tous les items actifs avec les champs nécessaires au RAG local.
-    """
-    items = db.query(KnowledgeItem).order_by(KnowledgeItem.domain).all()
-    result = []
-    for it in items:
-        result.append({
-            "id": it.id,
-            "domain": it.domain,
-            "title": it.title,
-            "question": it.question,
-            "answer": it.answer,
-            "tags": _load_json_list(it.tags),
-            "language": it.language or "fr",
-        })
-    return {"items": result, "total": len(result)}
+    return _build_offline_cache_payload(
+        db,
+        domain=domain,
+        language=language,
+        limit=limit,
+    )
 
 
 @app.get("/api/admin/knowledge")
@@ -4642,6 +5488,86 @@ class ChatMessageDB(Base):
     pinned_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class CommunityFieldCaseDB(Base):
+    __tablename__ = "community_field_cases"
+    id = Column(Integer, primary_key=True, index=True)
+    room = Column(String, default="general")
+    category = Column(String, default="agriculture")
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    reporter_name = Column(String, nullable=False)
+    reporter_phone = Column(String, nullable=True)
+    contributor_role = Column(String, default="member")
+    severity = Column(String, default="medium")
+    status = Column(String, default="new")
+    location_label = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    crop_or_livestock = Column(String, nullable=True)
+    tags_json = Column(Text, nullable=True)
+    before_photo_paths_json = Column(Text, nullable=True)
+    after_photo_paths_json = Column(Text, nullable=True)
+    promoted_to_offline = Column(Boolean, default=False)
+    resolved_at = Column(DateTime, nullable=True)
+    last_follow_up_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CommunitySolutionDB(Base):
+    __tablename__ = "community_case_solutions"
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, nullable=False, index=True)
+    author_name = Column(String, nullable=False)
+    author_phone = Column(String, nullable=True)
+    contributor_role = Column(String, default="member")
+    text = Column(Text, nullable=False)
+    action_taken = Column(Text, nullable=True)
+    cost_note = Column(String, nullable=True)
+    delay_note = Column(String, nullable=True)
+    result_status = Column(String, default="proposed")
+    photo_paths_json = Column(Text, nullable=True)
+    is_expert = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CommunitySolutionFeedbackDB(Base):
+    __tablename__ = "community_solution_feedback"
+    id = Column(Integer, primary_key=True, index=True)
+    solution_id = Column(Integer, nullable=False, index=True)
+    voter_name = Column(String, nullable=False)
+    voter_phone = Column(String, nullable=True)
+    feedback_type = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CommunityCaseConfirmationDB(Base):
+    __tablename__ = "community_case_confirmations"
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, nullable=False, index=True)
+    confirmer_name = Column(String, nullable=False)
+    confirmer_phone = Column(String, nullable=True)
+    contributor_role = Column(String, default="member")
+    note = Column(Text, nullable=True)
+    location_label = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CommunityCaseFollowUpDB(Base):
+    __tablename__ = "community_case_followups"
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, nullable=False, index=True)
+    author_name = Column(String, nullable=False)
+    author_phone = Column(String, nullable=True)
+    contributor_role = Column(String, default="member")
+    note = Column(Text, nullable=False)
+    status_after = Column(String, nullable=True)
+    outcome_label = Column(String, nullable=True)
+    photo_paths_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 Base.metadata.create_all(bind=engine)
 
 
@@ -4844,10 +5770,360 @@ COMMUNITY_BLOCKED_TERMS = {
     "insulte",
 }
 
+COMMUNITY_CASE_STATUS_LABELS = {
+    "new": "Nouveau",
+    "in_progress": "En cours",
+    "improved": "Ameliore",
+    "resolved": "Resolu",
+    "watch": "A surveiller",
+}
+
+COMMUNITY_CASE_SEVERITY_LABELS = {
+    "low": "Faible",
+    "medium": "Moyenne",
+    "high": "Elevee",
+    "critical": "Critique",
+}
+
+COMMUNITY_SOLUTION_FEEDBACK_TYPES = {"useful", "tested", "worked", "failed"}
+
+COMMUNITY_CONTRIBUTOR_ROLE_LABELS = {
+    "member": "Acteur terrain",
+    "observer": "Observateur terrain",
+    "solver": "Solutionneur local",
+    "referent": "Producteur referent",
+    "expert": "Expert communaute",
+}
+
 
 def _normalize_community_room(raw_room: Optional[str]) -> str:
     normalized = (raw_room or "general").strip().lower()
     return normalized if normalized in COMMUNITY_ROOM_LABELS else "general"
+
+
+def _normalize_community_case_status(raw_status: Optional[str]) -> str:
+    normalized = (raw_status or "new").strip().lower()
+    return normalized if normalized in COMMUNITY_CASE_STATUS_LABELS else "new"
+
+
+def _normalize_community_case_severity(raw_severity: Optional[str]) -> str:
+    normalized = (raw_severity or "medium").strip().lower()
+    return normalized if normalized in COMMUNITY_CASE_SEVERITY_LABELS else "medium"
+
+
+def _normalize_community_feedback_type(raw_feedback_type: Optional[str]) -> str:
+    normalized = (raw_feedback_type or "useful").strip().lower()
+    return normalized if normalized in COMMUNITY_SOLUTION_FEEDBACK_TYPES else "useful"
+
+
+def _normalize_community_category(raw_category: Optional[str], room: str) -> str:
+    normalized = (raw_category or "").strip().lower()
+    if normalized in {"agriculture", "elevage", "cybersecurity", "sos_accident"}:
+        return normalized
+    if room == "elevage":
+        return "elevage"
+    if room == "securite":
+        return "cybersecurity"
+    return "agriculture"
+
+
+def _serialize_community_photo_urls(raw_paths_json: Optional[str]) -> List[Dict[str, Any]]:
+    paths = _load_json_list(raw_paths_json)
+    return [
+        {
+            "path": path,
+            "url": _build_upload_url(path),
+        }
+        for path in paths
+        if path
+    ]
+
+
+def _community_person_filter(phone_field: Any, name_field: Any, phone_number: Optional[str], name: Optional[str]):
+    if phone_number:
+        return phone_field == phone_number
+    return name_field == (name or "")
+
+
+def _build_community_contributor_profile(
+    db: Session,
+    *,
+    name: Optional[str],
+    phone_number: Optional[str],
+    preferred_role: Optional[str] = None,
+    is_expert: bool = False,
+) -> Dict[str, Any]:
+    display_name = (name or "Membre SONGRA").strip() or "Membre SONGRA"
+    if is_expert or preferred_role == "expert":
+        role_key = "expert"
+        return {
+            "name": display_name,
+            "role_key": role_key,
+            "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
+            "case_count": 0,
+            "solution_count": 0,
+            "confirmation_count": 0,
+            "follow_up_count": 0,
+        }
+
+    case_count = db.query(CommunityFieldCaseDB).filter(
+        _community_person_filter(
+            CommunityFieldCaseDB.reporter_phone,
+            CommunityFieldCaseDB.reporter_name,
+            phone_number,
+            display_name,
+        )
+    ).count()
+    solution_count = db.query(CommunitySolutionDB).filter(
+        _community_person_filter(
+            CommunitySolutionDB.author_phone,
+            CommunitySolutionDB.author_name,
+            phone_number,
+            display_name,
+        )
+    ).count()
+    confirmation_count = db.query(CommunityCaseConfirmationDB).filter(
+        _community_person_filter(
+            CommunityCaseConfirmationDB.confirmer_phone,
+            CommunityCaseConfirmationDB.confirmer_name,
+            phone_number,
+            display_name,
+        )
+    ).count()
+    follow_up_count = db.query(CommunityCaseFollowUpDB).filter(
+        _community_person_filter(
+            CommunityCaseFollowUpDB.author_phone,
+            CommunityCaseFollowUpDB.author_name,
+            phone_number,
+            display_name,
+        )
+    ).count()
+
+    if preferred_role in {"observer", "solver", "referent"}:
+        role_key = preferred_role
+    elif solution_count >= 3 and follow_up_count >= 1:
+        role_key = "referent"
+    elif solution_count >= 2:
+        role_key = "solver"
+    elif case_count + confirmation_count + follow_up_count >= 3:
+        role_key = "observer"
+    else:
+        role_key = "member"
+
+    return {
+        "name": display_name,
+        "role_key": role_key,
+        "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
+        "case_count": case_count,
+        "solution_count": solution_count,
+        "confirmation_count": confirmation_count,
+        "follow_up_count": follow_up_count,
+    }
+
+
+def _serialize_community_solution_feedback_counts(db: Session, solution_id: int) -> Dict[str, int]:
+    rows = (
+        db.query(
+            CommunitySolutionFeedbackDB.feedback_type,
+            func.count(CommunitySolutionFeedbackDB.id),
+        )
+        .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
+        .group_by(CommunitySolutionFeedbackDB.feedback_type)
+        .all()
+    )
+    counts = {"useful": 0, "tested": 0, "worked": 0, "failed": 0}
+    for feedback_type, total in rows:
+        if feedback_type in counts:
+            counts[feedback_type] = int(total or 0)
+    return counts
+
+
+def _serialize_community_solution(db: Session, solution: CommunitySolutionDB) -> Dict[str, Any]:
+    feedback = _serialize_community_solution_feedback_counts(db, solution.id)
+    contributor = _build_community_contributor_profile(
+        db,
+        name=solution.author_name,
+        phone_number=solution.author_phone,
+        preferred_role=solution.contributor_role,
+        is_expert=bool(solution.is_expert),
+    )
+    return {
+        "id": solution.id,
+        "case_id": solution.case_id,
+        "author": contributor,
+        "text": solution.text,
+        "action_taken": solution.action_taken,
+        "cost_note": solution.cost_note,
+        "delay_note": solution.delay_note,
+        "result_status": solution.result_status,
+        "photos": _serialize_community_photo_urls(solution.photo_paths_json),
+        "feedback": feedback,
+        "created_at": solution.created_at.isoformat() if solution.created_at else None,
+        "updated_at": solution.updated_at.isoformat() if solution.updated_at else None,
+    }
+
+
+def _serialize_community_confirmation(db: Session, confirmation: CommunityCaseConfirmationDB) -> Dict[str, Any]:
+    return {
+        "id": confirmation.id,
+        "case_id": confirmation.case_id,
+        "contributor": _build_community_contributor_profile(
+            db,
+            name=confirmation.confirmer_name,
+            phone_number=confirmation.confirmer_phone,
+            preferred_role=confirmation.contributor_role,
+        ),
+        "note": confirmation.note,
+        "location_label": confirmation.location_label,
+        "created_at": confirmation.created_at.isoformat() if confirmation.created_at else None,
+    }
+
+
+def _serialize_community_follow_up(db: Session, follow_up: CommunityCaseFollowUpDB) -> Dict[str, Any]:
+    return {
+        "id": follow_up.id,
+        "case_id": follow_up.case_id,
+        "contributor": _build_community_contributor_profile(
+            db,
+            name=follow_up.author_name,
+            phone_number=follow_up.author_phone,
+            preferred_role=follow_up.contributor_role,
+        ),
+        "note": follow_up.note,
+        "status_after": _normalize_community_case_status(follow_up.status_after),
+        "status_after_label": COMMUNITY_CASE_STATUS_LABELS.get(
+            _normalize_community_case_status(follow_up.status_after),
+            COMMUNITY_CASE_STATUS_LABELS["new"],
+        ),
+        "outcome_label": follow_up.outcome_label,
+        "photos": _serialize_community_photo_urls(follow_up.photo_paths_json),
+        "created_at": follow_up.created_at.isoformat() if follow_up.created_at else None,
+    }
+
+
+def _serialize_community_field_case_summary(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
+    solution_count = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.case_id == case.id).count()
+    confirmation_count = db.query(CommunityCaseConfirmationDB).filter(CommunityCaseConfirmationDB.case_id == case.id).count()
+    follow_up_count = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.case_id == case.id).count()
+    contributor = _build_community_contributor_profile(
+        db,
+        name=case.reporter_name,
+        phone_number=case.reporter_phone,
+        preferred_role=case.contributor_role,
+    )
+    normalized_status = _normalize_community_case_status(case.status)
+    normalized_severity = _normalize_community_case_severity(case.severity)
+    tags = _load_json_list(case.tags_json)
+    return {
+        "id": case.id,
+        "room": _normalize_community_room(case.room),
+        "room_label": COMMUNITY_ROOM_LABELS.get(_normalize_community_room(case.room), "General"),
+        "category": case.category,
+        "title": case.title,
+        "description": case.description,
+        "reporter": contributor,
+        "severity": normalized_severity,
+        "severity_label": COMMUNITY_CASE_SEVERITY_LABELS.get(normalized_severity, "Moyenne"),
+        "status": normalized_status,
+        "status_label": COMMUNITY_CASE_STATUS_LABELS.get(normalized_status, "Nouveau"),
+        "location_label": case.location_label,
+        "latitude": case.latitude,
+        "longitude": case.longitude,
+        "crop_or_livestock": case.crop_or_livestock,
+        "tags": tags,
+        "before_photos": _serialize_community_photo_urls(case.before_photo_paths_json),
+        "after_photos": _serialize_community_photo_urls(case.after_photo_paths_json),
+        "solution_count": solution_count,
+        "confirmation_count": confirmation_count,
+        "follow_up_count": follow_up_count,
+        "promoted_to_offline": bool(case.promoted_to_offline),
+        "created_at": case.created_at.isoformat() if case.created_at else None,
+        "updated_at": case.updated_at.isoformat() if case.updated_at else None,
+        "resolved_at": case.resolved_at.isoformat() if case.resolved_at else None,
+        "last_follow_up_at": case.last_follow_up_at.isoformat() if case.last_follow_up_at else None,
+    }
+
+
+def _serialize_community_field_case_detail(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
+    summary = _serialize_community_field_case_summary(db, case)
+    solutions = (
+        db.query(CommunitySolutionDB)
+        .filter(CommunitySolutionDB.case_id == case.id)
+        .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
+        .all()
+    )
+    confirmations = (
+        db.query(CommunityCaseConfirmationDB)
+        .filter(CommunityCaseConfirmationDB.case_id == case.id)
+        .order_by(CommunityCaseConfirmationDB.created_at.desc(), CommunityCaseConfirmationDB.id.desc())
+        .all()
+    )
+    follow_ups = (
+        db.query(CommunityCaseFollowUpDB)
+        .filter(CommunityCaseFollowUpDB.case_id == case.id)
+        .order_by(CommunityCaseFollowUpDB.created_at.desc(), CommunityCaseFollowUpDB.id.desc())
+        .all()
+    )
+    summary["solutions"] = [_serialize_community_solution(db, item) for item in solutions]
+    summary["confirmations"] = [_serialize_community_confirmation(db, item) for item in confirmations]
+    summary["follow_ups"] = [_serialize_community_follow_up(db, item) for item in follow_ups]
+    return summary
+
+
+def _build_community_case_offline_payload(case: CommunityFieldCaseDB, solution: Optional[CommunitySolutionDB]) -> Dict[str, Any]:
+    summary_parts: List[str] = []
+    if case.crop_or_livestock:
+        summary_parts.append(f"Sujet: {case.crop_or_livestock}")
+    if case.location_label:
+        summary_parts.append(f"Zone: {case.location_label}")
+    summary_parts.append(case.description)
+    if solution and solution.action_taken:
+        summary_parts.append(f"Action testee: {solution.action_taken}")
+    if solution and solution.text:
+        summary_parts.append(f"Retour terrain: {solution.text}")
+    if solution and solution.delay_note:
+        summary_parts.append(f"Delai observe: {solution.delay_note}")
+    if solution and solution.cost_note:
+        summary_parts.append(f"Cout: {solution.cost_note}")
+
+    diagnostic = {
+        "description": case.title,
+        "type": case.category,
+        "causes": _load_json_list(case.tags_json),
+    }
+    actions = []
+    if solution and solution.action_taken:
+        actions.append({"texte": solution.action_taken})
+    if solution and solution.text:
+        actions.append({"texte": solution.text})
+
+    return {
+        "message": "\n\n".join(part for part in summary_parts if part).strip(),
+        "diagnostic": diagnostic,
+        "actions": actions,
+    }
+
+
+def _promote_community_case_to_offline(db: Session, case: CommunityFieldCaseDB) -> None:
+    if not case or _normalize_community_case_status(case.status) != "resolved":
+        return
+    best_solution = (
+        db.query(CommunitySolutionDB)
+        .filter(CommunitySolutionDB.case_id == case.id)
+        .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
+        .first()
+    )
+    payload = _build_community_case_offline_payload(case, best_solution)
+    _persist_offline_knowledge_entry(
+        db=db,
+        user_id=None,
+        source_kind="community_case",
+        category=case.category,
+        question_text=case.description,
+        response_payload=payload,
+    )
+    case.promoted_to_offline = True
+    db.commit()
 
 
 def _serialize_community_message(message: ChatMessageDB) -> Dict[str, Any]:
@@ -5184,6 +6460,414 @@ async def update_expert_community_message(
         "message": _serialize_community_message(message),
     }
 
+
+@app.get("/api/community/field-cases")
+async def get_community_field_cases(
+    room: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(default=60, le=200),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CommunityFieldCaseDB)
+    if room is not None:
+        query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
+    if status is not None:
+        query = query.filter(CommunityFieldCaseDB.status == _normalize_community_case_status(status))
+
+    cases = (
+        query.order_by(CommunityFieldCaseDB.updated_at.desc(), CommunityFieldCaseDB.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_serialize_community_field_case_summary(db, item) for item in cases]
+
+
+@app.get("/api/community/field-cases/{case_id}")
+async def get_community_field_case_detail(case_id: int, db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+    return _serialize_community_field_case_detail(db, case)
+
+
+@app.post("/api/community/field-cases")
+async def create_community_field_case(body: Dict[str, Any], db: Session = Depends(get_db)):
+    reporter_name = (body.get("reporter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+    reporter_phone = (body.get("reporter_phone") or body.get("phone_number") or "").strip()[:40] or None
+    room = _normalize_community_room(body.get("room"))
+    category = _normalize_community_category(body.get("category"), room)
+    title = (body.get("title") or "").strip()[:180]
+    description = (body.get("description") or "").strip()
+    location_label = (body.get("location_label") or "").strip()[:140] or None
+    crop_or_livestock = (body.get("crop_or_livestock") or "").strip()[:140] or None
+    severity = _normalize_community_case_severity(body.get("severity"))
+    tags = body.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+
+    if not title:
+        raise HTTPException(status_code=422, detail="Le titre du signalement est obligatoire")
+    if not description:
+        raise HTTPException(status_code=422, detail="La description du signalement est obligatoire")
+
+    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    owner_id = int(datetime.utcnow().timestamp())
+    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_case") if photo_data_list else []
+
+    case = CommunityFieldCaseDB(
+        room=room,
+        category=category,
+        title=title,
+        description=description,
+        reporter_name=reporter_name,
+        reporter_phone=reporter_phone,
+        contributor_role="observer",
+        severity=severity,
+        status="new",
+        location_label=location_label,
+        latitude=body.get("latitude"),
+        longitude=body.get("longitude"),
+        crop_or_livestock=crop_or_livestock,
+        tags_json=json.dumps(_extract_offline_keywords(tags, title, description, crop_or_livestock), ensure_ascii=False),
+        before_photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+    )
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.post("/api/community/field-cases/{case_id}/solutions")
+async def add_solution_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+
+    author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+    author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
+    text = (body.get("text") or "").strip()
+    action_taken = (body.get("action_taken") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="La solution proposee est obligatoire")
+
+    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
+    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_solution") if photo_data_list else []
+
+    solution = CommunitySolutionDB(
+        case_id=case_id,
+        author_name=author_name,
+        author_phone=author_phone,
+        contributor_role="solver",
+        text=text,
+        action_taken=action_taken or None,
+        cost_note=(body.get("cost_note") or "").strip()[:120] or None,
+        delay_note=(body.get("delay_note") or "").strip()[:120] or None,
+        result_status=(body.get("result_status") or "proposed").strip()[:80] or "proposed",
+        photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+        is_expert=bool(body.get("is_expert", False)),
+    )
+    case.updated_at = datetime.utcnow()
+    db.add(solution)
+    db.commit()
+    db.refresh(solution)
+
+    return {
+        "success": True,
+        "solution": _serialize_community_solution(db, solution),
+        "case": _serialize_community_field_case_summary(db, case),
+    }
+
+
+@app.post("/api/community/solutions/{solution_id}/feedback")
+async def add_feedback_to_community_solution(solution_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    solution = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.id == solution_id).first()
+    if not solution:
+        raise HTTPException(status_code=404, detail="Solution introuvable")
+
+    voter_name = (body.get("voter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+    voter_phone = (body.get("voter_phone") or body.get("phone_number") or "").strip()[:40] or None
+    feedback_type = _normalize_community_feedback_type(body.get("feedback_type"))
+
+    existing = (
+        db.query(CommunitySolutionFeedbackDB)
+        .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
+        .filter(
+            _community_person_filter(
+                CommunitySolutionFeedbackDB.voter_phone,
+                CommunitySolutionFeedbackDB.voter_name,
+                voter_phone,
+                voter_name,
+            )
+        )
+        .first()
+    )
+    if existing is None:
+        existing = CommunitySolutionFeedbackDB(
+            solution_id=solution_id,
+            voter_name=voter_name,
+            voter_phone=voter_phone,
+            feedback_type=feedback_type,
+        )
+        db.add(existing)
+    else:
+        existing.feedback_type = feedback_type
+        existing.created_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(solution)
+    return {
+        "success": True,
+        "solution": _serialize_community_solution(db, solution),
+    }
+
+
+@app.post("/api/community/field-cases/{case_id}/confirm")
+async def confirm_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+
+    confirmer_name = (body.get("confirmer_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+    confirmer_phone = (body.get("confirmer_phone") or body.get("phone_number") or "").strip()[:40] or None
+
+    existing = (
+        db.query(CommunityCaseConfirmationDB)
+        .filter(CommunityCaseConfirmationDB.case_id == case_id)
+        .filter(
+            _community_person_filter(
+                CommunityCaseConfirmationDB.confirmer_phone,
+                CommunityCaseConfirmationDB.confirmer_name,
+                confirmer_phone,
+                confirmer_name,
+            )
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Confirmation deja enregistree pour ce cas")
+
+    confirmation = CommunityCaseConfirmationDB(
+        case_id=case_id,
+        confirmer_name=confirmer_name,
+        confirmer_phone=confirmer_phone,
+        contributor_role="observer",
+        note=(body.get("note") or "").strip() or None,
+        location_label=(body.get("location_label") or "").strip()[:140] or None,
+    )
+    case.updated_at = datetime.utcnow()
+    db.add(confirmation)
+    db.commit()
+
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.post("/api/community/field-cases/{case_id}/follow-ups")
+async def add_follow_up_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+
+    author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+    author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
+    note = (body.get("note") or "").strip()
+    if not note:
+        raise HTTPException(status_code=422, detail="Le retour terrain est obligatoire")
+
+    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
+    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+
+    normalized_status = _normalize_community_case_status(body.get("status_after") or case.status)
+    follow_up = CommunityCaseFollowUpDB(
+        case_id=case_id,
+        author_name=author_name,
+        author_phone=author_phone,
+        contributor_role="observer",
+        note=note,
+        status_after=normalized_status,
+        outcome_label=(body.get("outcome_label") or "").strip()[:140] or None,
+        photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+    )
+    db.add(follow_up)
+
+    if stored_paths:
+        existing_after = _load_json_list(case.after_photo_paths_json)
+        case.after_photo_paths_json = json.dumps(existing_after + stored_paths, ensure_ascii=False)
+    case.status = normalized_status
+    case.last_follow_up_at = datetime.utcnow()
+    case.updated_at = datetime.utcnow()
+    if normalized_status == "resolved":
+        case.resolved_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(case)
+    if normalized_status == "resolved":
+        _promote_community_case_to_offline(db, case)
+
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.patch("/api/community/follow-ups/{follow_up_id}")
+async def update_community_case_follow_up(follow_up_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    follow_up = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.id == follow_up_id).first()
+    if not follow_up:
+        raise HTTPException(status_code=404, detail="Suivi terrain introuvable")
+
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == follow_up.case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+
+    author_name = (body.get("author_name") or follow_up.author_name or "Acteur terrain").strip()[:80]
+    author_phone = (body.get("author_phone") or body.get("phone_number") or follow_up.author_phone or "").strip()[:40] or None
+    note = (body.get("note") or follow_up.note or "").strip()
+    if not note:
+        raise HTTPException(status_code=422, detail="Le retour terrain est obligatoire")
+
+    normalized_status = _normalize_community_case_status(body.get("status_after") or follow_up.status_after or case.status)
+    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    owner_id = case.id * 1000 + follow_up_id
+    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+
+    existing_follow_up_paths = _load_json_list(follow_up.photo_paths_json)
+    merged_follow_up_paths = existing_follow_up_paths + stored_paths if stored_paths else existing_follow_up_paths
+
+    follow_up.author_name = author_name
+    follow_up.author_phone = author_phone
+    follow_up.note = note
+    follow_up.status_after = normalized_status
+    follow_up.outcome_label = (body.get("outcome_label") or "").strip()[:140] or None
+    follow_up.photo_paths_json = json.dumps(merged_follow_up_paths, ensure_ascii=False) if merged_follow_up_paths else None
+
+    if stored_paths:
+        case_after_paths = _load_json_list(case.after_photo_paths_json)
+        case.after_photo_paths_json = json.dumps(case_after_paths + stored_paths, ensure_ascii=False)
+
+    case.status = normalized_status
+    case.last_follow_up_at = datetime.utcnow()
+    case.updated_at = datetime.utcnow()
+    if normalized_status == "resolved":
+        case.resolved_at = case.resolved_at or datetime.utcnow()
+
+    db.commit()
+    db.refresh(case)
+    if normalized_status == "resolved":
+        _promote_community_case_to_offline(db, case)
+
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.patch("/api/community/field-cases/{case_id}/status")
+async def update_community_field_case_status(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+
+    normalized_status = _normalize_community_case_status(body.get("status"))
+    case.status = normalized_status
+    case.updated_at = datetime.utcnow()
+    if normalized_status == "resolved":
+        case.resolved_at = datetime.utcnow()
+    db.commit()
+    db.refresh(case)
+    if normalized_status == "resolved":
+        _promote_community_case_to_offline(db, case)
+
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.post("/api/community/field-cases/{case_id}/promote-offline")
+async def promote_community_field_case_offline(case_id: int, db: Session = Depends(get_db)):
+    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+    if _normalize_community_case_status(case.status) != "resolved":
+        raise HTTPException(status_code=422, detail="Seuls les cas resolus peuvent alimenter la base hors ligne")
+
+    _promote_community_case_to_offline(db, case)
+    db.refresh(case)
+    return {
+        "success": True,
+        "case": _serialize_community_field_case_detail(db, case),
+    }
+
+
+@app.get("/api/community/trends")
+async def get_community_trends(
+    room: Optional[str] = None,
+    limit: int = Query(default=5, le=20),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CommunityFieldCaseDB)
+    if room is not None:
+        query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
+    cases = query.order_by(CommunityFieldCaseDB.updated_at.desc()).limit(300).all()
+
+    status_counts: Dict[str, int] = {}
+    category_counts: Dict[str, int] = {}
+    location_counts: Dict[str, int] = {}
+    signal_counts: Dict[str, int] = {}
+    active_contributors = set()
+
+    for case in cases:
+        status_key = _normalize_community_case_status(case.status)
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        category_counts[case.category or "agriculture"] = category_counts.get(case.category or "agriculture", 0) + 1
+        if case.location_label:
+            location_counts[case.location_label] = location_counts.get(case.location_label, 0) + 1
+        trend_key = (case.crop_or_livestock or case.title or case.category or "terrain").strip()
+        signal_counts[trend_key] = signal_counts.get(trend_key, 0) + 1
+        active_contributors.add(case.reporter_phone or case.reporter_name)
+
+    return {
+        "overview": {
+            "total_cases": len(cases),
+            "active_contributors": len([item for item in active_contributors if item]),
+            "resolved_cases": status_counts.get("resolved", 0),
+            "watch_cases": status_counts.get("watch", 0),
+        },
+        "statuses": [
+            {
+                "key": key,
+                "label": COMMUNITY_CASE_STATUS_LABELS.get(key, key),
+                "count": count,
+            }
+            for key, count in sorted(status_counts.items(), key=lambda item: item[1], reverse=True)
+        ],
+        "categories": [
+            {"key": key, "count": count}
+            for key, count in sorted(category_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ],
+        "hotspots": [
+            {"label": key, "count": count}
+            for key, count in sorted(location_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ],
+        "signals": [
+            {"label": key, "count": count}
+            for key, count in sorted(signal_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ],
+    }
+
 class OfflineSyncData(BaseModel):
     tickets: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
@@ -5281,33 +6965,12 @@ async def get_knowledge_for_offline_cache(
     limit: int = Query(default=100, le=500),
     db: Session = Depends(get_db)
 ):
-    """
-    🔑 ENDPOINT CACHE OFFLINE
-    Télécharger la base de connaissances pour utilisation offline (RAG local)
-    """
-    query = db.query(KnowledgeItem).filter(KnowledgeItem.language == language)
-    
-    if domain:
-        query = query.filter(KnowledgeItem.domain == domain)
-    
-    items = query.order_by(KnowledgeItem.created_at.desc()).limit(limit).all()
-    
-    return {
-        "items": [
-            {
-                "id": item.id,
-                "domain": item.domain,
-                "title": item.title,
-                "question": item.question,
-                "answer": item.answer,
-                "tags": json.loads(item.tags) if item.tags else [],
-                "keywords": [tag.lower() for tag in (json.loads(item.tags) if item.tags else [])]
-            }
-            for item in items
-        ],
-        "total": len(items),
-        "cached_at": datetime.utcnow().isoformat()
-    }
+    return _build_offline_cache_payload(
+        db,
+        domain=domain,
+        language=language,
+        limit=limit,
+    )
 
 # ==========================================
 # ENDPOINTS FREEMIUM & DIALOGUE
@@ -5415,6 +7078,11 @@ class V2VideoIllustrationRequest(BaseModel):
     steps: Optional[List[str]] = []
     category: Optional[str] = "agriculture"
 
+class V2ImageIllustrationRequest(BaseModel):
+    diagnostic: str
+    steps: Optional[List[str]] = []
+    category: Optional[str] = "agriculture"
+
 def _normalize_category(cat: Optional[str]) -> str:
     if not cat:
         return "agriculture"
@@ -5443,6 +7111,7 @@ def _collect_images_b64(photo_base64: Optional[str], photo_base64_list: Optional
 async def v2_analyze(
     data: V2AnalyzeRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Pipeline v2 complet : texte + photos → Gemini → décision → médias → réponse unique"""
     import time as _time
@@ -5456,6 +7125,27 @@ async def v2_analyze(
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Envoyez au moins du texte ou une photo pour obtenir un diagnostic.")
 
+    reusable_entry = _find_reusable_offline_entry(
+        db,
+        domain=_normalize_offline_domain(category),
+        source_kinds=_trusted_shared_reuse_source_kinds(),
+        question_text=text or "Analyse photo Songra",
+    )
+    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+    if reusable_payload and (text.strip() or not images_b64):
+        return {
+            "status": "success",
+            **reusable_payload,
+            "_meta": {
+                "duration_ms": int((_time.time() - start_time) * 1000),
+                "model": "shared-offline-corpus",
+                "from_cache": True,
+                "fallback_used": False,
+                "shared_cache_hit": True,
+                "shared_source": reusable_entry.source_kind,
+            },
+        }
+
     # ÉTAPE 1 : Analyse Gemini unifiée
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
 
@@ -5468,29 +7158,48 @@ async def v2_analyze(
 
     if generate_media:
         import asyncio
+
+        async def _run_media_task(label: str, coro, timeout_seconds: int):
+            try:
+                result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                return label, result
+            except Exception as e:
+                print(f"[MEDIA] Erreur {label}: {e}")
+                return label, None
+
         tasks = []
 
         if decision["generer_image"] and decision["prompt_image"]:
             style = "schema" if decision["mode_urgence"] else "illustration"
-            tasks.append(("image", v2_services.generate_image(decision["prompt_image"], style=style)))
+            tasks.append(
+                _run_media_task(
+                    "image",
+                    v2_services.generate_image(decision["prompt_image"], style=style, category=category),
+                    20,
+                )
+            )
 
         if decision["generer_video"] and decision["prompt_video"]:
-            tasks.append(("video", v2_services.generate_video(
-                decision["prompt_video"],
-                gemini_api_key=GEMINI_API_KEY,
-                duration_sec=5 if decision["mode_urgence"] else 8,
-                is_urgency=decision["mode_urgence"],
-            )))
+            tasks.append(
+                _run_media_task(
+                    "video",
+                    v2_services.generate_video(
+                        decision["prompt_video"],
+                        gemini_api_key=GEMINI_API_KEY,
+                        duration_sec=5 if decision["mode_urgence"] else 8,
+                        is_urgency=decision["mode_urgence"],
+                        category=category,
+                    ),
+                    25,
+                )
+            )
 
-        for label, coro in tasks:
-            try:
-                result = await coro
+        if tasks:
+            for label, result in await asyncio.gather(*tasks):
                 if label == "image":
                     image_result = result
-                else:
+                elif label == "video":
                     video_result = result
-            except Exception as e:
-                print(f"[MEDIA] Erreur {label}: {e}")
 
     # ÉTAPE 4 : Réponse unique
     final_response = v2_services.build_response(
@@ -5499,6 +7208,23 @@ async def v2_analyze(
         image_result=image_result,
         video_result=video_result,
     )
+
+    offline_payload = {
+        **final_response,
+        "input_photo_base64": images_b64[0] if images_b64 else None,
+    }
+
+    try:
+        _persist_offline_knowledge_entry(
+            db=db,
+            user_id=current_user.id,
+            source_kind="v2_analyze",
+            category=category,
+            question_text=text or "Analyse photo Songra",
+            response_payload=offline_payload,
+        )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance v2/analyze: {e}")
 
     duration = int((_time.time() - start_time) * 1000)
 
@@ -5509,6 +7235,7 @@ async def v2_analyze(
             "duration_ms": duration,
             "model": "gemini-2.5-flash",
             "from_cache": analysis.get("from_cache", False),
+            "fallback_used": analysis.get("from_fallback", False),
         },
     }
 
@@ -5517,6 +7244,7 @@ async def v2_analyze(
 async def v2_scanner_analyze(
     data: V2AnalyzeRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Scanner v2 : au moins 1 photo requise"""
     text = data.text or data.content or ""
@@ -5530,6 +7258,23 @@ async def v2_scanner_analyze(
     decision = v2_services.decide(analysis)
     final_response = v2_services.build_response(analysis=analysis, decision=decision)
 
+    offline_payload = {
+        **final_response,
+        "input_photo_base64": images_b64[0] if images_b64 else None,
+    }
+
+    try:
+        _persist_offline_knowledge_entry(
+            db=db,
+            user_id=current_user.id,
+            source_kind="v2_scanner",
+            category=category,
+            question_text=text or "Scan photo Songra",
+            response_payload=offline_payload,
+        )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance v2/scanner: {e}")
+
     return {"status": "success", **final_response}
 
 
@@ -5537,6 +7282,7 @@ async def v2_scanner_analyze(
 async def v2_assistant_query(
     data: V2AnalyzeRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
     text = data.text or data.content or ""
@@ -5546,9 +7292,44 @@ async def v2_assistant_query(
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
 
+    reusable_entry = _find_reusable_offline_entry(
+        db,
+        domain=_normalize_offline_domain(category),
+        source_kinds=_trusted_shared_reuse_source_kinds(),
+        question_text=text or "Question Songra",
+    )
+    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+    if reusable_payload and (text.strip() or not images_b64):
+        return {
+            "status": "success",
+            **reusable_payload,
+            "_meta": {
+                "model": "shared-offline-corpus",
+                "shared_cache_hit": True,
+                "shared_source": reusable_entry.source_kind,
+            },
+        }
+
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
     decision = v2_services.decide(analysis)
     final_response = v2_services.build_response(analysis=analysis, decision=decision)
+
+    offline_payload = {
+        **final_response,
+        "input_photo_base64": images_b64[0] if images_b64 else None,
+    }
+
+    try:
+        _persist_offline_knowledge_entry(
+            db=db,
+            user_id=current_user.id,
+            source_kind="v2_assistant_query",
+            category=category,
+            question_text=text or "Question Songra",
+            response_payload=offline_payload,
+        )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance v2/assistant: {e}")
 
     return {"status": "success", **final_response}
 
@@ -5557,6 +7338,7 @@ async def v2_assistant_query(
 async def v2_entreprendre(
     data: V2EntreprendreRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Analyse entrepreneuriale d'un terrain → propositions business"""
     import time as _time
@@ -5567,27 +7349,114 @@ async def v2_entreprendre(
     generate_media = data.generate_media is not False
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
+    reusable_entry = _find_reusable_offline_entry(
+        db,
+        domain=_normalize_offline_domain(category),
+        source_kinds=["entreprendre"],
+        question_text=text or "Analyse terrain Songra",
+    )
+    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+
     # Analyse entrepreneuriale via Gemini
-    entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
+    cache_hit = bool(reusable_payload)
+    entrepreneurship = reusable_payload if reusable_payload else await v2_services.gemini_analyze_entrepreneurship(
         text=text, images_b64=images_b64, category=category
     )
 
-    # Génération image du plan de découpage
+    # Génération image/vidéo du plan de découpage
     image_result = None
+    video_result = None
+    if reusable_payload:
+        if reusable_payload.get("image_base64"):
+            image_result = {
+                "success": True,
+                "image_base64": reusable_payload.get("image_base64"),
+                "mime_type": reusable_payload.get("image_mime_type"),
+                "fallback_description": reusable_payload.get("image_description"),
+            }
+        if reusable_payload.get("video_url") or reusable_payload.get("video_base64"):
+            video_result = {
+                "success": True,
+                "video_base64": reusable_payload.get("video_base64"),
+                "video_url": reusable_payload.get("video_url"),
+                "mime_type": reusable_payload.get("video_mime_type"),
+                "duration_sec": reusable_payload.get("video_duration"),
+            }
+        elif reusable_payload.get("video_steps"):
+            video_result = {
+                "fallback": True,
+                "video_description": reusable_payload.get("video_description"),
+                "steps_visuelles": reusable_payload.get("video_steps"),
+            }
+
     if generate_media and entrepreneurship.get("besoin_image"):
-        cat_label = "d'élevage" if category == "elevage" else "agricole"
-        img_prompt = (
-            f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
-            f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
-            f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
-            "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
-        )
-        try:
-            image_result = await v2_services.generate_image(img_prompt, style="schema")
-        except Exception as e:
-            print(f"[ENTREPRENDRE] Erreur image: {e}")
+        if not (image_result and image_result.get("success")):
+            cat_label = "d'élevage" if category == "elevage" else "agricole"
+            img_prompt = (
+                f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
+                f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
+                f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
+                "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
+            )
+            try:
+                image_result = await v2_services.generate_image(img_prompt, style="schema", category=category)
+            except Exception as e:
+                print(f"[ENTREPRENDRE] Erreur image: {e}")
+
+    if generate_media and entrepreneurship.get("besoin_video"):
+        if not (video_result and (video_result.get("success") or video_result.get("fallback"))):
+            cat_label = "d'élevage" if category == "elevage" else "agricole"
+            propositions = ". ".join(
+                p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
+            )
+            calendrier = ". ".join(
+                f"{item.get('mois', '')}: {item.get('activite', '')}"
+                for item in entrepreneurship.get("calendrier_cultural", [])[:3]
+            )
+            video_prompt = (
+                f"Vidéo pédagogique courte montrant un plan d'aménagement de terrain {cat_label} au Burkina Faso. "
+                f"Montrer l'organisation de l'espace selon ce découpage : {entrepreneurship.get('decoupage_terrain', '')}. "
+                f"Montrer aussi les projets proposés : {propositions}. "
+                f"Calendrier de mise en oeuvre : {calendrier}. "
+                "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
+            )
+            try:
+                video_result = await v2_services.generate_video(
+                    video_prompt,
+                    gemini_api_key=GEMINI_API_KEY,
+                    duration_sec=8,
+                    is_urgency=False,
+                    category=category,
+                )
+            except Exception as e:
+                print(f"[ENTREPRENDRE] Erreur video: {e}")
 
     duration = int((_time.time() - start_time) * 1000)
+
+    offline_payload = {
+        **entrepreneurship,
+        "input_photo_base64": images_b64[0] if images_b64 else None,
+        "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+        "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+        "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+        "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+        "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
+        "image_description": image_result.get("fallback_description") if image_result else None,
+        "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+        "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
+    }
+
+    try:
+        _persist_offline_knowledge_entry(
+            db=db,
+            user_id=current_user.id,
+            source_kind="entreprendre",
+            category=category,
+            question_text=text or "Analyse terrain Songra",
+            response_payload=offline_payload,
+        )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance v2/entreprendre: {e}")
 
     return {
         "status": "success",
@@ -5595,9 +7464,17 @@ async def v2_entreprendre(
         "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
         "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
         "image_description": image_result.get("fallback_description") if image_result else None,
+        "video_base64": video_result.get("video_base64") if video_result and video_result.get("success") else None,
+        "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+        "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+        "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
+        "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+        "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
         "_meta": {
             "duration_ms": duration,
-            "model": "gemini-2.5-flash",
+            "model": "shared-offline-corpus" if cache_hit else "gemini-2.5-flash",
+            "shared_cache_hit": cache_hit,
+            "shared_source": reusable_entry.source_kind if cache_hit and reusable_entry else None,
         },
     }
 
@@ -5617,6 +7494,7 @@ async def v2_health():
 async def v2_generate_video_illustration(
     data: V2VideoIllustrationRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Génération on-demand d'une vidéo illustrée"""
     import time as _time
@@ -5625,6 +7503,29 @@ async def v2_generate_video_illustration(
     diagnostic = data.diagnostic
     steps_list = (data.steps or [])[:5]
     cat = _normalize_category(data.category)
+    cache_question = _build_media_cache_question(diagnostic, steps_list)
+    reusable_entry = _find_reusable_offline_entry(
+        db,
+        domain=_normalize_offline_domain(cat),
+        source_kinds=["generated_video_illustration"],
+        question_text=cache_question,
+    )
+    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+    if reusable_payload:
+        return {
+            "status": "success",
+            "type": "video" if reusable_payload.get("video_url") or reusable_payload.get("video_base64") else ("image_steps" if reusable_payload.get("steps") else "text_steps"),
+            "video_base64": reusable_payload.get("video_base64"),
+            "video_url": reusable_payload.get("video_url"),
+            "video_mime_type": reusable_payload.get("video_mime_type"),
+            "duration_sec": reusable_payload.get("video_duration"),
+            "steps": reusable_payload.get("steps") or ([{"description": step} for step in (reusable_payload.get("video_steps") or [])]),
+            "_meta": {
+                "duration_ms": int((_time.time() - start_time) * 1000),
+                "shared_cache_hit": True,
+                "shared_source": reusable_entry.source_kind,
+            },
+        }
 
     # Tentative 1 : Veo (vraie vidéo)
     video_result = None
@@ -5641,12 +7542,28 @@ async def v2_generate_video_illustration(
             gemini_api_key=GEMINI_API_KEY,
             duration_sec=5 if cat == "urgence" else 8,
             is_urgency=cat == "urgence",
+            category=cat,
         )
     except Exception as e:
         print(f"[VIDEO-ILLUS] Veo échoué: {e}")
 
     # Si Veo a réussi
     if video_result and video_result.get("success"):
+        try:
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=current_user.id,
+                source_kind="generated_video_illustration",
+                category=cat,
+                question_text=cache_question,
+                response_payload=_build_media_offline_payload(
+                    diagnostic=diagnostic,
+                    steps=steps_list,
+                    video_result=video_result,
+                ),
+            )
+        except Exception as e:
+            print(f"[OFFLINE-CORPUS] Erreur persistance video illustration: {e}")
         return {
             "status": "success",
             "type": "video",
@@ -5667,21 +7584,164 @@ async def v2_generate_video_illustration(
         infographic_prompt = f"Infographie premiers secours en 3-4 vignettes montrant les gestes pour : {diagnostic}. {steps_text}. Style schématique clair. Pas de texte."
 
     try:
-        img_result = await v2_services.generate_image(infographic_prompt, style="schema")
+        img_result = await v2_services.generate_image(infographic_prompt, style="schema", category=cat)
         if img_result and img_result.get("success"):
+            steps_payload = [{"image_base64": img_result["image_base64"], "mime_type": img_result.get("mime_type", "image/png"), "description": diagnostic}]
+            try:
+                _persist_offline_knowledge_entry(
+                    db=db,
+                    user_id=current_user.id,
+                    source_kind="generated_video_illustration",
+                    category=cat,
+                    question_text=cache_question,
+                    response_payload=_build_media_offline_payload(
+                        diagnostic=diagnostic,
+                        steps=steps_list,
+                        image_result={
+                            "image_base64": img_result.get("image_base64"),
+                            "image_mime_type": img_result.get("mime_type", "image/png"),
+                            "image_description": diagnostic,
+                        },
+                        video_result={
+                            "type": "image_steps",
+                            "steps": steps_payload,
+                            "video_steps": steps_list,
+                            "video_description": diagnostic,
+                        },
+                    ),
+                )
+            except Exception as e:
+                print(f"[OFFLINE-CORPUS] Erreur persistance fallback illustration video: {e}")
             return {
                 "status": "success",
                 "type": "image_steps",
-                "steps": [{"image_base64": img_result["image_base64"], "mime_type": img_result.get("mime_type", "image/png"), "description": diagnostic}],
+                "steps": steps_payload,
             }
     except Exception as e:
         print(f"[VIDEO-ILLUS] Image fallback échoué: {e}")
 
     # Fallback ultime : texte
-    return {
+    text_fallback = {
         "status": "success",
         "type": "text_steps",
         "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
+    }
+    try:
+        _persist_offline_knowledge_entry(
+            db=db,
+            user_id=current_user.id,
+            source_kind="generated_video_illustration",
+            category=cat,
+            question_text=cache_question,
+            response_payload=_build_media_offline_payload(
+                diagnostic=diagnostic,
+                steps=steps_list,
+                video_result={
+                    "type": "text_steps",
+                    "video_steps": steps_list,
+                    "video_description": diagnostic,
+                },
+            ),
+        )
+    except Exception as e:
+        print(f"[OFFLINE-CORPUS] Erreur persistance text steps video: {e}")
+    return text_fallback
+
+
+@app.post("/api/v2/generate-image-illustration")
+async def v2_generate_image_illustration(
+    data: V2ImageIllustrationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Génération on-demand d'une illustration pédagogique"""
+    import time as _time
+    start_time = _time.time()
+
+    diagnostic = data.diagnostic
+    steps_list = (data.steps or [])[:5]
+    cat = _normalize_category(data.category)
+    cache_question = _build_media_cache_question(diagnostic, steps_list)
+    reusable_entry = _find_reusable_offline_entry(
+        db,
+        domain=_normalize_offline_domain(cat),
+        source_kinds=["generated_image_illustration"],
+        question_text=cache_question,
+    )
+    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+    if reusable_payload.get("image_base64"):
+        return {
+            "status": "success",
+            "type": "image",
+            "image_base64": reusable_payload.get("image_base64"),
+            "image_mime_type": reusable_payload.get("image_mime_type"),
+            "image_description": reusable_payload.get("image_description") or diagnostic,
+            "_meta": {
+                "duration_ms": int((_time.time() - start_time) * 1000),
+                "shared_cache_hit": True,
+                "shared_source": reusable_entry.source_kind,
+            },
+        }
+    steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
+
+    if cat == "agriculture":
+        image_prompt = (
+            f"Illustration pédagogique agricole montrant : {diagnostic}. "
+            f"Montrer aussi les gestes recommandés : {steps_text}. "
+            "Contexte : champ, outils et personnes du Burkina Faso. Pas de texte."
+        )
+        style = "illustration"
+    elif cat == "elevage":
+        image_prompt = (
+            f"Illustration vétérinaire simple montrant : {diagnostic}. "
+            f"Montrer les soins ou vérifications utiles : {steps_text}. "
+            "Contexte : élevage rural au Burkina Faso. Pas de texte."
+        )
+        style = "illustration"
+    else:
+        image_prompt = (
+            f"Illustration schématique claire montrant les gestes pour : {diagnostic}. "
+            f"Étapes : {steps_text}. Contexte local Burkina Faso, style premiers secours non choquant. Pas de texte."
+        )
+        style = "schema"
+
+    image_result = await v2_services.generate_image(image_prompt, style=style, category=cat)
+
+    if image_result and image_result.get("success"):
+        try:
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=current_user.id,
+                source_kind="generated_image_illustration",
+                category=cat,
+                question_text=cache_question,
+                response_payload=_build_media_offline_payload(
+                    diagnostic=diagnostic,
+                    steps=steps_list,
+                    image_result=image_result,
+                ),
+            )
+        except Exception as e:
+            print(f"[OFFLINE-CORPUS] Erreur persistance image illustration: {e}")
+        return {
+            "status": "success",
+            "type": "image",
+            "image_base64": image_result.get("image_base64"),
+            "image_mime_type": image_result.get("mime_type", "image/png"),
+            "image_description": diagnostic,
+            "_meta": {
+                "duration_ms": int((_time.time() - start_time) * 1000),
+            },
+        }
+
+    return {
+        "status": "success",
+        "type": "image_fallback",
+        "image_description": image_result.get("fallback_description") if image_result else diagnostic,
+        "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
+        "_meta": {
+            "duration_ms": int((_time.time() - start_time) * 1000),
+        },
     }
 
 
