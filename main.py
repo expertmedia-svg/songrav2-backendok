@@ -7789,4 +7789,5 @@ if __name__ == "__main__":
     
     # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
     # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
-    uvicorn.run(app, host="0.0.0.0", port=3000, reload=False)
+    port = int(os.getenv("PORT", "3000"))
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
