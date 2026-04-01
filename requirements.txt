@@ -2,7 +2,7 @@
 # =====================================================
 
 # 1. CORE WEB FRAMEWORK
-fastapi==0.104.1
+fastapi==0.115.12
 uvicorn[standard]==0.23.2
 sqlalchemy==2.0.23
 
@@ -27,7 +27,7 @@ google-genai==1.69.0
 openai==1.59.7
 
 # HTTP client for auxiliary HTTP calls
-httpx==0.27.0
+httpx==0.28.1
 
 # 6. OPTIONAL/FUTURE
 # tensorflow==2.15.0
