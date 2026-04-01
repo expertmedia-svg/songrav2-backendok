@@ -2666,6 +2666,10 @@ app.add_middleware(
         "http://127.0.0.1:4173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://comstratmedia.com",
+        "https://www.comstratmedia.com",
+        "https://songra.yingr-ai.com",
+        "https://www.songra.yingr-ai.com",
         "capacitor://localhost",
         "ionic://localhost",
     ],
@@ -7389,23 +7393,36 @@ async def v2_entreprendre(
                 "steps_visuelles": reusable_payload.get("video_steps"),
             }
 
-    if generate_media and entrepreneurship.get("besoin_image"):
-        if not (image_result and image_result.get("success")):
-            cat_label = "d'élevage" if category == "elevage" else "agricole"
+    if generate_media:
+        import asyncio
+
+        async def _run_media_task(label: str, coro, timeout_seconds: int):
+            try:
+                result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                return label, result
+            except Exception as e:
+                print(f"[ENTREPRENDRE] Erreur {label}: {e}")
+                return label, None
+
+        tasks = []
+        cat_label = "d'élevage" if category == "elevage" else "agricole"
+
+        if entrepreneurship.get("besoin_image") and not (image_result and image_result.get("success")):
             img_prompt = (
                 f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
                 f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
                 f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
                 "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
             )
-            try:
-                image_result = await v2_services.generate_image(img_prompt, style="schema", category=category)
-            except Exception as e:
-                print(f"[ENTREPRENDRE] Erreur image: {e}")
+            tasks.append(
+                _run_media_task(
+                    "image",
+                    v2_services.generate_image(img_prompt, style="schema", category=category),
+                    12,
+                )
+            )
 
-    if generate_media and entrepreneurship.get("besoin_video"):
-        if not (video_result and (video_result.get("success") or video_result.get("fallback"))):
-            cat_label = "d'élevage" if category == "elevage" else "agricole"
+        if entrepreneurship.get("besoin_video") and not (video_result and (video_result.get("success") or video_result.get("fallback"))):
             propositions = ". ".join(
                 p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
             )
@@ -7420,16 +7437,26 @@ async def v2_entreprendre(
                 f"Calendrier de mise en oeuvre : {calendrier}. "
                 "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
             )
-            try:
-                video_result = await v2_services.generate_video(
-                    video_prompt,
-                    gemini_api_key=GEMINI_API_KEY,
-                    duration_sec=8,
-                    is_urgency=False,
-                    category=category,
+            tasks.append(
+                _run_media_task(
+                    "video",
+                    v2_services.generate_video(
+                        video_prompt,
+                        gemini_api_key=GEMINI_API_KEY,
+                        duration_sec=8,
+                        is_urgency=False,
+                        category=category,
+                    ),
+                    18,
                 )
-            except Exception as e:
-                print(f"[ENTREPRENDRE] Erreur video: {e}")
+            )
+
+        if tasks:
+            for label, result in await asyncio.gather(*tasks):
+                if label == "image":
+                    image_result = result
+                elif label == "video":
+                    video_result = result
 
     duration = int((_time.time() - start_time) * 1000)
 
@@ -7751,12 +7778,13 @@ async def v2_generate_image_illustration(
 
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv("PORT", "3000"))
     
     print("=" * 50)
     print("SONGRA - Backend unifié v2 (Gemini)")
     print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
     print("=" * 50)
-    print("Serveur démarré sur http://localhost:3000")
+    print(f"Serveur démarré sur http://localhost:{port}")
     print("API v2: /api/v2/analyze, /api/v2/entreprendre, /api/v2/scanner/analyze")
     print("Test expert: test@resolvehub.bf / test123")
     print("=" * 50)
@@ -7789,5 +7817,4 @@ if __name__ == "__main__":
     
     # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
     # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
-    port = int(os.getenv("PORT", "3000"))
     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
