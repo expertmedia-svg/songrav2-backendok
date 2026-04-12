@@ -2674,7 +2674,7 @@ app.add_middleware(
         "ionic://localhost",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],ffffffff
     allow_headers=["*"],
 )
 
