@@ -3,7 +3,7 @@ SONGRA - Backend API avec Computer Vision LOCALE
 Version FINALE - Avec analyse IA complète
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -59,6 +59,22 @@ else:
 JWT_SECRET = os.getenv("JWT_SECRET", "songra-mobile-dev-secret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
+
+BACKEND_DIR = os.path.dirname(__file__)
+EXPERT_LOCAL_KNOWLEDGE_SOURCE = "expert_local_knowledge"
+EXPERT_AUDIO_MAP_PATH = os.getenv(
+    "EXPERT_AUDIO_MAP_PATH",
+    os.path.join(BACKEND_DIR, "audio_map.json"),
+)
+EXPERT_AUDIO_MAP_LEGACY_SEED = os.path.abspath(
+    os.path.join(BACKEND_DIR, "..", "backend-node", "data", "audioMap.json")
+)
+EXPERT_LOCAL_KNOWLEDGE_LEGACY_SEED = os.path.abspath(
+    os.path.join(BACKEND_DIR, "..", "backend-node", "data", "localKnowledgeBase.json")
+)
+EXPERT_AUDIO_UPLOAD_DIR = os.path.join("uploads", "audio")
+
+os.makedirs(EXPERT_AUDIO_UPLOAD_DIR, exist_ok=True)
 
 # ==========================================
 # DÉTECTION D'URGENCE - SOS/ACCIDENTS CRITIQUES
@@ -426,6 +442,22 @@ class KnowledgeItem(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ExpertLocalKnowledgeDB(Base):
+    __tablename__ = "expert_local_knowledge"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False, default="agriculture")
+    question_fr = Column(Text, nullable=False)
+    resolution_fr = Column(Text, nullable=False)
+    tags_json = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="validated")
+    origin = Column(String, nullable=False, default="expert_manual")
+    translations_json = Column(Text, nullable=True)
+    audio_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class OfflineKnowledgeEntryDB(Base):
     __tablename__ = "offline_knowledge_entries"
     id = Column(Integer, primary_key=True, index=True)
@@ -605,6 +637,24 @@ class KnowledgeItemIn(BaseModel):
 
 class KnowledgeBulkImport(BaseModel):
     items: List[KnowledgeItemIn]
+
+
+class LocalizationTranslateIn(BaseModel):
+    question_fr: str
+    resolution_fr: str
+    category: str = "agriculture"
+
+
+class ExpertLocalKnowledgeIn(BaseModel):
+    title: str
+    category: str = "agriculture"
+    question_fr: str
+    resolution_fr: str
+    tags: List[str] = []
+    translations: Dict[str, Any] = {}
+    audio: Dict[str, Any] = {}
+    status: str = "validated"
+    origin: Optional[str] = None
 
 
 class EmergencyNumberIn(BaseModel):
@@ -1732,11 +1782,296 @@ def _load_json_list(raw: Optional[str]) -> List[Any]:
         return []
 
 
+def _load_json_dict(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 def _build_upload_url(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
     public_base = os.getenv("PUBLIC_API_BASE_URL", "http://localhost:3000").rstrip("/")
     return f"{public_base}/{path}"
+
+
+def _normalize_expert_local_language(language: Optional[str]) -> str:
+    normalized = str(language or "fr").strip().lower()
+    if normalized == "moore":
+        return "mooree"
+    if normalized not in {"fr", "mooree", "dioula", "fulfulde"}:
+        return "fr"
+    return normalized
+
+
+def _ensure_parent_dir(file_path: str) -> None:
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+
+def _ensure_audio_map_store() -> None:
+    _ensure_parent_dir(EXPERT_AUDIO_MAP_PATH)
+    if os.path.exists(EXPERT_AUDIO_MAP_PATH):
+        return
+    seed_data: Dict[str, Any] = {}
+    if os.path.exists(EXPERT_AUDIO_MAP_LEGACY_SEED):
+        try:
+            with open(EXPERT_AUDIO_MAP_LEGACY_SEED, "r", encoding="utf-8") as handle:
+                parsed = json.load(handle)
+                if isinstance(parsed, dict):
+                    seed_data = parsed
+        except Exception:
+            seed_data = {}
+    with open(EXPERT_AUDIO_MAP_PATH, "w", encoding="utf-8") as handle:
+        json.dump(seed_data, handle, ensure_ascii=False, indent=2)
+
+
+def _load_audio_map_store() -> Dict[str, Any]:
+    _ensure_audio_map_store()
+    try:
+        with open(EXPERT_AUDIO_MAP_PATH, "r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+            return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_audio_map_store(items: Dict[str, Any]) -> None:
+    _ensure_audio_map_store()
+    with open(EXPERT_AUDIO_MAP_PATH, "w", encoding="utf-8") as handle:
+        json.dump(items, handle, ensure_ascii=False, indent=2)
+
+
+def _normalize_audio_map_audios(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    audios: Dict[str, Dict[str, Any]] = {}
+    for language, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        normalized_language = _normalize_expert_local_language(language)
+        audios[normalized_language] = {
+            "url": str(value.get("url") or "").strip(),
+            "mime_type": str(value.get("mime_type") or "").strip() or None,
+            "updated_at": str(value.get("updated_at") or datetime.utcnow().isoformat()),
+        }
+    return audios
+
+
+def _sanitize_audio_map_entry(raw: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    current = existing or {}
+    next_audios = {
+        **_normalize_audio_map_audios(current.get("audios")),
+        **_normalize_audio_map_audios(raw.get("audios")),
+    }
+    return {
+        "label": str(raw.get("label") or current.get("label") or "").strip(),
+        "action": str(raw.get("action") or current.get("action") or "").strip(),
+        "screen": str(raw.get("screen") or current.get("screen") or "").strip(),
+        "fallback_text": str(raw.get("fallback_text") or current.get("fallback_text") or "").strip(),
+        "audio": str(raw.get("audio") or current.get("audio") or "").strip() or None,
+        "mime_type": str(raw.get("mime_type") or current.get("mime_type") or "").strip() or None,
+        "audios": next_audios,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    translations: Dict[str, Dict[str, Any]] = {}
+    for language, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        normalized_language = _normalize_expert_local_language(language)
+        if normalized_language == "fr":
+            continue
+        translations[normalized_language] = {
+            "question": str(value.get("question") or "").strip(),
+            "text": str(value.get("text") or value.get("resolution") or "").strip(),
+            "summary": str(value.get("summary") or "").strip(),
+            "updated_at": str(value.get("updated_at") or datetime.utcnow().isoformat()),
+        }
+    return translations
+
+
+def _normalize_expert_local_audio(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    audio_map: Dict[str, Dict[str, Any]] = {}
+    for language, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        normalized_language = _normalize_expert_local_language(language)
+        audio_map[normalized_language] = {
+            "url": str(value.get("url") or "").strip(),
+            "mime_type": str(value.get("mime_type") or "").strip() or None,
+            "uploaded_at": str(value.get("uploaded_at") or datetime.utcnow().isoformat()),
+        }
+    return audio_map
+
+
+def _normalize_expert_local_status(value: Optional[str]) -> str:
+    normalized = str(value or "validated").strip().lower()
+    allowed = {"validated", "resolved", "expert_verified", "pending_review"}
+    return normalized if normalized in allowed else "validated"
+
+
+def _normalize_expert_local_category(value: Optional[str]) -> str:
+    normalized = str(value or "agriculture").strip().lower()
+    mapping = {
+        "health": "urgence",
+        "urgence": "urgence",
+        "sos_accident": "urgence",
+        "elevage": "elevage",
+        "agriculture": "agriculture",
+    }
+    return mapping.get(normalized, "agriculture")
+
+
+def _serialize_expert_local_knowledge_item(item: ExpertLocalKnowledgeDB) -> Dict[str, Any]:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "category": item.category,
+        "question_fr": item.question_fr,
+        "resolution_fr": item.resolution_fr,
+        "tags": _load_json_list(item.tags_json),
+        "status": item.status,
+        "origin": item.origin,
+        "translations": _load_json_dict(item.translations_json),
+        "audio": _load_json_dict(item.audio_json),
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _upsert_expert_local_knowledge_from_legacy_seed(db: Session) -> int:
+    if not os.path.exists(EXPERT_LOCAL_KNOWLEDGE_LEGACY_SEED):
+        return 0
+    if db.query(ExpertLocalKnowledgeDB).count() > 0:
+        return 0
+    try:
+        with open(EXPERT_LOCAL_KNOWLEDGE_LEGACY_SEED, "r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except Exception:
+        return 0
+    if not isinstance(parsed, list):
+        return 0
+
+    inserted = 0
+    for raw in parsed:
+        if not isinstance(raw, dict):
+            continue
+        question_fr = str(raw.get("question_fr") or raw.get("question") or "").strip()
+        resolution_fr = str(raw.get("resolution_fr") or raw.get("answer") or "").strip()
+        if not question_fr or not resolution_fr:
+            continue
+        db.add(
+            ExpertLocalKnowledgeDB(
+                title=str(raw.get("title") or question_fr[:120]).strip(),
+                category=_normalize_expert_local_category(raw.get("category")),
+                question_fr=question_fr,
+                resolution_fr=resolution_fr,
+                tags_json=json.dumps(raw.get("tags") or [], ensure_ascii=False),
+                status=_normalize_expert_local_status(raw.get("status")),
+                origin=str(raw.get("origin") or "expert_manual"),
+                translations_json=json.dumps(
+                    _normalize_expert_local_translations(raw.get("translations")),
+                    ensure_ascii=False,
+                ),
+                audio_json=json.dumps(
+                    _normalize_expert_local_audio(raw.get("audio")),
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        inserted += 1
+
+    if inserted > 0:
+        db.commit()
+    return inserted
+
+
+def _parse_json_object_from_text(raw_text: str) -> Dict[str, Any]:
+    cleaned = str(raw_text or "").replace("```json", "").replace("```", "").strip()
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    payload = match.group(0) if match else cleaned
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise ValueError("Réponse JSON invalide")
+    return parsed
+
+
+def _build_local_translation_prompt(question_fr: str, resolution_fr: str, category: str) -> str:
+    return (
+        "Tu traduis une fiche terrain en langage oral simple pour le Burkina Faso.\n"
+        "Retourne uniquement un JSON strict avec cette structure:\n"
+        "{\n"
+        '  "mooree": {"question": "...", "text": "...", "summary": "..."},\n'
+        '  "dioula": {"question": "...", "text": "...", "summary": "..."},\n'
+        '  "fulfulde": {"question": "...", "text": "...", "summary": "..."}\n'
+        "}\n"
+        "Contraintes: pas de markdown, pas d'explication, langage court, concret, adapte aux zones rurales.\n"
+        f"Categorie: {category}\n"
+        f"Question FR: {question_fr}\n"
+        f"Resolution FR: {resolution_fr}"
+    )
+
+
+def _generate_local_translations_with_gemini(prompt: str) -> Dict[str, Any]:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY non configuree")
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    result = model.generate_content(prompt)
+    return _parse_json_object_from_text(result.text)
+
+
+def _generate_local_translations_with_openai(prompt: str) -> Dict[str, Any]:
+    if not openai_client or not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY non configuree")
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        temperature=0.2,
+        max_tokens=900,
+    )
+    content = response.choices[0].message.content if response.choices else ""
+    return _parse_json_object_from_text(content or "")
+
+
+def _generate_local_translations(question_fr: str, resolution_fr: str, category: str) -> Dict[str, Dict[str, Any]]:
+    prompt = _build_local_translation_prompt(question_fr, resolution_fr, category)
+    provider_errors: List[str] = []
+
+    try:
+        parsed = _generate_local_translations_with_gemini(prompt)
+        print("[INFO] Traduction locale generee via Gemini")
+    except Exception as gemini_exc:
+        provider_errors.append(f"gemini: {gemini_exc}")
+        print(f"[WARN] Traduction Gemini indisponible, fallback OpenAI: {gemini_exc}")
+        try:
+            parsed = _generate_local_translations_with_openai(prompt)
+            print("[INFO] Traduction locale generee via OpenAI")
+        except Exception as openai_exc:
+            provider_errors.append(f"openai: {openai_exc}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Traduction locale impossible: {' | '.join(provider_errors)}",
+            ) from openai_exc
+
+    normalized = _normalize_expert_local_translations(parsed)
+    if not normalized:
+        raise HTTPException(status_code=502, detail="La traduction locale renvoyée est vide")
+    return normalized
 
 
 def _history_sort_value(value: Any) -> str:
@@ -2839,6 +3174,14 @@ async def startup_seed_data():
             print(f"✓ Base de connaissances chargée ({total_items} fiches)")
         except Exception as e_load:
             print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+
+        try:
+            _ensure_audio_map_store()
+            migrated_entries = _upsert_expert_local_knowledge_from_legacy_seed(db)
+            if migrated_entries > 0:
+                print(f"✓ Fiches locales expertes migrées ({migrated_entries})")
+        except Exception as e_local_knowledge:
+            print(f"⚠️ Erreur initialisation studio expert local: {e_local_knowledge}")
 
         try:
             backfilled = _backfill_resolved_tickets_to_offline_corpus(db)
@@ -5424,6 +5767,248 @@ async def import_knowledge_from_json(
         "updated": updated,
         "total_items": total_items,
     }
+
+
+@app.post("/api/localization/translate")
+async def translate_localization_payload(
+    payload: LocalizationTranslateIn,
+    current_expert: Expert = Depends(get_current_expert),
+):
+    del current_expert
+    translations = _generate_local_translations(
+        payload.question_fr,
+        payload.resolution_fr,
+        _normalize_expert_local_category(payload.category),
+    )
+    return {
+        "status": "success",
+        "question_fr": payload.question_fr,
+        "resolution_fr": payload.resolution_fr,
+        "translations": translations,
+    }
+
+
+@app.get("/api/expert/local-knowledge")
+async def list_expert_local_knowledge(
+    category: Optional[str] = None,
+    language: Optional[str] = None,
+    limit: int = Query(default=200, le=500),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ExpertLocalKnowledgeDB)
+    if category:
+        query = query.filter(
+            ExpertLocalKnowledgeDB.category == _normalize_expert_local_category(category)
+        )
+
+    items = query.order_by(ExpertLocalKnowledgeDB.updated_at.desc()).limit(limit).all()
+    serialized = [_serialize_expert_local_knowledge_item(item) for item in items]
+
+    requested_language = _normalize_expert_local_language(language)
+    if requested_language != "fr":
+        serialized = [
+            item
+            for item in serialized
+            if item.get("translations", {}).get(requested_language, {}).get("text")
+            or item.get("audio", {}).get(requested_language, {}).get("url")
+        ]
+
+    return {"status": "success", "items": serialized}
+
+
+@app.get("/api/expert/local-knowledge/{item_id}")
+async def get_expert_local_knowledge_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.post("/api/expert/local-knowledge")
+async def create_expert_local_knowledge_item(
+    payload: ExpertLocalKnowledgeIn,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    item = ExpertLocalKnowledgeDB(
+        title=payload.title.strip() or payload.question_fr[:120],
+        category=_normalize_expert_local_category(payload.category),
+        question_fr=payload.question_fr.strip(),
+        resolution_fr=payload.resolution_fr.strip(),
+        tags_json=json.dumps(payload.tags or [], ensure_ascii=False),
+        status=_normalize_expert_local_status(payload.status),
+        origin=str(payload.origin or "expert_manual"),
+        translations_json=json.dumps(
+            _normalize_expert_local_translations(payload.translations),
+            ensure_ascii=False,
+        ),
+        audio_json=json.dumps(
+            _normalize_expert_local_audio(payload.audio),
+            ensure_ascii=False,
+        ),
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.patch("/api/expert/local-knowledge/{item_id}")
+async def update_expert_local_knowledge_item(
+    item_id: int,
+    payload: ExpertLocalKnowledgeIn,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+
+    item.title = payload.title.strip() or payload.question_fr[:120]
+    item.category = _normalize_expert_local_category(payload.category)
+    item.question_fr = payload.question_fr.strip()
+    item.resolution_fr = payload.resolution_fr.strip()
+    item.tags_json = json.dumps(payload.tags or [], ensure_ascii=False)
+    item.status = _normalize_expert_local_status(payload.status)
+    item.origin = str(payload.origin or item.origin or "expert_manual")
+    item.translations_json = json.dumps(
+        {
+            **_load_json_dict(item.translations_json),
+            **_normalize_expert_local_translations(payload.translations),
+        },
+        ensure_ascii=False,
+    )
+    item.audio_json = json.dumps(
+        {
+            **_load_json_dict(item.audio_json),
+            **_normalize_expert_local_audio(payload.audio),
+        },
+        ensure_ascii=False,
+    )
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.post("/api/expert/local-knowledge/{item_id}/translate")
+async def translate_expert_local_knowledge_item(
+    item_id: int,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    translations = _generate_local_translations(
+        item.question_fr,
+        item.resolution_fr,
+        item.category,
+    )
+    item.translations_json = json.dumps(
+        {**_load_json_dict(item.translations_json), **translations},
+        ensure_ascii=False,
+    )
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.post("/api/expert/local-knowledge/{item_id}/audio-upload")
+async def upload_expert_local_knowledge_audio(
+    item_id: int,
+    language: str = Form(default="fr"),
+    audio: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+
+    normalized_language = _normalize_expert_local_language(language)
+    extension = os.path.splitext(audio.filename or "")[1] or ".webm"
+    file_name = f"expert-local-{item_id}-{normalized_language}{extension}"
+    relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, file_name).replace("\\", "/")
+    absolute_path = os.path.abspath(relative_path)
+    content = await audio.read()
+    with open(absolute_path, "wb") as handle:
+        handle.write(content)
+
+    next_audio = _load_json_dict(item.audio_json)
+    next_audio[normalized_language] = {
+        "url": _build_upload_url(relative_path),
+        "mime_type": audio.content_type or "audio/webm",
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+    item.audio_json = json.dumps(next_audio, ensure_ascii=False)
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.get("/api/audio-map")
+async def get_audio_map():
+    return {"status": "success", "items": _load_audio_map_store()}
+
+
+@app.put("/api/audio-map/{audio_key}")
+async def update_audio_map_entry(
+    audio_key: str,
+    body: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+):
+    del current_expert
+    key = str(audio_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Clé audio requise")
+    items = _load_audio_map_store()
+    items[key] = _sanitize_audio_map_entry(body, items.get(key))
+    _save_audio_map_store(items)
+    return {"status": "success", "key": key, "item": items[key]}
+
+
+@app.post("/api/audio-map/{audio_key}/upload")
+async def upload_audio_map_entry(
+    audio_key: str,
+    language: str = Form(default="fr"),
+    audio: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_expert),
+):
+    del current_expert
+    key = str(audio_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Clé audio requise")
+
+    normalized_language = _normalize_expert_local_language(language)
+    extension = os.path.splitext(audio.filename or "")[1] or ".webm"
+    file_name = f"{key}-{normalized_language}{extension}".replace("/", "-")
+    relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, file_name).replace("\\", "/")
+    absolute_path = os.path.abspath(relative_path)
+    content = await audio.read()
+    with open(absolute_path, "wb") as handle:
+        handle.write(content)
+
+    items = _load_audio_map_store()
+    current = items.get(key, {})
+    next_entry = _sanitize_audio_map_entry(current, current)
+    next_audio_meta = {
+        "url": _build_upload_url(relative_path),
+        "mime_type": audio.content_type or "audio/webm",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    next_entry.setdefault("audios", {})
+    next_entry["audios"][normalized_language] = next_audio_meta
+    if normalized_language == "fr":
+        next_entry["audio"] = next_audio_meta["url"]
+        next_entry["mime_type"] = next_audio_meta["mime_type"]
+    next_entry["updated_at"] = datetime.utcnow().isoformat()
+    items[key] = next_entry
+    _save_audio_map_store(items)
+    return {"status": "success", "key": key, "item": items[key]}
 
 @app.post("/api/create-test-expert")
 async def create_test_expert(db: Session = Depends(get_db)):

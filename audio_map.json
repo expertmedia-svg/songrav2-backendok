@@ -1,0 +1,118 @@
+{
+  "btn_scan": {
+    "audio": "/uploads/audio/scan.mp3",
+    "label": "Scanner",
+    "action": "scan"
+  },
+  "btn_envoyer": {
+    "audio": "/uploads/audio/envoyer.mp3",
+    "label": "Envoyer",
+    "action": "submit"
+  },
+  "action_arroser": {
+    "audio": "/uploads/audio/arroser.mp3",
+    "label": "Arroser",
+    "action": "play_action"
+  },
+  "menu_agriculture": {
+    "audio": "/uploads/audio/agriculture.mp3",
+    "label": "Menu agriculture",
+    "action": "open_menu"
+  },
+  "alert_general": {
+    "audio": "/uploads/audio/alerte.mp3",
+    "label": "Alerte générale",
+    "action": "play_alert"
+  },
+  "menu_communaute": {
+    "audio": null,
+    "label": "Menu communauté",
+    "action": "open_community",
+    "screen": "home",
+    "fallback_text": "Ouvrir l'espace communauté et prévention."
+  },
+  "btn_signaler": {
+    "audio": null,
+    "label": "Bouton signaler",
+    "action": "report_case",
+    "screen": "community",
+    "fallback_text": "Signalez rapidement votre situation avec texte, photo ou audio."
+  },
+  "btn_signalement_express": {
+    "audio": null,
+    "label": "Signalement express",
+    "action": "open_express_report",
+    "screen": "home",
+    "fallback_text": "Ouvrir le signalement express avec photo directe."
+  },
+  "action_confirmer_rapidement": {
+    "audio": null,
+    "label": "Confirmer rapidement",
+    "action": "quick_confirm_case",
+    "screen": "community",
+    "fallback_text": "Confirmer rapidement ce cas."
+  },
+  "action_modifier_brouillon_signalement": {
+    "audio": null,
+    "label": "Modifier brouillon signalement",
+    "action": "edit_pending_report",
+    "screen": "community",
+    "fallback_text": "Modifier ce brouillon de signalement."
+  },
+  "action_supprimer_brouillon_signalement": {
+    "audio": null,
+    "label": "Supprimer brouillon signalement",
+    "action": "delete_pending_report",
+    "screen": "community",
+    "fallback_text": "Supprimer ce brouillon de signalement."
+  },
+  "btn_sos": {
+    "audio": null,
+    "label": "Bouton SOS",
+    "action": "send_sos",
+    "screen": "home",
+    "fallback_text": "Envoyer une alerte SOS maintenant."
+  },
+  "menu_historique": {
+    "audio": null,
+    "label": "Historique",
+    "action": "open_history",
+    "screen": "home",
+    "fallback_text": "Consulter l'historique des consultations."
+  },
+  "menu_numeros_utiles": {
+    "audio": null,
+    "label": "Numéros utiles",
+    "action": "open_emergency_numbers",
+    "screen": "home",
+    "fallback_text": "Ouvrir les numéros utiles et les contacts d'urgence."
+  },
+  "menu_entreprendre": {
+    "audio": null,
+    "label": "Entreprendre",
+    "action": "open_entreprendre",
+    "screen": "home",
+    "fallback_text": "Découvrir les idées de projet adaptées à votre terrain."
+  },
+  "btn_prendre_photo": {
+    "audio": null,
+    "label": "Prendre une photo",
+    "action": "open_camera",
+    "screen": "scanner",
+    "fallback_text": "Ouvrir la caméra pour prendre une photo."
+  },
+  "btn_choisir_galerie": {
+    "audio": null,
+    "label": "Choisir dans la galerie",
+    "action": "open_gallery",
+    "screen": "scanner",
+    "fallback_text": "Choisir une photo dans la galerie."
+  },
+  "action_supprimer_photo": {
+    "audio": null,
+    "label": "Supprimer photo",
+    "action": "remove_photo",
+    "screen": "scanner",
+    "fallback_text": "Supprimer la photo sélectionnée."
+  }
+}
