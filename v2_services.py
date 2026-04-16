@@ -232,6 +232,23 @@ def _get_model(model_name: str = GEMINI_MODEL):
     return genai.GenerativeModel(model_name)
 
 
+async def _generate_content_with_timeout(
+    model,
+    prompt_or_parts,
+    *,
+    timeout: int = GEMINI_TIMEOUT,
+):
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(model.generate_content, prompt_or_parts),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"Gemini a depasse le delai autorise de {timeout} secondes"
+        ) from exc
+
+
 def _get_media_client(api_key: Optional[str] = None):
     """Client google.genai dédié aux générations image/vidéo."""
     if google_genai is None or genai_types is None:
@@ -622,7 +639,7 @@ async def gemini_analyze(
         })
 
     try:
-        result = await asyncio.to_thread(model.generate_content, content_parts)
+        result = await _generate_content_with_timeout(model, content_parts)
         response_text = result.text
         raw_json = _parse_gemini_json(response_text)
         analysis = _validate_analysis(raw_json)
@@ -677,7 +694,7 @@ async def gemini_analyze_entrepreneurship(
         })
 
     try:
-        result = await asyncio.to_thread(model.generate_content, content_parts)
+        result = await _generate_content_with_timeout(model, content_parts)
         response_text = result.text
         raw_json = _parse_gemini_json(response_text)
         return _validate_entrepreneurship(raw_json)
@@ -1165,7 +1182,7 @@ async def gemini_llm_answer(
     full_prompt = system_prompt + "\n\n" + user_prompt
 
     try:
-        result = await asyncio.to_thread(model.generate_content, full_prompt)
+        result = await _generate_content_with_timeout(model, full_prompt)
         return result.text
     except Exception as e:
         print(f"[gemini_llm_answer] Erreur: {e}")
@@ -1235,7 +1252,7 @@ async def gemini_llm_general_knowledge(
     full_prompt = system_prompt + "\n\n" + user_prompt
 
     try:
-        result = await asyncio.to_thread(model.generate_content, full_prompt)
+        result = await _generate_content_with_timeout(model, full_prompt)
         return result.text
     except Exception as e:
         print(f"[gemini_llm_general] Erreur: {e}")

@@ -19,6 +19,7 @@ import unicodedata
 import json
 import re
 import base64
+import mimetypes
 from io import BytesIO
 from PIL import Image
 import numpy as np
@@ -73,8 +74,10 @@ EXPERT_LOCAL_KNOWLEDGE_LEGACY_SEED = os.path.abspath(
     os.path.join(BACKEND_DIR, "..", "backend-node", "data", "localKnowledgeBase.json")
 )
 EXPERT_AUDIO_UPLOAD_DIR = os.path.join("uploads", "audio")
+COMMUNITY_AUDIO_UPLOAD_DIR = os.path.join("uploads", "community_audio")
 
 os.makedirs(EXPERT_AUDIO_UPLOAD_DIR, exist_ok=True)
+os.makedirs(COMMUNITY_AUDIO_UPLOAD_DIR, exist_ok=True)
 
 # ==========================================
 # DÉTECTION D'URGENCE - SOS/ACCIDENTS CRITIQUES
@@ -1766,10 +1769,36 @@ def _collect_photo_payloads(primary_photo: Optional[str], photo_list: Optional[L
     return payloads[:3]
 
 
+def _collect_audio_payloads(primary_audio: Optional[str], audio_list: Optional[List[str]]) -> List[str]:
+    payloads: List[str] = []
+    for payload in ([primary_audio] if primary_audio else []) + (audio_list or []):
+        if not payload:
+            continue
+        if payload not in payloads:
+            payloads.append(payload)
+    return payloads[:3]
+
+
 def _decode_photo_payload(photo_string: str) -> bytes:
     if "," in photo_string:
         photo_string = photo_string.split(",", 1)[1]
     return base64.b64decode(photo_string)
+
+
+def _extract_data_url_mime_type(payload: str) -> Optional[str]:
+    if not payload or "," not in payload:
+        return None
+    header = payload.split(",", 1)[0]
+    match = re.match(r"data:(.*?);base64$", header, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip().lower() or None
+
+
+def _decode_base64_media_payload(payload: str) -> bytes:
+    if "," in payload:
+        payload = payload.split(",", 1)[1]
+    return base64.b64decode(payload)
 
 
 def _load_json_list(raw: Optional[str]) -> List[Any]:
@@ -1893,8 +1922,51 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
             "question": str(value.get("question") or "").strip(),
             "text": str(value.get("text") or value.get("resolution") or "").strip(),
             "summary": str(value.get("summary") or "").strip(),
+            "audio_url": str(value.get("audio_url") or "").strip() or None,
+            "audio_mime_type": str(value.get("audio_mime_type") or "").strip() or None,
             "updated_at": str(value.get("updated_at") or datetime.utcnow().isoformat()),
         }
+    return translations
+
+
+def _synthesize_local_translation_audio(text: str, language: str) -> Optional[Dict[str, Any]]:
+    normalized_language = _normalize_expert_local_language(language)
+    cleaned_text = str(text or "").strip()
+    if not cleaned_text or not openai_client or not OPENAI_API_KEY:
+        return None
+
+    digest = hashlib.sha1(f"{normalized_language}:{cleaned_text}".encode("utf-8")).hexdigest()[:20]
+    file_name = f"guided-{normalized_language}-{digest}.mp3"
+    relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, file_name).replace("\\", "/")
+    absolute_path = os.path.abspath(relative_path)
+
+    if not os.path.exists(absolute_path):
+        _ensure_parent_dir(absolute_path)
+        try:
+            response = openai_client.audio.speech.create(
+                model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+                voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
+                input=cleaned_text[:1200],
+            )
+            response.stream_to_file(absolute_path)
+        except Exception as exc:
+            print(f"[WARN] Audio local indisponible pour {normalized_language}: {exc}")
+            return None
+
+    return {
+        "audio_url": _build_upload_url(relative_path),
+        "audio_mime_type": "audio/mpeg",
+    }
+
+
+def _attach_local_translation_audio(translations: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    for language, payload in translations.items():
+        if payload.get("audio_url"):
+            continue
+        audio_meta = _synthesize_local_translation_audio(payload.get("text") or payload.get("summary") or "", language)
+        if not audio_meta:
+            continue
+        payload.update(audio_meta)
     return translations
 
 
@@ -2071,7 +2143,7 @@ def _generate_local_translations(question_fr: str, resolution_fr: str, category:
     normalized = _normalize_expert_local_translations(parsed)
     if not normalized:
         raise HTTPException(status_code=502, detail="La traduction locale renvoyée est vide")
-    return normalized
+    return _attach_local_translation_audio(normalized)
 
 
 def _history_sort_value(value: Any) -> str:
@@ -2092,6 +2164,67 @@ def _store_photo_payloads(owner_id: int, photo_data_list: List[bytes], prefix: s
             f.write(photo_data)
         stored_paths.append(path)
     return stored_paths
+
+
+def _guess_audio_extension_from_payload(payload: str) -> str:
+    mime_type = _extract_data_url_mime_type(payload)
+    mapping = {
+        "audio/webm": ".webm",
+        "audio/mp4": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/ogg": ".ogg",
+        "audio/aac": ".aac",
+    }
+    if mime_type in mapping:
+        return mapping[mime_type]
+    guessed = mimetypes.guess_extension(mime_type or "")
+    return guessed or ".webm"
+
+
+def _store_audio_payloads(owner_id: int, audio_payloads: List[str], prefix: str = "audio") -> List[str]:
+    stored_paths: List[str] = []
+    timestamp = int(datetime.utcnow().timestamp())
+    for index, payload in enumerate(audio_payloads, start=1):
+        audio_bytes = _decode_base64_media_payload(payload)
+        extension = _guess_audio_extension_from_payload(payload)
+        filename = f"{owner_id}_{timestamp}_{prefix}_{index}{extension}"
+        path = os.path.join(COMMUNITY_AUDIO_UPLOAD_DIR, filename).replace("\\", "/")
+        with open(path, "wb") as handle:
+            handle.write(audio_bytes)
+        stored_paths.append(path)
+    return stored_paths
+
+
+def _serialize_community_audio_urls(raw_paths_json: Optional[str]) -> List[Dict[str, Any]]:
+    items = _load_json_list(raw_paths_json)
+    serialized: List[Dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        relative_path = item.get("path") if isinstance(item, dict) else item
+        if not relative_path:
+            continue
+        serialized.append(
+            {
+                "url": _build_upload_url(str(relative_path)),
+                "mime_type": mimetypes.guess_type(str(relative_path))[0] or "audio/webm",
+                "label": f"Vocal {index}",
+            }
+        )
+    return serialized
+
+
+def _build_community_case_title(title: str, description: str, room: str) -> str:
+    cleaned_title = str(title or "").strip()
+    if cleaned_title:
+        return cleaned_title[:180]
+    normalized_description = re.sub(r"\s+", " ", str(description or "")).strip()
+    if normalized_description:
+        return normalized_description[:180]
+    room_label = COMMUNITY_ROOM_LABELS.get(_normalize_community_room(room), "terrain")
+    return f"Signalement {room_label.lower()}"
 
 
 def _serialize_photo_history_record(record: PhotoAnalysisHistoryDB) -> Dict[str, Any]:
@@ -2576,6 +2709,36 @@ def _serialize_v2_history_entry(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any
         "photo_urls": [response_payload.get("input_photo_base64")] if response_payload.get("input_photo_base64") else [],
         "problem": entry.question,
         "v2_response": response_payload,
+        "result": response_payload,
+    }
+
+
+def _serialize_generated_media_history_entry(entry: OfflineKnowledgeEntryDB) -> Dict[str, Any]:
+    response_payload = _parse_offline_response_json(entry)
+    diagnostic = response_payload.get("diagnostic") or {}
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+
+    domain_to_category = {
+        "agriculture": "agriculture",
+        "elevage": "elevage",
+        "health": "sos_accident",
+        "urgence": "sos_accident",
+        "cybersecurity": "cybersecurity",
+    }
+    category = domain_to_category.get(entry.domain, entry.domain or "agriculture")
+
+    return {
+        "id": f"media-{entry.id}",
+        "history_type": "media",
+        "category": category,
+        "urgency": "low",
+        "status": "shared",
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+        "last_message": diagnostic.get("description") or response_payload.get("message") or entry.title,
+        "problem": entry.question,
+        "source_kind": entry.source_kind,
         "result": response_payload,
     }
 
@@ -5307,10 +5470,22 @@ async def get_user_history(phone: str, db: Session = Depends(get_db)):
         .all()
     )
 
+    media_entries = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(
+            OfflineKnowledgeEntryDB.user_id == user.id,
+            OfflineKnowledgeEntryDB.source_kind.in_(["generated_image_illustration", "generated_video_illustration"]),
+        )
+        .order_by(OfflineKnowledgeEntryDB.updated_at.desc())
+        .limit(100)
+        .all()
+    )
+
     merged = [
         *tickets,
         *[_serialize_entreprendre_history_entry(entry) for entry in entreprendre_entries],
         *[_serialize_v2_history_entry(entry) for entry in consultation_entries],
+        *[_serialize_generated_media_history_entry(entry) for entry in media_entries],
     ]
     merged.sort(
         key=lambda item: _history_sort_value(item.get("updated_at") or item.get("created_at")),
@@ -6096,7 +6271,9 @@ class CommunityFieldCaseDB(Base):
     crop_or_livestock = Column(String, nullable=True)
     tags_json = Column(Text, nullable=True)
     before_photo_paths_json = Column(Text, nullable=True)
+    before_audio_paths_json = Column(Text, nullable=True)
     after_photo_paths_json = Column(Text, nullable=True)
+    after_audio_paths_json = Column(Text, nullable=True)
     promoted_to_offline = Column(Boolean, default=False)
     resolved_at = Column(DateTime, nullable=True)
     last_follow_up_at = Column(DateTime, nullable=True)
@@ -6155,9 +6332,46 @@ class CommunityCaseFollowUpDB(Base):
     status_after = Column(String, nullable=True)
     outcome_label = Column(String, nullable=True)
     photo_paths_json = Column(Text, nullable=True)
+    audio_paths_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_community_case_media_columns() -> None:
+    try:
+        with engine.connect() as conn:
+            if str(engine.url).startswith("sqlite"):
+                case_columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(community_field_cases)")]
+                if "before_audio_paths_json" not in case_columns:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE community_field_cases ADD COLUMN before_audio_paths_json TEXT"
+                    )
+                if "after_audio_paths_json" not in case_columns:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE community_field_cases ADD COLUMN after_audio_paths_json TEXT"
+                    )
+
+                follow_up_columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(community_case_followups)")]
+                if "audio_paths_json" not in follow_up_columns:
+                    conn.exec_driver_sql(
+                        "ALTER TABLE community_case_followups ADD COLUMN audio_paths_json TEXT"
+                    )
+            else:
+                conn.exec_driver_sql(
+                    "ALTER TABLE community_field_cases ADD COLUMN IF NOT EXISTS before_audio_paths_json TEXT"
+                )
+                conn.exec_driver_sql(
+                    "ALTER TABLE community_field_cases ADD COLUMN IF NOT EXISTS after_audio_paths_json TEXT"
+                )
+                conn.exec_driver_sql(
+                    "ALTER TABLE community_case_followups ADD COLUMN IF NOT EXISTS audio_paths_json TEXT"
+                )
+    except Exception as e:
+        print(f"⚠️ Impossible d'ajouter les colonnes audio des cas terrain: {e}")
+
+
+_ensure_community_case_media_columns()
 
 
 def _ensure_sos_description_column() -> None:
@@ -6586,6 +6800,7 @@ def _serialize_community_follow_up(db: Session, follow_up: CommunityCaseFollowUp
         ),
         "outcome_label": follow_up.outcome_label,
         "photos": _serialize_community_photo_urls(follow_up.photo_paths_json),
+        "audios": _serialize_community_audio_urls(follow_up.audio_paths_json),
         "created_at": follow_up.created_at.isoformat() if follow_up.created_at else None,
     }
 
@@ -6621,7 +6836,9 @@ def _serialize_community_field_case_summary(db: Session, case: CommunityFieldCas
         "crop_or_livestock": case.crop_or_livestock,
         "tags": tags,
         "before_photos": _serialize_community_photo_urls(case.before_photo_paths_json),
+        "before_audios": _serialize_community_audio_urls(case.before_audio_paths_json),
         "after_photos": _serialize_community_photo_urls(case.after_photo_paths_json),
+        "after_audios": _serialize_community_audio_urls(case.after_audio_paths_json),
         "solution_count": solution_count,
         "confirmation_count": confirmation_count,
         "follow_up_count": follow_up_count,
@@ -7085,7 +7302,6 @@ async def create_community_field_case(body: Dict[str, Any], db: Session = Depend
     reporter_phone = (body.get("reporter_phone") or body.get("phone_number") or "").strip()[:40] or None
     room = _normalize_community_room(body.get("room"))
     category = _normalize_community_category(body.get("category"), room)
-    title = (body.get("title") or "").strip()[:180]
     description = (body.get("description") or "").strip()
     location_label = (body.get("location_label") or "").strip()[:140] or None
     crop_or_livestock = (body.get("crop_or_livestock") or "").strip()[:140] or None
@@ -7094,15 +7310,20 @@ async def create_community_field_case(body: Dict[str, Any], db: Session = Depend
     if not isinstance(tags, list):
         tags = []
 
-    if not title:
-        raise HTTPException(status_code=422, detail="Le titre du signalement est obligatoire")
-    if not description:
-        raise HTTPException(status_code=422, detail="La description du signalement est obligatoire")
-
     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
     owner_id = int(datetime.utcnow().timestamp())
     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_case") if photo_data_list else []
+    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_case_audio") if audio_payloads else []
+
+    if not description and not stored_paths and not stored_audio_paths:
+        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce signalement")
+
+    if not description:
+        description = "Signalement terrain envoye avec media sans texte."
+
+    title = _build_community_case_title(body.get("title") or "", description, room)
 
     case = CommunityFieldCaseDB(
         room=room,
@@ -7120,6 +7341,7 @@ async def create_community_field_case(body: Dict[str, Any], db: Session = Depend
         crop_or_livestock=crop_or_livestock,
         tags_json=json.dumps(_extract_offline_keywords(tags, title, description, crop_or_livestock), ensure_ascii=False),
         before_photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+        before_audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
     )
     db.add(case)
     db.commit()
@@ -7269,13 +7491,18 @@ async def add_follow_up_to_community_field_case(case_id: int, body: Dict[str, An
     author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
     author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
     note = (body.get("note") or "").strip()
-    if not note:
-        raise HTTPException(status_code=422, detail="Le retour terrain est obligatoire")
 
     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
     owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
+
+    if not note and not stored_paths and not stored_audio_paths:
+        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
+    if not note:
+        note = "Retour terrain envoye avec media sans texte."
 
     normalized_status = _normalize_community_case_status(body.get("status_after") or case.status)
     follow_up = CommunityCaseFollowUpDB(
@@ -7287,12 +7514,16 @@ async def add_follow_up_to_community_field_case(case_id: int, body: Dict[str, An
         status_after=normalized_status,
         outcome_label=(body.get("outcome_label") or "").strip()[:140] or None,
         photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+        audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
     )
     db.add(follow_up)
 
     if stored_paths:
         existing_after = _load_json_list(case.after_photo_paths_json)
         case.after_photo_paths_json = json.dumps(existing_after + stored_paths, ensure_ascii=False)
+    if stored_audio_paths:
+        existing_after_audio = _load_json_list(case.after_audio_paths_json)
+        case.after_audio_paths_json = json.dumps(existing_after_audio + stored_audio_paths, ensure_ascii=False)
     case.status = normalized_status
     case.last_follow_up_at = datetime.utcnow()
     case.updated_at = datetime.utcnow()
@@ -7323,17 +7554,24 @@ async def update_community_case_follow_up(follow_up_id: int, body: Dict[str, Any
     author_name = (body.get("author_name") or follow_up.author_name or "Acteur terrain").strip()[:80]
     author_phone = (body.get("author_phone") or body.get("phone_number") or follow_up.author_phone or "").strip()[:40] or None
     note = (body.get("note") or follow_up.note or "").strip()
-    if not note:
-        raise HTTPException(status_code=422, detail="Le retour terrain est obligatoire")
 
     normalized_status = _normalize_community_case_status(body.get("status_after") or follow_up.status_after or case.status)
     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
     owner_id = case.id * 1000 + follow_up_id
     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
+
+    if not note and not stored_paths and not stored_audio_paths:
+        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
+    if not note:
+        note = "Retour terrain envoye avec media sans texte."
 
     existing_follow_up_paths = _load_json_list(follow_up.photo_paths_json)
     merged_follow_up_paths = existing_follow_up_paths + stored_paths if stored_paths else existing_follow_up_paths
+    existing_follow_up_audio_paths = _load_json_list(follow_up.audio_paths_json)
+    merged_follow_up_audio_paths = existing_follow_up_audio_paths + stored_audio_paths if stored_audio_paths else existing_follow_up_audio_paths
 
     follow_up.author_name = author_name
     follow_up.author_phone = author_phone
@@ -7341,10 +7579,14 @@ async def update_community_case_follow_up(follow_up_id: int, body: Dict[str, Any
     follow_up.status_after = normalized_status
     follow_up.outcome_label = (body.get("outcome_label") or "").strip()[:140] or None
     follow_up.photo_paths_json = json.dumps(merged_follow_up_paths, ensure_ascii=False) if merged_follow_up_paths else None
+    follow_up.audio_paths_json = json.dumps(merged_follow_up_audio_paths, ensure_ascii=False) if merged_follow_up_audio_paths else None
 
     if stored_paths:
         case_after_paths = _load_json_list(case.after_photo_paths_json)
         case.after_photo_paths_json = json.dumps(case_after_paths + stored_paths, ensure_ascii=False)
+    if stored_audio_paths:
+        case_after_audio_paths = _load_json_list(case.after_audio_paths_json)
+        case.after_audio_paths_json = json.dumps(case_after_audio_paths + stored_audio_paths, ensure_ascii=False)
 
     case.status = normalized_status
     case.last_follow_up_at = datetime.utcnow()
@@ -7714,27 +7956,6 @@ async def v2_analyze(
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Envoyez au moins du texte ou une photo pour obtenir un diagnostic.")
 
-    reusable_entry = _find_reusable_offline_entry(
-        db,
-        domain=_normalize_offline_domain(category),
-        source_kinds=_trusted_shared_reuse_source_kinds(),
-        question_text=text or "Analyse photo Songra",
-    )
-    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-    if reusable_payload and (text.strip() or not images_b64):
-        return {
-            "status": "success",
-            **reusable_payload,
-            "_meta": {
-                "duration_ms": int((_time.time() - start_time) * 1000),
-                "model": "shared-offline-corpus",
-                "from_cache": True,
-                "fallback_used": False,
-                "shared_cache_hit": True,
-                "shared_source": reusable_entry.source_kind,
-            },
-        }
-
     # ÉTAPE 1 : Analyse Gemini unifiée
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
 
@@ -7881,24 +8102,6 @@ async def v2_assistant_query(
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
 
-    reusable_entry = _find_reusable_offline_entry(
-        db,
-        domain=_normalize_offline_domain(category),
-        source_kinds=_trusted_shared_reuse_source_kinds(),
-        question_text=text or "Question Songra",
-    )
-    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-    if reusable_payload and (text.strip() or not images_b64):
-        return {
-            "status": "success",
-            **reusable_payload,
-            "_meta": {
-                "model": "shared-offline-corpus",
-                "shared_cache_hit": True,
-                "shared_source": reusable_entry.source_kind,
-            },
-        }
-
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
     decision = v2_services.decide(analysis)
     final_response = v2_services.build_response(analysis=analysis, decision=decision)
@@ -7938,45 +8141,15 @@ async def v2_entreprendre(
     generate_media = data.generate_media is not False
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
-    reusable_entry = _find_reusable_offline_entry(
-        db,
-        domain=_normalize_offline_domain(category),
-        source_kinds=["entreprendre"],
-        question_text=text or "Analyse terrain Songra",
-    )
-    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-
     # Analyse entrepreneuriale via Gemini
-    cache_hit = bool(reusable_payload)
-    entrepreneurship = reusable_payload if reusable_payload else await v2_services.gemini_analyze_entrepreneurship(
+    cache_hit = False
+    entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
         text=text, images_b64=images_b64, category=category
     )
 
     # Génération image/vidéo du plan de découpage
     image_result = None
     video_result = None
-    if reusable_payload:
-        if reusable_payload.get("image_base64"):
-            image_result = {
-                "success": True,
-                "image_base64": reusable_payload.get("image_base64"),
-                "mime_type": reusable_payload.get("image_mime_type"),
-                "fallback_description": reusable_payload.get("image_description"),
-            }
-        if reusable_payload.get("video_url") or reusable_payload.get("video_base64"):
-            video_result = {
-                "success": True,
-                "video_base64": reusable_payload.get("video_base64"),
-                "video_url": reusable_payload.get("video_url"),
-                "mime_type": reusable_payload.get("video_mime_type"),
-                "duration_sec": reusable_payload.get("video_duration"),
-            }
-        elif reusable_payload.get("video_steps"):
-            video_result = {
-                "fallback": True,
-                "video_description": reusable_payload.get("video_description"),
-                "steps_visuelles": reusable_payload.get("video_steps"),
-            }
 
     if generate_media:
         import asyncio
@@ -8084,9 +8257,9 @@ async def v2_entreprendre(
         "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
         "_meta": {
             "duration_ms": duration,
-            "model": "shared-offline-corpus" if cache_hit else "gemini-2.5-flash",
+            "model": "gemini-2.5-flash",
             "shared_cache_hit": cache_hit,
-            "shared_source": reusable_entry.source_kind if cache_hit and reusable_entry else None,
+            "shared_source": None,
         },
     }
 
