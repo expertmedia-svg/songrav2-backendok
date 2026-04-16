@@ -3700,12 +3700,14 @@ def retrieve_knowledge(
             overlap_answer = len(query_tokens & answer_tokens)
             overlap_tags = len(query_tokens & tags_tokens)
 
-            # Pondération simple : titre > tags > question > réponse
+            # Pondération : titre > tags > question > réponse
+            # answer reçoit un poids très faible pour éviter que les longs textes
+            # (fiches entreprendre, analyses) ne matchent sur des mots communs.
             score = (
                 overlap_title * 3.0
                 + overlap_tags * 2.5
                 + overlap_question * 2.0
-                + overlap_answer * 1.0
+                + overlap_answer * 0.3
             )
 
             combined_text = _normalize_free_text(
