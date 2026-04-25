@@ -1,12 +1,13 @@
 """
 v2_services.py - Pipeline v2 unifié (porté de backend-node)
-Tout fonctionne avec Gemini uniquement (pas d'OpenAI)
+Fournisseur IA configurable via AI_PROVIDER (env var) : "openai" (défaut) ou "gemini"
+Pour revenir à Gemini quand le billing est réglé : AI_PROVIDER=gemini dans .env
 
 Modules :
-- analyse unifiée Gemini (texte + images)
+- analyse unifiée texte + images (OpenAI GPT-4o ou Gemini)
 - moteur de décision (image? vidéo? urgence?)
-- générateur d'images (Gemini Imagen)
-- générateur de vidéos (Veo via REST)
+- générateur d'images (DALL-E 3 ou Gemini Imagen)
+- générateur de vidéos (Veo via REST — Gemini uniquement)
 - constructeur de réponse unique
 - analyse entrepreneuriale (Entreprendre)
 """
@@ -18,6 +19,16 @@ import re
 import time
 import asyncio
 from typing import Optional, List, Dict, Any
+
+# ── OpenAI ──────────────────────────────────────────
+try:
+    from openai import OpenAI as _OpenAIClient
+    _openai_available = True
+except ImportError:
+    _OpenAIClient = None
+    _openai_available = False
+
+# ── Gemini ──────────────────────────────────────────
 import google.generativeai as genai
 from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 
@@ -32,7 +43,22 @@ except ImportError:
 # CONFIGURATION
 # ══════════════════════════════════════════════════════
 
-# S'assurer que genai est configuré même si importé avant main.py
+# Fournisseur actif : "openai" ou "gemini"
+# Changer dans .env (AI_PROVIDER=gemini) quand le billing Gemini est réglé
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "openai").lower()
+
+# ── OpenAI config ────────────────────────────────────
+OPENAI_MODEL = "gpt-4o"
+OPENAI_IMAGE_MODEL = "dall-e-3"
+_openai_key = os.environ.get("OPENAI_API_KEY")
+_openai_client: Optional[object] = _OpenAIClient(api_key=_openai_key) if (_openai_available and _openai_key) else None
+
+def _get_openai_client():
+    if not _openai_client:
+        raise RuntimeError("OPENAI_API_KEY non définie ou openai non installé")
+    return _openai_client
+
+# ── Gemini config ────────────────────────────────────
 _gemini_key = os.environ.get("GEMINI_API_KEY")
 if _gemini_key:
     genai.configure(api_key=_gemini_key)
@@ -40,8 +66,10 @@ if _gemini_key:
 GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 VEO_MODEL = "veo-3.1-generate-preview"
+
+# ── Commun ───────────────────────────────────────────
 MAX_PHOTOS = 3
-GEMINI_TIMEOUT = 60  # secondes
+GEMINI_TIMEOUT = 60  # secondes (utilisé aussi pour OpenAI)
 CACHE_TTL = 300  # 5 minutes
 
 EMERGENCY_NUMBERS = {"pompiers": "18", "police": "17", "samu": "112"}
@@ -385,6 +413,124 @@ def _get_cache_key(text: str, category: str, has_image: bool) -> str:
     return f"{category}:{'img' if has_image else 'txt'}:{normalized}"
 
 
+# ══════════════════════════════════════════════════════
+# OPENAI PROVIDER — fonctions internes
+# ══════════════════════════════════════════════════════
+
+async def _openai_chat(system: str, user_text: str, images_b64: Optional[List[str]] = None, max_tokens: int = 2000) -> str:
+    """Appel OpenAI chat completions avec support vision"""
+    client = _get_openai_client()
+    images_b64 = images_b64 or []
+
+    user_content: list = [{"type": "text", "text": user_text}]
+    for img_b64 in images_b64[:MAX_PHOTOS]:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+        })
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = await asyncio.wait_for(
+        asyncio.to_thread(
+            client.chat.completions.create,
+            model=OPENAI_MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+        ),
+        timeout=GEMINI_TIMEOUT,
+    )
+    return response.choices[0].message.content
+
+
+async def _openai_analyze(text: str, images_b64: List[str], category: str) -> dict:
+    """Analyse unifiée via OpenAI GPT-4o (remplace gemini_analyze quand AI_PROVIDER=openai)"""
+    has_image = len(images_b64) > 0
+    has_text = bool(text.strip())
+
+    context_hint = f"\n{_category_context_hint(category)}"
+    expertise_hint = f"\nPOSTURE : parle comme un {_category_expertise(category)}."
+    user_message = (
+        f"\nDescription de l'utilisateur : {text}" if has_text
+        else "\n(Pas de description textuelle - analyse basée sur l'image uniquement)"
+    )
+    full_prompt = ANALYSIS_PROMPT + context_hint + expertise_hint + user_message
+
+    try:
+        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64)
+        raw_json = _parse_gemini_json(response_text)
+        analysis = _validate_analysis(raw_json)
+    except Exception as error:
+        print(f"[openai_analyze] Fallback local activé: {error}")
+        analysis = _build_analysis_fallback(text=text, category=category, has_image=has_image, error=error)
+
+    if category in ("urgence", "sos_accident"):
+        analysis["type_probleme"] = "urgence"
+    return analysis
+
+
+async def _openai_analyze_entrepreneurship(text: str, images_b64: List[str], category: str) -> dict:
+    """Analyse entrepreneuriale via OpenAI GPT-4o"""
+    has_image = len(images_b64) > 0
+    has_text = bool(text.strip())
+
+    if category == "elevage":
+        context_hint = "\nCONTEXTE : terrain destiné à l'élevage au Burkina Faso. Propose des projets d'élevage ET de culture mixte."
+    else:
+        context_hint = "\nCONTEXTE : terrain agricole au Burkina Faso. Propose des projets de culture ET éventuellement d'élevage complémentaire."
+
+    user_message = (
+        f"\nDescription de l'utilisateur : {text}" if has_text
+        else "\n(Pas de description textuelle - analyse basée sur l'image uniquement)"
+    )
+    full_prompt = ENTREPRENDRE_PROMPT + context_hint + user_message
+
+    try:
+        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64)
+        raw_json = _parse_gemini_json(response_text)
+        return _validate_entrepreneurship(raw_json)
+    except Exception as error:
+        print(f"[openai_analyze_entrepreneurship] Fallback local activé: {error}")
+        return _build_entrepreneurship_fallback(category=category, has_image=has_image, error=error)
+
+
+async def _openai_generate_image(prompt: str, style: str = "illustration", category: str = "agriculture") -> dict:
+    """Génère une image via DALL-E 3 (remplace Gemini Imagen quand AI_PROVIDER=openai)"""
+    try:
+        client = _get_openai_client()
+        size_map = {"photo_realiste": "1792x1024", "schema": "1024x1024", "illustration": "1024x1024"}
+        size = size_map.get(style, "1024x1024")
+
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.images.generate,
+                model=OPENAI_IMAGE_MODEL,
+                prompt=prompt,
+                size=size,
+                response_format="b64_json",
+                n=1,
+            ),
+            timeout=60,
+        )
+        image_b64 = response.data[0].b64_json
+        return {"success": True, "image_base64": image_b64, "mime_type": "image/png"}
+    except Exception as e:
+        print(f"[openai_generate_image] Erreur: {e}")
+        return {"success": False, "error": str(e), "fallback_description": prompt}
+
+
+async def _openai_llm_answer(system_prompt: str, user_prompt: str) -> Optional[str]:
+    """Réponse LLM texte via OpenAI GPT-4o"""
+    try:
+        return await _openai_chat(system_prompt, user_prompt)
+    except Exception as e:
+        print(f"[openai_llm_answer] Erreur: {e}")
+        return None
+
+
 def _should_use_resilient_fallback(error: Exception) -> bool:
     if isinstance(error, (ResourceExhausted, GoogleAPICallError, TimeoutError)):
         return True
@@ -608,7 +754,8 @@ async def gemini_analyze(
     images_b64: Optional[List[str]] = None,
     category: str = "agriculture",
 ) -> dict:
-    """Analyse unifiée via Gemini : texte + images → JSON structuré"""
+    """Analyse unifiée texte + images → JSON structuré.
+    Dispatche vers OpenAI ou Gemini selon AI_PROVIDER."""
     images_b64 = images_b64 or []
     has_image = len(images_b64) > 0
     has_text = bool(text.strip())
@@ -616,6 +763,23 @@ async def gemini_analyze(
     if not has_text and not has_image:
         raise ValueError("Veuillez fournir au moins du texte ou une image")
 
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        # Cache (texte seul) aussi pour OpenAI
+        if not has_image and has_text:
+            cache_key = _get_cache_key(text, category, False)
+            cached = _analysis_cache.get(cache_key)
+            if cached and (time.time() - cached["ts"]) < CACHE_TTL:
+                return {**cached["data"], "from_cache": True}
+        analysis = await _openai_analyze(text, images_b64, category)
+        if not has_image and has_text:
+            cache_key = _get_cache_key(text, category, False)
+            _analysis_cache[cache_key] = {"data": analysis, "ts": time.time()}
+            if len(_analysis_cache) > 500:
+                del _analysis_cache[next(iter(_analysis_cache))]
+        return analysis
+
+    # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     # Cache (texte seul)
     if not has_image and has_text:
         cache_key = _get_cache_key(text, category, False)
@@ -668,7 +832,8 @@ async def gemini_analyze_entrepreneurship(
     images_b64: Optional[List[str]] = None,
     category: str = "agriculture",
 ) -> dict:
-    """Analyse entrepreneuriale terrain via Gemini"""
+    """Analyse entrepreneuriale terrain.
+    Dispatche vers OpenAI ou Gemini selon AI_PROVIDER."""
     images_b64 = images_b64 or []
     has_image = len(images_b64) > 0
     has_text = bool(text.strip())
@@ -676,6 +841,11 @@ async def gemini_analyze_entrepreneurship(
     if not has_text and not has_image:
         raise ValueError("Envoyez une photo de votre terrain ou décrivez-le")
 
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        return await _openai_analyze_entrepreneurship(text, images_b64, category)
+
+    # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     model = _get_model()
 
     if category == "elevage":
@@ -806,9 +976,25 @@ def decide(analysis: dict) -> dict:
 # ══════════════════════════════════════════════════════
 
 async def generate_image(prompt: str, style: str = "illustration", category: str = "agriculture") -> dict:
-    """Génère une image explicative via Gemini"""
+    """Génère une image explicative (DALL-E 3 ou Gemini Imagen selon AI_PROVIDER)"""
     if not prompt or not prompt.strip():
         return {"success": False, "error": "Prompt image requis"}
+
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        is_urgency = style == "schema"
+        visual_prompt = _sanitize_visual_prompt(prompt, is_urgency=is_urgency)
+        style_instructions = {
+            "schema": "Style schématique simple, fond blanc, traits noirs épais, couleurs vives. Compréhensible sans savoir lire.",
+            "illustration": "Style illustration pédagogique, couleurs chaudes, personnages africains, paysage sahélien.",
+            "photo_realiste": "Style photo-réaliste, contexte rural africain, éclairage naturel.",
+        }
+        enriched = (
+            f"{visual_prompt} {style_instructions.get(style, '')} "
+            f"{_visual_context_block(category, is_urgency=is_urgency)} "
+            "Pas de texte dans l'image."
+        )
+        return await _openai_generate_image(enriched, style, category)
 
     style_instructions = {
         "schema": "Style schématique simple, fond blanc, traits noirs épais, couleurs vives de base (rouge, vert, jaune). Compréhensible sans savoir lire.",
@@ -881,9 +1067,15 @@ async def generate_video(
     is_urgency: bool = False,
     category: str = "agriculture",
 ) -> dict:
-    """Génère une courte vidéo pédagogique via Veo"""
+    """Génère une courte vidéo pédagogique via Veo (Gemini uniquement).
+    Retourne un fallback texte quand AI_PROVIDER=openai."""
     if not prompt or not prompt.strip():
         return _video_fallback(prompt, duration_sec)
+
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        # OpenAI n'a pas de génération vidéo — fallback texte structuré
+        return _video_fallback(prompt, duration_sec, error="Génération vidéo indisponible avec OpenAI — réactiver Gemini (AI_PROVIDER=gemini)")
 
     duration_sec = _normalize_video_duration(duration_sec)
     aspect_ratio = "9:16" if is_urgency else "16:9"
@@ -1178,6 +1370,11 @@ async def gemini_llm_answer(
             "Structure : diagnostic, recommandations pratiques, quand consulter expert. Max 15 phrases."
         )
 
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        return await _openai_llm_answer(system_prompt, user_prompt)
+
+    # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     model = _get_model()
     full_prompt = system_prompt + "\n\n" + user_prompt
 
@@ -1248,6 +1445,11 @@ async def gemini_llm_general_knowledge(
             "Aide cette personne. Conseils concrets numérotés. Max 15 phrases."
         )
 
+    # ── Routing provider ──────────────────────────────
+    if AI_PROVIDER == "openai":
+        return await _openai_llm_answer(system_prompt, user_prompt)
+
+    # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     model = _get_model()
     full_prompt = system_prompt + "\n\n" + user_prompt
 
