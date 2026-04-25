@@ -3941,54 +3941,16 @@ def resolve_knowledge_answer(
     focus_context: Optional[Dict[str, Any]] = None,
     photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Répondre via fallback amélioré : RAG strict (moins strict) → Connaissances générales.
+    """Répondre via OpenAI en priorité, fiches locales en fallback uniquement.
 
-    Stratégie RÉVISÉE (sans mélange de catégories) :
-    1. RAG strict dans le domaine : chercher PLUS de fiches (moins de seuil)
-    2. Si rien : Utiliser les connaissances générales du LLM (sans mélanger les domaines)
-    3. Fallback minimal : réponse générique "Je ne sais pas"
-    
-    ⚠️ SUPPRESSION VOLONTAIRE : La phase "RAG expanded" qui mélangeait les catégories
-    a été enlevée. On passe directement à la connaissances générales de Songra.
-    
-    📷 AMÉLIORATION PHOTO : Le diagnostic photo (si disponible) est maintenant passé
-    au LLM pour enrichir la réponse et forcer la précision sur le diagnostic détecté.
+    Stratégie ACTUELLE :
+    1. OpenAI / LLM général en PREMIER (analyse directe par l'IA)
+    2. Fallback RAG : fiches locales si OpenAI échoue ou est indisponible
+    3. Fallback ultime : réponse générique "Je ne sais pas"
+
+    📷 Le diagnostic photo (si disponible) est passé au LLM pour enrichir la réponse.
     """
-    # ÉTAPE 1 : Recherche RAG strict dans le domaine demandé (avec limit augmenté)
-    # Augmenter limit pour chercher plus de fiches dans le bon domaine
-    rag_items = retrieve_knowledge(
-        db,
-        domain,
-        question,
-        limit=limit + 3,  # +3 pour être moins strict sans mélanger
-        expand_scope=False,  # IMPORTANT : rester dans le domaine, pas de mélange
-        focus_subject=(focus_context or {}).get("subject"),
-        focus_issue=(focus_context or {}).get("issue"),
-    )
-    
-    if rag_items:
-        # Succès RAG strict : utiliser ces fiches
-        llm_answer = generate_llm_answer(
-            question=question,
-            language=language,
-            domain=domain,
-            knowledge_items=rag_items,
-            conversation_context=conversation_context,
-            focus_context=focus_context,
-            photo_analysis=photo_analysis,
-        )
-        return {
-            "rag_items": rag_items,
-            "llm_answer": llm_answer,
-            "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
-            "knowledge_mode": "rag_strict",
-            "knowledge_fallback_used": False,
-        }
-
-    # ÉTAPE 2 : SAUTÉE (ancien RAG expanded qui mélangeait les catégories)
-    # On va directement aux connaissances générales de Songra
-
-    # ÉTAPE 3 : Aucune fiche trouvée → Utiliser connaissances générales (Gemini)
+    # ÉTAPE 1 : OpenAI / LLM général EN PREMIER (priorité sur les fiches offline)
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -4016,7 +3978,7 @@ def resolve_knowledge_answer(
                 )
             )
     except Exception as e:
-        print(f"[WARN] Gemini general knowledge fallback error: {e}")
+        print(f"[WARN] OpenAI general knowledge error: {e}")
         general_answer = None
 
     if general_answer:
@@ -4025,10 +3987,39 @@ def resolve_knowledge_answer(
             "llm_answer": general_answer,
             "rag_fallback_answer": None,
             "knowledge_mode": "llm_general_knowledge",
+            "knowledge_fallback_used": False,
+        }
+
+    # ÉTAPE 2 : Fallback RAG - fiches locales si OpenAI indisponible
+    rag_items = retrieve_knowledge(
+        db,
+        domain,
+        question,
+        limit=limit + 3,
+        expand_scope=False,
+        focus_subject=(focus_context or {}).get("subject"),
+        focus_issue=(focus_context or {}).get("issue"),
+    )
+
+    if rag_items:
+        llm_answer = generate_llm_answer(
+            question=question,
+            language=language,
+            domain=domain,
+            knowledge_items=rag_items,
+            conversation_context=conversation_context,
+            focus_context=focus_context,
+            photo_analysis=photo_analysis,
+        )
+        return {
+            "rag_items": rag_items,
+            "llm_answer": llm_answer,
+            "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
+            "knowledge_mode": "rag_strict",
             "knowledge_fallback_used": True,
         }
 
-    # ÉTAPE 4 : Fallback ultime - aucune source d'info disponible
+    # ÉTAPE 3 : Fallback ultime - aucune source d'info disponible
     return {
         "rag_items": [],
         "llm_answer": None,
