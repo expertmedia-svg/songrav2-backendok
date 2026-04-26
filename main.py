@@ -8447,7 +8447,20 @@ async def v2_generate_image_illustration(
         question_text=cache_question,
     )
     reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-    if reusable_payload.get("image_base64"):
+    # Réutiliser uniquement si 80% des mots-clés correspondent (dans les deux sens)
+    def _cache_similarity(t1: str, t2: str) -> float:
+        s1 = set(_tokenize(t1))
+        s2 = set(_tokenize(t2))
+        if not s1 or not s2:
+            return 0.0
+        overlap = len(s1 & s2)
+        return min(overlap / len(s1), overlap / len(s2))
+
+    good_cache_match = (
+        reusable_entry is not None
+        and _cache_similarity(cache_question, reusable_entry.question or "") >= 0.8
+    )
+    if good_cache_match and reusable_payload.get("image_base64"):
         return {
             "status": "success",
             "type": "image",
