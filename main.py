@@ -23,6 +23,8 @@ import mimetypes
 from io import BytesIO
 from PIL import Image
 import numpy as np
+import time
+import shutil
 from dotenv import load_dotenv
 from openai import OpenAI
 import google.generativeai as genai
@@ -2762,6 +2764,12 @@ def _build_offline_cache_payload(
 
     knowledge_items = knowledge_query.order_by(KnowledgeItem.updated_at.desc()).limit(safe_limit).all()
     generated_items = generated_query.order_by(OfflineKnowledgeEntryDB.updated_at.desc()).limit(min(safe_limit, 250)).all()
+    
+    # Intégrer le corpus offline validé (ExpertLocalKnowledgeDB)
+    expert_query = db.query(ExpertLocalKnowledgeDB)
+    if normalized_domain:
+        expert_query = expert_query.filter(ExpertLocalKnowledgeDB.category == normalized_domain)
+    expert_items = expert_query.order_by(ExpertLocalKnowledgeDB.updated_at.desc()).limit(100).all()
 
     serialized_items: List[Dict[str, Any]] = []
     dedupe_keys = set()
@@ -2794,7 +2802,34 @@ def _build_offline_cache_payload(
         }
         dedupe_key = (
             serialized.get("domain"),
-            _normalize_search_text(serialized.get("question") or serialized.get("title") or ""),
+            _normalize_search_text(serialized.get("title") or ""),
+            _normalize_search_text(serialized.get("answer") or ""),
+        )
+        if dedupe_key not in dedupe_keys:
+            dedupe_keys.add(dedupe_key)
+            serialized_items.append(serialized)
+
+    for item in expert_items:
+        # On utilise le sérialiseur existant pour récupérer translations et audio
+        item_data = _serialize_expert_local_knowledge_item(item)
+        serialized = {
+            "id": f"expert_{item.id}",
+            "domain": item.category,
+            "title": item.title,
+            "question": item.question_fr,
+            "answer": item.resolution_fr,
+            "tags": _load_json_list(item.tags_json),
+            "keywords": _extract_offline_keywords(item.title, item.question_fr, item.resolution_fr, _load_json_list(item.tags_json)),
+            "language": "fr", # Base est fr, mais contient des translations
+            "translations": item_data.get("translations"),
+            "audio": item_data.get("audio"),
+            "source": "expert_validated",
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        }
+        dedupe_key = (
+            serialized.get("domain"),
+            _normalize_search_text(serialized.get("title") or ""),
             _normalize_search_text(serialized.get("answer") or ""),
         )
         if dedupe_key in dedupe_keys:
@@ -3178,6 +3213,7 @@ app.add_middleware(
 
 # Servir les fichiers statiques
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/audio", StaticFiles(directory=EXPERT_AUDIO_UPLOAD_DIR), name="audio")
 
 # ==========================================
 # FONCTIONS UTILITAIRES
@@ -5577,6 +5613,202 @@ async def knowledge_offline_cache(
         language=language,
         limit=limit,
     )
+
+# ==========================================
+# GESTION AUDIO (EXPERT)
+# ==========================================
+
+@app.get("/api/admin/audio-map")
+async def get_audio_map():
+    """Récupérer la carte des correspondances audio."""
+    if not os.path.exists(EXPERT_AUDIO_MAP_PATH):
+        return {}
+    try:
+        with open(EXPERT_AUDIO_MAP_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lecture audio_map: {e}")
+
+@app.post("/api/admin/audio-map/{key}/{language}")
+async def upload_audio_file(
+    key: str,
+    language: str,
+    file: UploadFile = File(...)
+):
+    """Uploader un fichier audio pour une clé et une langue spécifique."""
+    # Dossier spécifique par langue (ex: uploads/audio/moore)
+    lang_dir = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, language)
+    os.makedirs(lang_dir, exist_ok=True)
+    
+    # Nom du fichier (ex: menu_entreprendre.mp3)
+    filename = f"{key}.mp3"
+    file_path = os.path.join(lang_dir, filename)
+    
+    # Sauvegarder le fichier sur le disque
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as buffer:
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur écriture fichier: {e}")
+        
+    # Mettre à jour la carte audio (JSON)
+    audio_map = {}
+    if os.path.exists(EXPERT_AUDIO_MAP_PATH):
+        try:
+            with open(EXPERT_AUDIO_MAP_PATH, "r", encoding="utf-8") as f:
+                audio_map = json.load(f)
+        except:
+            audio_map = {}
+            
+    # Initialiser la structure si inexistante
+    if key not in audio_map:
+        audio_map[key] = {"label": key.replace("_", " ").capitalize(), "voices": {}}
+    
+    if isinstance(audio_map[key], dict) and "voices" not in audio_map[key]:
+        # Migration si ancien format
+        old_audio = audio_map[key].get("audio")
+        audio_map[key]["voices"] = {"fr": old_audio} if old_audio else {}
+        
+    # URL relative pour le téléchargement
+    audio_map[key]["voices"][language] = f"/audio/{language}/{filename}"
+    
+    try:
+        with open(EXPERT_AUDIO_MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump(audio_map, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur mise à jour audio_map: {e}")
+        
+    return {"status": "success", "url": audio_map[key]["voices"][language], "key": key, "language": language}
+
+@app.delete("/api/admin/audio-map/{key}/{language}")
+async def delete_audio_mapping(key: str, language: str):
+    """Supprimer une association audio."""
+    if not os.path.exists(EXPERT_AUDIO_MAP_PATH):
+        return {"status": "skipped"}
+        
+    with open(EXPERT_AUDIO_MAP_PATH, "r", encoding="utf-8") as f:
+        audio_map = json.load(f)
+        
+    if key in audio_map and "voices" in audio_map[key]:
+        if language in audio_map[key]["voices"]:
+            del audio_map[key]["voices"][language]
+            
+            with open(EXPERT_AUDIO_MAP_PATH, "w", encoding="utf-8") as f:
+                json.dump(audio_map, f, indent=2, ensure_ascii=False)
+                
+    return {"status": "success"}
+
+
+@app.get("/api/admin/settings")
+async def get_system_settings():
+    """Récupère les réglages système (Voice ID, etc)."""
+    settings_path = "backend/system_settings.json"
+    default_settings = {
+        "elevenlabs_voice_id": "EXAVITQu4vr4xnSDxMaL", # Bella par défaut
+        "ai_model": "eleven_multilingual_v2"
+    }
+    
+    if not os.path.exists(settings_path):
+        return default_settings
+        
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            return {**default_settings, **json.load(f)}
+    except:
+        return default_settings
+
+@app.post("/api/admin/settings")
+async def update_system_settings(payload: Dict[str, Any]):
+    """Met à jour les réglages système."""
+    settings_path = "backend/system_settings.json"
+    existing = {}
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except: pass
+        
+    updated = {**existing, **payload}
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(updated, f, ensure_ascii=False, indent=2)
+        
+    return {"status": "success", "settings": updated}
+
+
+@app.post("/api/admin/broadcast")
+async def create_broadcast(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form("general"),
+):
+    """Crée une nouvelle diffusion communautaire (Journal Vocal)."""
+    os.makedirs("uploads/broadcasts", exist_ok=True)
+    filename = f"broadcast_{int(time.time())}_{file.filename}"
+    filepath = f"uploads/broadcasts/{filename}"
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Enregistrer dans broadcasts.json
+    db_path = "backend/broadcasts.json"
+    broadcasts = []
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                broadcasts = json.load(f)
+        except: pass
+    
+    new_entry = {
+        "id": int(time.time()),
+        "title": title,
+        "category": category,
+        "audio_url": f"/uploads/broadcasts/{filename}",
+        "timestamp": datetime.now().isoformat(),
+        "listeners": 0
+    }
+    broadcasts.insert(0, new_entry)
+    
+    with open(db_path, "w", encoding="utf-8") as f:
+        json.dump(broadcasts[:50], f, ensure_ascii=False, indent=2) # Garder les 50 derniers
+        
+    return {"status": "success", "broadcast": new_entry}
+
+@app.get("/api/community/broadcasts")
+async def get_broadcasts():
+    """Récupère les dernières diffusions pour l'app mobile."""
+    db_path = "backend/broadcasts.json"
+    if not os.path.exists(db_path):
+        return []
+    try:
+        with open(db_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return []
+
+@app.post("/api/admin/upload")
+async def upload_general_file(file: UploadFile = File(...)):
+    """Upload un fichier générique (image, audio, etc) vers le dossier uploads."""
+    os.makedirs("uploads", exist_ok=True)
+    
+    # Sécuriser le nom du fichier
+    ext = os.path.splitext(file.filename)[1].lower()
+    # On autorise images et audios
+    allowed_exts = ['.jpg', '.jpeg', '.png', '.gif', '.mp3', '.wav', '.m4a', '.ogg']
+    if ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"Extension {ext} non autorisée")
+        
+    filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{hashlib.md5(file.filename.encode()).hexdigest()[:8]}{ext}"
+    file_path = os.path.join("uploads", filename)
+    
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as buffer:
+            buffer.write(content)
+        
+        return {"status": "success", "url": f"/uploads/{filename}", "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur upload: {e}")
 
 
 @app.get("/api/admin/knowledge")
