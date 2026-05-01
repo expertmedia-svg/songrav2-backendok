@@ -26,20 +26,14 @@ import numpy as np
 import time
 import shutil
 from dotenv import load_dotenv
+
+# Charger les variables d'environnement immédiatement
+load_dotenv(override=False)
+
 from openai import OpenAI
 import google.generativeai as genai
 from gemini_vision import GeminiVisionEngine
 import v2_services
-
-# ==========================================
-# CONFIGURATION
-# ==========================================
-
-# Charger les variables d'environnement depuis un fichier .env (dev / prod).
-# Les variables deja definies dans l'environnement du systeme gardent la priorite.
-# Cela permet d'utiliser une nouvelle cle Gemini active sans etre ecrasee par
-# une ancienne valeur conservee dans backend/.env.
-load_dotenv(override=False)
 
 os.makedirs("uploads", exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./resolvehub.db")
