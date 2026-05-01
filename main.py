@@ -642,6 +642,7 @@ class LocalizationTranslateIn(BaseModel):
     question_fr: str
     resolution_fr: str
     category: str = "agriculture"
+    actions_fr: Optional[List[str]] = None
 
 
 class ExpertLocalKnowledgeIn(BaseModel):
@@ -1918,6 +1919,7 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
             "question": str(value.get("question") or "").strip(),
             "text": str(value.get("text") or value.get("resolution") or "").strip(),
             "summary": str(value.get("summary") or "").strip(),
+            "actions": value.get("actions") if isinstance(value.get("actions"), list) else [],
             "audio_url": str(value.get("audio_url") or "").strip() or None,
             "audio_mime_type": str(value.get("audio_mime_type") or "").strip() or None,
             "updated_at": str(value.get("updated_at") or datetime.utcnow().isoformat()),
@@ -1940,8 +1942,8 @@ def _synthesize_local_translation_audio(text: str, language: str) -> Optional[Di
         _ensure_parent_dir(absolute_path)
         try:
             response = openai_client.audio.speech.create(
-                model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
-                voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
+                model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
+                voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
                 input=cleaned_text[:1200],
             )
             response.stream_to_file(absolute_path)
@@ -2074,19 +2076,27 @@ def _parse_json_object_from_text(raw_text: str) -> Dict[str, Any]:
     return parsed
 
 
-def _build_local_translation_prompt(question_fr: str, resolution_fr: str, category: str) -> str:
+def _build_local_translation_prompt(question_fr: str, resolution_fr: str, category: str, actions_fr: Optional[List[str]] = None) -> str:
+    actions_str = ""
+    if actions_fr:
+        actions_str = "\nACTIONS À TRADUIRE:\n" + "\n".join([f"- {a}" for a in actions_fr])
+
     return (
-        "Tu traduis une fiche terrain en langage oral simple pour le Burkina Faso.\n"
+        "Tu es un traducteur expert en langues nationales du Burkina Faso (Mooré, Dioula, Fulfuldé).\n"
+        "Tu traduis une fiche de conseil agricole/santé pour un paysan en zone rurale.\n"
+        "IMPORTANT: Utilise un langage ORAL, imagé, respectant les expressions culturelles locales.\n"
+        "Le ton doit être CHALEUREUX, CONSEILLER et RASSURANT (respecte la ponctuation pour la lecture vocale).\n"
         "Retourne uniquement un JSON strict avec cette structure:\n"
         "{\n"
-        '  "moore": {"question": "...", "text": "...", "summary": "..."},\n'
-        '  "dioula": {"question": "...", "text": "...", "summary": "..."},\n'
-        '  "fulfulde": {"question": "...", "text": "...", "summary": "..."}\n'
+        '  "moore": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]},\n'
+        '  "dioula": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]},\n'
+        '  "fulfulde": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]}\n'
         "}\n"
-        "Contraintes: pas de markdown, pas d'explication, langage court, concret, adapte aux zones rurales.\n"
+        "Contraintes: pas de markdown, pas d'explication, langage concret, adapté aux analphabètes.\n"
         f"Categorie: {category}\n"
         f"Question FR: {question_fr}\n"
         f"Resolution FR: {resolution_fr}"
+        f"{actions_str}"
     )
 
 
@@ -2116,8 +2126,8 @@ def _generate_local_translations_with_openai(prompt: str) -> Dict[str, Any]:
     return _parse_json_object_from_text(content or "")
 
 
-def _generate_local_translations(question_fr: str, resolution_fr: str, category: str) -> Dict[str, Dict[str, Any]]:
-    prompt = _build_local_translation_prompt(question_fr, resolution_fr, category)
+def _generate_local_translations(question_fr: str, resolution_fr: str, category: str, actions_fr: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    prompt = _build_local_translation_prompt(question_fr, resolution_fr, category, actions_fr)
     provider_errors: List[str] = []
 
     try:
@@ -6187,6 +6197,7 @@ async def translate_localization_payload(
         payload.question_fr,
         payload.resolution_fr,
         _normalize_expert_local_category(payload.category),
+        payload.actions_fr,
     )
     return {
         "status": "success",
