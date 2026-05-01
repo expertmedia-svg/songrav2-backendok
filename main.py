@@ -8525,87 +8525,87 @@ async def v2_entreprendre(
     """Analyse entrepreneuriale d'un terrain → propositions business"""
     import time as _time
     start_time = _time.time()
+    try:
+        text = data.text or data.content or ""
+        category = _normalize_category(data.category)
+        generate_media = data.generate_media is not False
+        images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
-    text = data.text or data.content or ""
-    category = _normalize_category(data.category)
-    generate_media = data.generate_media is not False
-    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+        # Analyse entrepreneuriale via Gemini
+        cache_hit = False
+        entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
+            text=text, images_b64=images_b64, category=category
+        )
 
-    # Analyse entrepreneuriale via Gemini
-    cache_hit = False
-    entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
-        text=text, images_b64=images_b64, category=category
-    )
+        # Génération image/vidéo du plan de découpage
+        image_result = None
+        video_result = None
 
-    # Génération image/vidéo du plan de découpage
-    image_result = None
-    video_result = None
+        if generate_media:
+            import asyncio
 
-    if generate_media:
-        import asyncio
+            async def _run_media_task(label: str, coro, timeout_seconds: int):
+                try:
+                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                    return label, result
+                except Exception as e:
+                    print(f"[ENTREPRENDRE] Erreur {label}: {e}")
+                    return label, None
 
-        async def _run_media_task(label: str, coro, timeout_seconds: int):
-            try:
-                result = await asyncio.wait_for(coro, timeout=timeout_seconds)
-                return label, result
-            except Exception as e:
-                print(f"[ENTREPRENDRE] Erreur {label}: {e}")
-                return label, None
+            tasks = []
+            cat_label = "d'élevage" if category == "elevage" else "agricole"
 
-        tasks = []
-        cat_label = "d'élevage" if category == "elevage" else "agricole"
-
-        if entrepreneurship.get("besoin_image") and not (image_result and image_result.get("success")):
-            img_prompt = (
-                f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
-                f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
-                f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
-                "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
-            )
-            tasks.append(
-                _run_media_task(
-                    "image",
-                    v2_services.generate_image(img_prompt, style="schema", category=category),
-                    12,
+            if entrepreneurship.get("besoin_image") and not (image_result and image_result.get("success")):
+                img_prompt = (
+                    f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
+                    f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
+                    f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
+                    "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
                 )
-            )
-
-        if entrepreneurship.get("besoin_video") and not (video_result and (video_result.get("success") or video_result.get("fallback"))):
-            propositions = ". ".join(
-                p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
-            )
-            calendrier = ". ".join(
-                f"{item.get('mois', '')}: {item.get('activite', '')}"
-                for item in entrepreneurship.get("calendrier_cultural", [])[:3]
-            )
-            video_prompt = (
-                f"Vidéo pédagogique courte montrant un plan d'aménagement de terrain {cat_label} au Burkina Faso. "
-                f"Montrer l'organisation de l'espace selon ce découpage : {entrepreneurship.get('decoupage_terrain', '')}. "
-                f"Montrer aussi les projets proposés : {propositions}. "
-                f"Calendrier de mise en oeuvre : {calendrier}. "
-                "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
-            )
-            tasks.append(
-                _run_media_task(
-                    "video",
-                    v2_services.generate_video(
-                        video_prompt,
-                        gemini_api_key=GEMINI_API_KEY,
-                        duration_sec=8,
-                        is_urgency=False,
-                        category=category,
-                    ),
-                    18,
+                tasks.append(
+                    _run_media_task(
+                        "image",
+                        v2_services.generate_image(img_prompt, style="schema", category=category),
+                        12,
+                    )
                 )
-            )
 
-        if tasks:
-            results = await asyncio.gather(*tasks)
-            for label, res in results:
-                if label == "image":
-                    image_result = res
-                elif label == "video":
-                    video_result = res
+            if entrepreneurship.get("besoin_video") and not (video_result and (video_result.get("success") or video_result.get("fallback"))):
+                propositions = ". ".join(
+                    p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
+                )
+                calendrier = ". ".join(
+                    f"{item.get('mois', '')}: {item.get('activite', '')}"
+                    for item in entrepreneurship.get("calendrier_cultural", [])[:3]
+                )
+                video_prompt = (
+                    f"Vidéo pédagogique courte montrant un plan d'aménagement de terrain {cat_label} au Burkina Faso. "
+                    f"Montrer l'organisation de l'espace selon ce découpage : {entrepreneurship.get('decoupage_terrain', '')}. "
+                    f"Montrer aussi les projets proposés : {propositions}. "
+                    f"Calendrier de mise en oeuvre : {calendrier}. "
+                    "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
+                )
+                tasks.append(
+                    _run_media_task(
+                        "video",
+                        v2_services.generate_video(
+                            video_prompt,
+                            gemini_api_key=GEMINI_API_KEY,
+                            duration_sec=8,
+                            is_urgency=False,
+                            category=category,
+                        ),
+                        18,
+                    )
+                )
+
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                for label, res in results:
+                    if label == "image":
+                        image_result = res
+                    elif label == "video":
+                        video_result = res
 
         # Support multilingue pour Entreprendre
         localizations = {}
@@ -8660,13 +8660,14 @@ async def v2_entreprendre(
             "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
             "_meta": {
                 "duration_ms": duration,
-                "model": "gemini-2.5-flash",
+                "model": "gemini-1.5-flash",
                 "shared_cache_hit": cache_hit,
                 "shared_source": None,
             },
         }
-
-
+    except Exception as e:
+        print(f"[ENTREPRENDRE] Erreur globale: {e}")
+        return {"status": "error", "message": f"Erreur serveur: {str(e)}"}
 @app.get("/api/v2/health")
 async def v2_health():
     """Health check v2"""

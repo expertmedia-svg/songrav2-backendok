@@ -587,7 +587,8 @@ def _should_use_resilient_fallback(error: Exception) -> bool:
         "service unavailable",
         "deadline exceeded",
         "timed out",
-        "impossible de parser la réponse gemini",
+        "impossible de parser",
+        "json",
     ]
     return any(marker in message for marker in fallback_markers)
 
