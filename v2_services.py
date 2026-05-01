@@ -150,18 +150,20 @@ def _category_context_hint(category: str) -> str:
 
 def _visual_context_block(category: str, is_urgency: bool = False) -> str:
     base_context = (
-        "Toujours situer la scene au Burkina Faso, dans un environnement rural ou periurbain credible. "
-        "Montrer des personnes africaines, des habits simples du quotidien, des outils locaux, des concessions, champs, enclos ou centres de sante realistes. "
-        "Le rendu doit etre pedagogique, calme, utile pour apprendre, sans element choquant ni sensationnaliste. "
-        "Aucun texte incruste dans l'image ou la video."
+        "CONSIGNES VISUELLES : La scène DOIT se dérouler au Burkina Faso (paysage sahélien, terre rouge, habitat local, concessions). "
+        "Personnages burkinabè avec des habits simples du quotidien. Outils et environnement réalistes du Sahel. "
+        "OBJECTIF PÉDAGOGIQUE : L'image doit être parfaitement compréhensible par un paysan analphabète. "
+        "Montrer clairement l'action, le geste ou la solution de façon visuelle. "
+        "RÈGLE CRITIQUE : AUCUN TEXTE, AUCUNE LETTRE, AUCUN CHIFFRE, AUCUN PANNEAU ÉCRIT dans l'image. "
+        "L'image doit être auto-explicative uniquement par le dessin."
     )
     if category == "elevage":
-        return base_context + " Montrer un eleveur, un enclos propre, des animaux courants du Burkina Faso et des gestes de soin simples."
+        return base_context + " Montrer un éleveur burkinabè, un enclos propre, des animaux locaux (zébus, moutons sahéliens, volailles) et des gestes de soin simples."
     if category in ("urgence", "sos_accident") or is_urgency:
-        return base_context + " Montrer un cadre de premiers secours realiste, propre et non graphique, avec des gestes lents et rassurants."
+        return base_context + " Montrer des premiers secours avec des gestes lents, clairs et rassurants, sans aucun élément choquant."
     if category == "cybersecurity":
-        return base_context + " Si un visuel est demande, montrer un telephone, un SMS, une interface Mobile Money ou WhatsApp de facon simple et non anxiogene."
-    return base_context + " Montrer des cultures, outils et gestes agricoles realistes pour le Burkina Faso."
+        return base_context + " Montrer un téléphone avec une interface simple (icônes WhatsApp/SMS) de façon très visuelle."
+    return base_context + " Montrer des cultures (mil, sorgho, maïs) et des outils agricoles locaux."
 
 ANALYSIS_PROMPT = SYSTEM_PROMPT + """
 
@@ -987,21 +989,21 @@ async def generate_image(prompt: str, style: str = "illustration", category: str
         is_urgency = style == "schema"
         visual_prompt = _sanitize_visual_prompt(prompt, is_urgency=is_urgency)
         style_instructions = {
-            "schema": "Style schématique simple, fond blanc, traits noirs épais, couleurs vives. Compréhensible sans savoir lire.",
-            "illustration": "Style illustration pédagogique, couleurs chaudes, personnages africains, paysage sahélien.",
-            "photo_realiste": "Style photo-réaliste, contexte rural africain, éclairage naturel.",
+            "schema": "Style dessin au trait, très simple, fond blanc, traits noirs épais, couleurs vives. Comme une notice de montage sans texte. Compréhensible par tous.",
+            "illustration": "Style illustration pédagogique claire, couleurs du Sahel, personnages burkinabè, environnement rural local.",
+            "photo_realiste": "Style photo réaliste, lumière naturelle du Burkina Faso, détails authentiques de la vie rurale.",
         }
         enriched = (
-            f"{visual_prompt} {style_instructions.get(style, '')} "
-            f"{_visual_context_block(category, is_urgency=is_urgency)} "
-            "Pas de texte dans l'image."
+            f"{visual_prompt}. {style_instructions.get(style, '')}. "
+            f"{_visual_context_block(category, is_urgency=is_urgency)}. "
+            "RAPPEL : STRICTEMENT AUCUN TEXTE DANS L'IMAGE."
         )
         return await _openai_generate_image(enriched, style, category)
 
     style_instructions = {
-        "schema": "Style schématique simple, fond blanc, traits noirs épais, couleurs vives de base (rouge, vert, jaune). Compréhensible sans savoir lire.",
-        "illustration": "Style illustration pédagogique, couleurs chaudes, personnages africains, paysage sahélien. Simple et clair.",
-        "photo_realiste": "Style photo-réaliste, contexte rural africain, éclairage naturel.",
+        "schema": "Style dessin simple, traits épais, couleurs de base. Compréhensible sans savoir lire. Pas de texte.",
+        "illustration": "Style illustration pédagogique burkinabè, claire, simple et éducative.",
+        "photo_realiste": "Style photo réelle, contexte rural du Burkina Faso, authentique.",
     }
 
     is_urgency = style == "schema"
@@ -1010,7 +1012,7 @@ async def generate_image(prompt: str, style: str = "illustration", category: str
         f"{visual_prompt}\n\n"
         f"{style_instructions.get(style, style_instructions['illustration'])}\n\n"
         f"{_visual_context_block(category, is_urgency=is_urgency)}\n\n"
-        "IMPORTANT: Pas de texte dans l'image. Uniquement des visuels simples, utiles et non choquants."
+        "CONSIGNE FINALE : STRICTEMENT AUCUN TEXTE. L'image doit parler d'elle-même pour un analphabète."
     )
 
     try:

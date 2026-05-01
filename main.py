@@ -1826,9 +1826,9 @@ def _build_upload_url(path: Optional[str]) -> Optional[str]:
 
 def _normalize_expert_local_language(language: Optional[str]) -> str:
     normalized = str(language or "fr").strip().lower()
-    if normalized == "moore":
-        return "mooree"
-    if normalized not in {"fr", "mooree", "dioula", "fulfulde"}:
+    if normalized in {"moore", "mooree"}:
+        return "moore"
+    if normalized not in {"fr", "moore", "dioula", "fulfulde"}:
         return "fr"
     return normalized
 
@@ -2079,7 +2079,7 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         "Tu traduis une fiche terrain en langage oral simple pour le Burkina Faso.\n"
         "Retourne uniquement un JSON strict avec cette structure:\n"
         "{\n"
-        '  "mooree": {"question": "...", "text": "...", "summary": "..."},\n'
+        '  "moore": {"question": "...", "text": "...", "summary": "..."},\n'
         '  "dioula": {"question": "...", "text": "...", "summary": "..."},\n'
         '  "fulfulde": {"question": "...", "text": "...", "summary": "..."}\n'
         "}\n"
@@ -3314,6 +3314,20 @@ def get_current_expert(
         raise HTTPException(status_code=401, detail="Expert not found")
 
     return expert
+
+
+def get_current_user_or_expert(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+) -> Any:
+    """Accepte soit un utilisateur mobile, soit un expert."""
+    try:
+        return get_current_user(authorization, db)
+    except HTTPException:
+        try:
+            return get_current_expert(authorization, db)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="Authentification requise")
 
 
 def serialize_user(user: User) -> Dict[str, Any]:
@@ -6166,9 +6180,9 @@ async def import_knowledge_from_json(
 @app.post("/api/localization/translate")
 async def translate_localization_payload(
     payload: LocalizationTranslateIn,
-    current_expert: Expert = Depends(get_current_expert),
+    current_identity: Any = Depends(get_current_user_or_expert),
 ):
-    del current_expert
+    del current_identity
     translations = _generate_local_translations(
         payload.question_fr,
         payload.resolution_fr,
@@ -8155,6 +8169,41 @@ def _collect_images_b64(photo_base64: Optional[str], photo_base64_list: Optional
         if payload not in images:
             images.append(payload)
     return images[:3]
+
+
+@app.post("/api/v2/sync-consultation")
+async def sync_v2_consultation(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Synchronise une consultation faite sur le mobile (V2) vers le serveur.
+    Cree un ticket et stocke le resultat de l'analyse.
+    """
+    try:
+        category = payload.get("category", "agriculture")
+        query = payload.get("user_query", "Analyse V2")
+        response_data = payload.get("response", {})
+        
+        # Créer un nouveau ticket
+        ticket = Ticket(
+            user_id=current_user.id,
+            category=category,
+            content=query,
+            status="resolved", # V2 donne la réponse immédiatement
+            ai_summary=response_data.get("message", ""),
+            # On stocke le JSON complet de la réponse V2 dans une note ou un champ dédié si existant
+            # Pour l'instant, on utilise ai_summary pour le texte principal
+        )
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        
+        return {"status": "success", "ticket_id": ticket.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v2/analyze")
