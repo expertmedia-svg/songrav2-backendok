@@ -52,6 +52,8 @@ OPENAI_MODEL = "gpt-4o"
 OPENAI_IMAGE_MODEL = "dall-e-3"
 _openai_key = os.environ.get("OPENAI_API_KEY")
 _openai_client: Optional[object] = _OpenAIClient(api_key=_openai_key) if (_openai_available and _openai_key) else None
+if _openai_client:
+    print(f"[OK] OpenAI API configuree (Modèle: {OPENAI_MODEL})")
 
 def _get_openai_client():
     if not _openai_client:

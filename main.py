@@ -8770,8 +8770,9 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "3000"))
     
+    provider_name = os.getenv("AI_PROVIDER", "openai").upper()
     print("=" * 50)
-    print("SONGRA - Backend unifié v2 (Gemini)")
+    print(f"SONGRA - Backend unifié v2 ({provider_name})")
     print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
     print("=" * 50)
     print(f"Serveur démarré sur http://localhost:{port}")
