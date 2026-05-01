@@ -476,11 +476,40 @@ class OfflineKnowledgeEntryDB(Base):
 class EmergencyNumber(Base):
     __tablename__ = "emergency_numbers"
     id = Column(Integer, primary_key=True, index=True)
-    label = Column(String, nullable=False)  # Ex: Sapeurs-pompiers
-    number = Column(String, nullable=False)  # Ex: 18, 112, etc.
-    description = Column(Text, nullable=True)  # Note contextuelle (pays / région)
+    label = Column(String, nullable=False)
+    number = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
     display_order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+
+class RuralContactDB(Base):
+    __tablename__ = "rural_contacts"
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    actor_type = Column(String, nullable=False)
+    phone_number = Column(String, nullable=False)
+    location_label = Column(String, nullable=False)
+    organization = Column(String, nullable=True)
+    market_name = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    tags_json = Column(Text, nullable=True)
+    crop_labels_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class EntreprendreHistoryDB(Base):
+    __tablename__ = "entreprendre_history"
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    category = Column(String, nullable=False)
+    user_query = Column(Text, nullable=False)
+    response_json = Column(Text, nullable=False)
+    photo_path = Column(String, nullable=True)
+    plot_id = Column(String, nullable=True)
+    translations_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 Base.metadata.create_all(bind=engine)
@@ -643,6 +672,36 @@ class LocalizationTranslateIn(BaseModel):
     resolution_fr: str
     category: str = "agriculture"
     actions_fr: Optional[List[str]] = None
+
+class RuralContactSyncIn(BaseModel):
+    id: str
+    name: str
+    actor_type: str
+    phone_number: str
+    location_label: str
+    organization: Optional[str] = None
+    market_name: Optional[str] = None
+    notes: Optional[str] = None
+    tags: List[str] = []
+    crop_labels: List[str] = []
+    updated_at: str
+
+class RuralSyncPayload(BaseModel):
+    contacts: List[RuralContactSyncIn]
+
+class EntreprendreSyncIn(BaseModel):
+    id: str
+    category: str
+    user_query: str
+    response_json: str
+    photo_path: Optional[str] = None
+    plot_id: Optional[str] = None
+    translations_json: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class EntreprendreSyncPayload(BaseModel):
+    records: List[EntreprendreSyncIn]
 
 
 class ExpertLocalKnowledgeIn(BaseModel):
@@ -2097,7 +2156,39 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         f"Question FR: {question_fr}\n"
         f"Resolution FR: {resolution_fr}"
         f"{actions_str}"
-    )
+
+def _build_entreprendre_translation_prompt(data: dict) -> str:
+    # On extrait les parties textuelles clés pour la traduction
+    propositions = "\n".join([f"- {p.get('titre')}: {p.get('description')}" for p in data.get('propositions', [])])
+    calendrier = "\n".join([f"- {c.get('mois')}: {c.get('activite')} ({c.get('details')})" for c in data.get('calendrier_cultural', [])])
+    gestion_eau = f"Techniques: {', '.join(data.get('gestion_eau', {}).get('techniques', []))}. Conseils: {data.get('gestion_eau', {}).get('conseils', '')}"
+    
+    return f"""Tu es un expert en entrepreneuriat rural au Burkina Faso et un traducteur émérite en Mooré, Dioula et Fulfuldé.
+TA MISSION : Traduire les points clés d'un plan d'exploitation pour un entrepreneur local.
+
+TON : Motivateur, pratique, respectueux des traditions mais tourné vers le progrès.
+
+DONNÉES À TRADUIRE :
+1. Terrain : {data.get('description_terrain')}
+2. Propositions : {propositions}
+3. Découpage : {data.get('decoupage_terrain')}
+4. Calendrier : {calendrier}
+5. Gestion Eau : {gestion_eau}
+
+RETOURNE UNIQUEMENT un objet JSON avec cette structure :
+{{
+  "moore": {{
+    "description_terrain": "...",
+    "propositions": ["titre: description", ...],
+    "decoupage_terrain": "...",
+    "calendrier": ["mois: activite", ...],
+    "gestion_eau": "..."
+  }},
+  "dioula": {{ ... idem ... }},
+  "fulfulde": {{ ... idem ... }}
+}}
+
+RETOURNE SEULEMENT LE JSON PUR."""
 
 
 def _generate_local_translations_with_gemini(prompt: str) -> Dict[str, Any]:
@@ -8489,58 +8580,70 @@ async def v2_entreprendre(
             )
 
         if tasks:
-            for label, result in await asyncio.gather(*tasks):
+            results = await asyncio.gather(*tasks)
+            for label, res in results:
                 if label == "image":
-                    image_result = result
+                    image_result = res
                 elif label == "video":
-                    video_result = result
+                    video_result = res
 
-    duration = int((_time.time() - start_time) * 1000)
+        # Support multilingue pour Entreprendre
+        localizations = {}
+        try:
+            trans_prompt = _build_entreprendre_translation_prompt(entrepreneurship)
+            trans_response = await v2_services._openai_llm_answer(
+                "Tu es un traducteur expert en langues burkinabè.", 
+                trans_prompt
+            )
+            if trans_response:
+                localizations = v2_services._parse_gemini_json(trans_response)
+        except Exception as e:
+            print(f"[ENTREPRENDRE] Erreur traduction: {e}")
 
-    offline_payload = {
-        **entrepreneurship,
-        "input_photo_base64": images_b64[0] if images_b64 else None,
-        "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
-        "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
-        "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
-        "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
-        "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
-        "image_description": image_result.get("fallback_description") if image_result else None,
-        "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
-        "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
-    }
+        duration = int((_time.time() - start_time) * 1000)
 
-    try:
-        _persist_offline_knowledge_entry(
-            db=db,
-            user_id=current_user.id,
-            source_kind="entreprendre",
-            category=category,
-            question_text=text or "Analyse terrain Songra",
-            response_payload=offline_payload,
-        )
-    except Exception as e:
-        print(f"[OFFLINE-CORPUS] Erreur persistance v2/entreprendre: {e}")
+        offline_payload = {
+            **entrepreneurship,
+            "localizations": localizations,
+            "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+            "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+            "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+            "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+            "image_description": image_result.get("fallback_description") if image_result else None,
+            "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+        }
+        try:
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=current_user.id,
+                source_kind="entreprendre",
+                category=category,
+                question_text=text or "Analyse terrain Songra",
+                response_payload=offline_payload,
+            )
+        except Exception as e:
+            print(f"[OFFLINE-CORPUS] Erreur persistance v2/entreprendre: {e}")
 
-    return {
-        "status": "success",
-        **entrepreneurship,
-        "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
-        "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
-        "image_description": image_result.get("fallback_description") if image_result else None,
-        "video_base64": video_result.get("video_base64") if video_result and video_result.get("success") else None,
-        "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
-        "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
-        "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
-        "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
-        "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
-        "_meta": {
-            "duration_ms": duration,
-            "model": "gemini-2.5-flash",
-            "shared_cache_hit": cache_hit,
-            "shared_source": None,
-        },
-    }
+        return {
+            "status": "success",
+            **entrepreneurship,
+            "localizations": localizations,
+            "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+            "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+            "image_description": image_result.get("fallback_description") if image_result else None,
+            "video_base64": video_result.get("video_base64") if video_result and video_result.get("success") else None,
+            "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+            "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+            "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
+            "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+            "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
+            "_meta": {
+                "duration_ms": duration,
+                "model": "gemini-2.5-flash",
+                "shared_cache_hit": cache_hit,
+                "shared_source": None,
+            },
+        }
 
 
 @app.get("/api/v2/health")
@@ -8819,6 +8922,120 @@ async def v2_generate_image_illustration(
         "_meta": {
             "duration_ms": int((_time.time() - start_time) * 1000),
         },
+    }
+
+
+@app.post("/api/contacts/sync")
+async def sync_rural_contacts(payload: RuralSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
+    # 1. Update/Insert incoming contacts
+    for c in payload.contacts:
+        existing = db.query(RuralContactDB).filter(RuralContactDB.id == c.id).first()
+        try:
+            updated_at_dt = datetime.fromisoformat(c.updated_at.replace("Z", "+00:00"))
+        except:
+            updated_at_dt = datetime.utcnow()
+        
+        if not existing:
+            new_contact = RuralContactDB(
+                id=c.id,
+                user_id=current_user.id,
+                name=c.name,
+                actor_type=c.actor_type,
+                phone_number=c.phone_number,
+                location_label=c.location_label,
+                organization=c.organization,
+                market_name=c.market_name,
+                notes=c.notes,
+                tags_json=json.dumps(c.tags),
+                crop_labels_json=json.dumps(c.crop_labels),
+                updated_at=updated_at_dt
+            )
+            db.add(new_contact)
+        else:
+            if updated_at_dt > existing.updated_at:
+                existing.name = c.name
+                existing.actor_type = c.actor_type
+                existing.phone_number = c.phone_number
+                existing.location_label = c.location_label
+                existing.organization = c.organization
+                existing.market_name = c.market_name
+                existing.notes = c.notes
+                existing.tags_json = json.dumps(c.tags)
+                existing.crop_labels_json = json.dumps(c.crop_labels)
+                existing.updated_at = updated_at_dt
+
+    db.commit()
+
+    # 2. Return all contacts to "share with everyone" as requested
+    all_contacts = db.query(RuralContactDB).all()
+    return {
+        "status": "success",
+        "contacts": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "actor_type": c.actor_type,
+                "phone_number": c.phone_number,
+                "location_label": c.location_label,
+                "organization": c.organization,
+                "market_name": c.market_name,
+                "notes": c.notes,
+                "tags": json.loads(c.tags_json or "[]"),
+                "crop_labels": json.loads(c.crop_labels_json or "[]"),
+                "updated_at": c.updated_at.isoformat()
+            } for c in all_contacts
+        ]
+    }
+
+@app.post("/api/entreprendre/sync")
+async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
+    for r in payload.records:
+        existing = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.id == r.id).first()
+        try:
+            updated_at_dt = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
+        except:
+            updated_at_dt = datetime.utcnow()
+        
+        if not existing:
+            new_record = EntreprendreHistoryDB(
+                id=r.id,
+                user_id=current_user.id,
+                category=r.category,
+                user_query=r.user_query,
+                response_json=r.response_json,
+                photo_path=r.photo_path,
+                plot_id=r.plot_id,
+                translations_json=r.translations_json,
+                updated_at=updated_at_dt
+            )
+            db.add(new_record)
+        else:
+            if updated_at_dt > existing.updated_at:
+                existing.category = r.category
+                existing.user_query = r.user_query
+                existing.response_json = r.response_json
+                existing.photo_path = r.photo_path
+                existing.plot_id = r.plot_id
+                existing.translations_json = r.translations_json
+                existing.updated_at = updated_at_dt
+    
+    db.commit()
+    
+    my_records = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.user_id == current_user.id).all()
+    return {
+        "status": "success",
+        "records": [
+            {
+                "id": rec.id,
+                "category": rec.category,
+                "user_query": rec.user_query,
+                "response_json": rec.response_json,
+                "photo_path": rec.photo_path,
+                "plot_id": rec.plot_id,
+                "translations_json": rec.translations_json,
+                "updated_at": rec.updated_at.isoformat()
+            } for rec in my_records
+        ]
     }
 
 

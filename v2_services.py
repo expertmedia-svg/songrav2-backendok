@@ -241,6 +241,13 @@ RETOURNE UNIQUEMENT un objet JSON valide avec cette structure EXACTE :
   },
   "astuces_locales": ["astuce 1", "astuce 2"],
   "risques": ["risque 1", "risque 2"],
+  "contacts_recherches": [
+    {
+      "type_acteur": "acheteur | transport | transformation | fournisseur | acteur",
+      "specialite": "ex: maraîchage, volaille, transport frigo",
+      "raison": "pourquoi ce contact est important pour le projet"
+    }
+  ],
   "besoin_image": true,
   "besoin_video": true
 }
@@ -407,6 +414,14 @@ def _validate_entrepreneurship(raw: dict) -> dict:
         },
         "astuces_locales": [str(a) for a in (raw.get("astuces_locales") or [])],
         "risques": [str(r) for r in (raw.get("risques") or [])],
+        "contacts_recherches": [
+            {
+                "type_acteur": str(c.get("type_acteur") or "acteur"),
+                "specialite": str(c.get("specialite") or ""),
+                "raison": str(c.get("raison") or ""),
+            }
+            for c in (raw.get("contacts_recherches") or [])
+        ],
         "besoin_image": raw.get("besoin_image") is not False,
         "besoin_video": raw.get("besoin_video") is not False,
     }
