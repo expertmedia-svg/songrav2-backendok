@@ -2156,6 +2156,7 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         f"Question FR: {question_fr}\n"
         f"Resolution FR: {resolution_fr}"
         f"{actions_str}"
+    )
 
 def _build_entreprendre_translation_prompt(data: dict) -> str:
     # On extrait les parties textuelles clés pour la traduction
