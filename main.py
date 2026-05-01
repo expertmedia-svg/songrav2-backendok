@@ -8293,15 +8293,34 @@ async def sync_v2_consultation(
         ticket = Ticket(
             user_id=current_user.id,
             category=category,
-            content=query,
-            status="resolved", # V2 donne la réponse immédiatement
-            ai_summary=response_data.get("message", ""),
-            # On stocke le JSON complet de la réponse V2 dans une note ou un champ dédié si existant
-            # Pour l'instant, on utilise ai_summary pour le texte principal
+            status="resolved",
+            ai_photo_analysis=json.dumps(response_data, ensure_ascii=False),
         )
         db.add(ticket)
         db.commit()
         db.refresh(ticket)
+        
+        # Créer le message initial pour le contenu de la requête
+        msg = Message(
+            ticket_id=ticket.id,
+            sender_type="user",
+            sender_id=current_user.id,
+            content=query,
+            channel="v2_mobile",
+        )
+        db.add(msg)
+        
+        # Ajouter la réponse IA comme message expert/system
+        ai_msg = Message(
+            ticket_id=ticket.id,
+            sender_type="expert",
+            sender_id=None,
+            content=response_data.get("message", "Analyse terminée"),
+            channel="v2_mobile",
+        )
+        db.add(ai_msg)
+        
+        db.commit()
         
         return {"status": "success", "ticket_id": ticket.id}
     except Exception as e:
@@ -8594,7 +8613,8 @@ async def v2_entreprendre(
             trans_prompt = _build_entreprendre_translation_prompt(entrepreneurship)
             trans_response = await v2_services._openai_llm_answer(
                 "Tu es un traducteur expert en langues burkinabè.", 
-                trans_prompt
+                trans_prompt,
+                json_mode=True
             )
             if trans_response:
                 localizations = v2_services._parse_gemini_json(trans_response)

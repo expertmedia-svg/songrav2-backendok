@@ -276,10 +276,19 @@ async def _generate_content_with_timeout(
     prompt_or_parts,
     *,
     timeout: int = GEMINI_TIMEOUT,
+    json_mode: bool = False,
 ):
     try:
+        gen_config = genai.types.GenerationConfig(
+            response_mime_type="application/json"
+        ) if json_mode else None
+        
         return await asyncio.wait_for(
-            asyncio.to_thread(model.generate_content, prompt_or_parts),
+            asyncio.to_thread(
+                model.generate_content, 
+                prompt_or_parts,
+                generation_config=gen_config
+            ),
             timeout=timeout,
         )
     except asyncio.TimeoutError as exc:
@@ -328,25 +337,38 @@ def _normalize_video_duration(duration_sec: int) -> int:
 
 
 def _parse_gemini_json(response_text: str) -> dict:
-    """Parse robuste du JSON retourné par Gemini"""
+    """Parse robuste du JSON retourné par Gemini ou OpenAI"""
+    if not response_text:
+        raise ValueError("Réponse vide du LLM")
+        
+    # Nettoyage basique des blocs Markdown
     cleaned = re.sub(r"```json\s*", "", response_text)
     cleaned = re.sub(r"```\s*", "", cleaned)
     cleaned = cleaned.strip()
 
+    # Tentative 1: Parsing direct
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        json_match = re.search(r"\{[\s\S]*\}", cleaned)
-        if json_match:
+        pass
+
+    # Tentative 2: Recherche du premier bloc {...}
+    json_match = re.search(r"(\{[\s\S]*\})", cleaned)
+    if json_match:
+        candidate = json_match.group(1)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            # Tentative 3: Nettoyage agressif du bloc trouvé
+            sanitized = re.sub(r"[\r\n]+", " ", candidate)
+            sanitized = re.sub(r",\s*}", "}", sanitized)
+            sanitized = re.sub(r",\s*]", "]", sanitized)
             try:
-                return json.loads(json_match.group(0))
-            except json.JSONDecodeError:
-                sanitized = json_match.group(0)
-                sanitized = re.sub(r"[\r\n]+", " ", sanitized)
-                sanitized = re.sub(r",\s*}", "}", sanitized)
-                sanitized = re.sub(r",\s*]", "]", sanitized)
                 return json.loads(sanitized)
-    raise ValueError("Impossible de parser la réponse Gemini en JSON")
+            except json.JSONDecodeError as e:
+                print(f"[JSON-PARSER] Erreur ultime sur: {candidate[:100]}... -> {e}")
+                
+    raise ValueError(f"Impossible de parser la réponse LLM en JSON (longueur: {len(response_text)})")
 
 
 def _validate_analysis(raw: dict) -> dict:
@@ -436,7 +458,7 @@ def _get_cache_key(text: str, category: str, has_image: bool) -> str:
 # OPENAI PROVIDER — fonctions internes
 # ══════════════════════════════════════════════════════
 
-async def _openai_chat(system: str, user_text: str, images_b64: Optional[List[str]] = None, max_tokens: int = 2000) -> str:
+async def _openai_chat(system: str, user_text: str, images_b64: Optional[List[str]] = None, max_tokens: int = 2000, json_mode: bool = False) -> str:
     """Appel OpenAI chat completions avec support vision"""
     client = _get_openai_client()
     images_b64 = images_b64 or []
@@ -459,6 +481,7 @@ async def _openai_chat(system: str, user_text: str, images_b64: Optional[List[st
             model=OPENAI_MODEL,
             messages=messages,
             max_tokens=max_tokens,
+            response_format={"type": "json_object"} if json_mode else None,
         ),
         timeout=GEMINI_TIMEOUT,
     )
@@ -479,7 +502,7 @@ async def _openai_analyze(text: str, images_b64: List[str], category: str) -> di
     full_prompt = ANALYSIS_PROMPT + context_hint + expertise_hint + user_message
 
     try:
-        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64)
+        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64, json_mode=True)
         raw_json = _parse_gemini_json(response_text)
         analysis = _validate_analysis(raw_json)
     except Exception as error:
@@ -508,7 +531,7 @@ async def _openai_analyze_entrepreneurship(text: str, images_b64: List[str], cat
     full_prompt = ENTREPRENDRE_PROMPT + context_hint + user_message
 
     try:
-        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64)
+        response_text = await _openai_chat(SYSTEM_PROMPT, full_prompt, images_b64, json_mode=True)
         raw_json = _parse_gemini_json(response_text)
         return _validate_entrepreneurship(raw_json)
     except Exception as error:
@@ -541,10 +564,10 @@ async def _openai_generate_image(prompt: str, style: str = "illustration", categ
         return {"success": False, "error": str(e), "fallback_description": prompt}
 
 
-async def _openai_llm_answer(system_prompt: str, user_prompt: str) -> Optional[str]:
+async def _openai_llm_answer(system_prompt: str, user_prompt: str, json_mode: bool = False) -> Optional[str]:
     """Réponse LLM texte via OpenAI GPT-4o"""
     try:
-        return await _openai_chat(system_prompt, user_prompt)
+        return await _openai_chat(system_prompt, user_prompt, json_mode=json_mode)
     except Exception as e:
         print(f"[openai_llm_answer] Erreur: {e}")
         return None
@@ -822,7 +845,7 @@ async def gemini_analyze(
         })
 
     try:
-        result = await _generate_content_with_timeout(model, content_parts)
+        result = await _generate_content_with_timeout(model, content_parts, json_mode=True)
         response_text = result.text
         raw_json = _parse_gemini_json(response_text)
         analysis = _validate_analysis(raw_json)
@@ -883,7 +906,7 @@ async def gemini_analyze_entrepreneurship(
         })
 
     try:
-        result = await _generate_content_with_timeout(model, content_parts)
+        result = await _generate_content_with_timeout(model, content_parts, json_mode=True)
         response_text = result.text
         raw_json = _parse_gemini_json(response_text)
         return _validate_entrepreneurship(raw_json)
