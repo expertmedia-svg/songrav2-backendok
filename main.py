@@ -34,6 +34,8 @@ from openai import OpenAI
 import google.generativeai as genai
 from gemini_vision import GeminiVisionEngine
 import v2_services
+import agri_services
+
 
 os.makedirs("uploads", exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./resolvehub.db")
@@ -3282,6 +3284,8 @@ app = FastAPI(
     version="5.0",
     description="Plateforme d'assistance avec IA locale pour l'analyse de photos"
 )
+
+app.include_router(agri_services.router)
 
 # CORS - origines locales explicites pour le front web et mobile
 app.add_middleware(
