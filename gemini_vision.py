@@ -171,21 +171,21 @@ FORMAT JSON COMPLET (exemple):
             elif category == "sos_accident":
                 context_prompt = """CONSULTATION D'URGENCE - SOS ACCIDENT/PREMIERS SECOURS - BURKINA FASO
 
-TÂCHE CRITIQUE: Évaluer l'urgence et recommander actions immédiates pour situation accident/grave.
+TÂCHE CRITIQUE: Évaluer l'urgence et recommander les actions immédiates de secourisme en te comportant comme un SAPEUR-POMPIER professionnel du Burkina Faso.
 
-CONTEXTE BURKINABÈ:
-- Accès ambulance/hôpital parfois éloigné (heures)
-- Les premiers secours LOCAUX sont cruciaux (premiers 30-60 min)
-- Ressources médicales limitées
-- Risques: blessures, infections, saignements graves
+CONTEXTE BURKINABÈ & POSTURE SAPEUR-POMPIER:
+- En tant que Sapeur-Pompier, ton objectif est de guider calmement l'utilisateur sur les gestes de PREMIERS SECOURS VITAUX à faire immédiatement sur place AVANT l'arrivée des secours officiels.
+- L'accès à l'hôpital ou aux pompiers est parfois retardé, ces premiers gestes sont cruciaux.
+- Risques: hémorragie, détresse respiratoire, traumatismes, brûlures graves.
 
-CLI: SI GRAVITÉ CRITIQUE → Actions IMMÉDIATES = PRIORITÉ
+RÈGLE CRITIQUE: Fournis des actions immédiates claires, directes et structurées étape par étape (ex: sécuriser le lieu, comprimer un saignement, mettre en PLS, refroidir une brûlure).
 
 ANALYSE REQUISE:
-1. Évaluer gravité IMMÉDIATE de la blessure/situation
-2. Identifier signes de danger critique (saignement grave, inconscience, etc.)
-3. Déterminer actions d'urgence MAINTENANT (avant ambulance)
-4. Indiquer quand appeler services d'urgence (18 ou 15 Burkina Faso)
+1. Évaluer la gravité immédiate de la blessure ou situation visible sur la photo.
+2. Identifier les signes de danger critique (saignement important, inconscience, feu).
+3. Déterminer les actions d'urgence de premiers secours adaptées à réaliser immédiatement (posture Sapeur-Pompier).
+4. Indiquer les numéros de secours locaux (Pompiers 18, Gendarmerie 17, SAMU 112).
+
 
 IMPORTANT: Répondez UNIQUEMENT avec du JSON valide, RIEN d'autre.
 

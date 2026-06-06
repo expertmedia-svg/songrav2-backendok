@@ -49,7 +49,7 @@ AI_PROVIDER = os.environ.get("AI_PROVIDER", "openai").lower()
 
 # ── OpenAI config ────────────────────────────────────
 OPENAI_MODEL = "gpt-4o"
-OPENAI_IMAGE_MODEL = "dall-e-3"
+OPENAI_IMAGE_MODEL = "gpt-image-1"
 _openai_key = os.environ.get("OPENAI_API_KEY")
 _openai_client: Optional[object] = _OpenAIClient(api_key=_openai_key) if (_openai_available and _openai_key) else None
 if _openai_client:
@@ -82,10 +82,11 @@ _analysis_cache: Dict[str, Dict] = {}
 CATEGORY_EXPERTISE = {
     "agriculture": "agronome-conseil de terrain specialise des cultures vivrieres et maraicheres du Burkina Faso",
     "elevage": "agent veterinaire de terrain specialise en elevage rural au Burkina Faso",
-    "urgence": "secouriste communautaire de terrain specialise en premiers gestes qui sauvent au Burkina Faso",
-    "sos_accident": "secouriste communautaire de terrain specialise en premiers gestes qui sauvent au Burkina Faso",
+    "urgence": "sapeur-pompier secouriste professionnel du Burkina Faso spécialisé dans les gestes de premiers secours d'urgence absolue, guidant calmement et précisément l'utilisateur sur les actions de sauvetage vitales à faire immédiatement en attendant l'arrivée des secours",
+    "sos_accident": "sapeur-pompier secouriste professionnel du Burkina Faso spécialisé dans les gestes de premiers secours d'urgence absolue, guidant calmement et précisément l'utilisateur sur les actions de sauvetage vitales à faire immédiatement en attendant l'arrivée des secours",
     "cybersecurity": "conseiller local en securite numerique qui explique simplement les arnaques, piratages et bons reflexes mobiles",
 }
+
 
 
 # ══════════════════════════════════════════════════════
@@ -131,9 +132,9 @@ def _category_context_hint(category: str) -> str:
         )
     if category in ("urgence", "sos_accident"):
         return (
-            "CONTEXTE : situation d'urgence / accident / blessure humaine au Burkina Faso. "
-            "Réponds comme un secouriste local. PRIORITE AUX GESTES QUI SAUVENT LA VIE. "
-            "Aucun conseil dangereux, aucun geste complexe sans supervision."
+            "CONTEXTE : situation d'urgence extrême / accident / blessure / incendie au Burkina Faso. "
+            "Réponds comme un SAPEUR-POMPIER professionnel. PRIORITÉ AUX PREMIERS SECOURS ET GESTES QUI SAUVENT LA VIE (PLS, massage cardiaque, garrot, obstruction, arrêt des saignements, brûlures, traumatismes) à réaliser AVANT l'arrivée des pompiers. "
+            "Sois extrêmement précis, calme et direct. Donne des consignes claires par étapes numérotées, faciles à exécuter pour une personne sur place."
         )
     if category == "cybersecurity":
         return (
@@ -552,7 +553,6 @@ async def _openai_generate_image(prompt: str, style: str = "illustration", categ
                 model=OPENAI_IMAGE_MODEL,
                 prompt=prompt,
                 size=size,
-                response_format="b64_json",
                 n=1,
             ),
             timeout=60,

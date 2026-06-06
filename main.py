@@ -3143,7 +3143,57 @@ FORMAT JSON:
             }
 
 
-cv_engine = GeminiVisionEngine(GEMINI_API_KEY) if GEMINI_API_KEY else (GPTVisionEngine(openai_client) if openai_client else LocalComputerVision())
+class ResilientVisionEngine:
+    """Moteur de vision résilient avec redirection dynamique et bascule automatique.
+    Sélectionne la clé préférée selon AI_PROVIDER et bascule sur l'autre en cas d'erreur de facturation/dunning (403/429/etc.).
+    """
+    def __init__(self, gemini_key: Optional[str], openai_client: Optional[Any]):
+        self.gemini_engine = GeminiVisionEngine(gemini_key) if gemini_key else None
+        self.gpt_engine = GPTVisionEngine(openai_client) if openai_client else None
+        self.local_engine = LocalComputerVision()
+
+    def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
+        provider = os.getenv("AI_PROVIDER", "openai").lower()
+        engines = []
+        if provider == "openai":
+            if self.gpt_engine:
+                engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
+            if self.gemini_engine:
+                engines.append(("Gemini", self.gemini_engine))
+        else:
+            if self.gemini_engine:
+                engines.append(("Gemini", self.gemini_engine))
+            if self.gpt_engine:
+                engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
+        
+        engines.append(("Local Computer Vision", self.local_engine))
+
+        last_error = None
+        for name, engine in engines:
+            try:
+                print(f"[VISION-RESILIENT] Tentative d'analyse avec {name}...")
+                res = engine.analyze_images(images_data, text_description, category)
+                # Si l'analyse retourne un dictionnaire signalant une erreur de clé ou de dunning, on lève une exception pour forcer le fallback
+                if isinstance(res, dict):
+                    err_msg = str(res.get("analysis", "")).lower() + " " + str(res.get("error", "")).lower()
+                    if res.get("disease_detected") == "Erreur analyse" or "dunning" in err_msg or "403" in err_msg or "permission" in err_msg:
+                        raise RuntimeError(f"Analyse invalide ou erreur d'API retournée par {name} : {res.get('analysis')}")
+                return res
+            except Exception as e:
+                print(f"[VISION-RESILIENT] Échec avec {name} : {e}")
+                last_error = e
+        
+        # En cas d'échec total (très improbable)
+        return {
+            "disease_detected": "Erreur globale",
+            "confidence": 0.0,
+            "analysis": f"Toutes les méthodes de vision ont échoué. Dernière erreur : {last_error}",
+            "urgency": "medium",
+            "requires_expert": True
+        }
+
+
+cv_engine = ResilientVisionEngine(GEMINI_API_KEY, openai_client)
 
 # ==========================================
 # MODULE IA TEXTE (NLP Local) - RESTAURÉ
@@ -6794,10 +6844,53 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(sos_alert)
         
-        # TODO: Notifier les autorités locales / ONG partenaires
-        # - Envoi SMS aux numéros d'urgence
-        # - Notification email aux responsables
-        # - Webhook vers systèmes externes
+        # Notification automatique vers WhatsApp (via Webhook) et Africa's Talking
+        try:
+            import httpx
+            whatsapp_webhook = os.getenv("WHATSAPP_WEBHOOK_URL")
+            alert_phone = os.getenv("ALERT_TARGET_PHONE", "+22670000017")
+            
+            message_payload = f"🚨 *NOUVEAU SIGNALEMENT SONGRA ({alert.type.upper()})* 🚨\n\n"
+            message_payload += f"👤 *Auteur* : {alert.phoneNumber or 'Anonyme'}\n"
+            message_payload += f"📝 *Détails* : {alert.description}\n"
+            
+            if alert.location:
+                lat = alert.location.get("latitude")
+                lng = alert.location.get("longitude")
+                if lat and lng:
+                    message_payload += f"📍 *Position* : https://maps.google.com/?q={lat},{lng}\n"
+                
+            print(f"[WHATSAPP OUTGOING] Destinataire: {alert_phone} | Message: {message_payload}")
+            
+            # 1. Si Webhook configuré
+            if whatsapp_webhook and whatsapp_webhook != "votre_webhook_url":
+                async with httpx.AsyncClient() as client:
+                    await client.post(whatsapp_webhook, json={
+                        "to": alert_phone,
+                        "message": message_payload,
+                        "type": alert.type
+                    }, timeout=5.0)
+            
+            # 2. Si Africa's Talking configuré
+            at_username = os.getenv("AFRICAS_TALKING_USERNAME")
+            at_api_key = os.getenv("AFRICAS_TALKING_API_KEY")
+            if at_username and at_api_key and at_api_key != "votre_cle_api":
+                url = "https://api.africastalking.com/version1/messaging"
+                headers = {
+                    "ApiKey": at_api_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json"
+                }
+                data = {
+                    "username": at_username,
+                    "to": alert_phone,
+                    "message": message_payload
+                }
+                async with httpx.AsyncClient() as client:
+                    await client.post(url, headers=headers, data=data, timeout=5.0)
+        except Exception as alert_err:
+            print(f"⚠️ Erreur lors de l'envoi de la notification externe: {alert_err}")
+
         
         print(f"🚨 ALERTE SOS REÇUE - Type: {alert.type}, Tel: {alert.phoneNumber}")
         if alert.location.get("latitude"):
