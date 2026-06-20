@@ -3,7 +3,7 @@ SONGRA - Backend API avec Computer Vision LOCALE
 Version FINALE - Avec analyse IA complète
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -35,10 +35,17 @@ import google.generativeai as genai
 from gemini_vision import GeminiVisionEngine
 import v2_services
 import agri_services
+import yingr_ai_api
 
 
 os.makedirs("uploads", exist_ok=True)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./resolvehub.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(base_dir, "resolvehub.db")
+    DATABASE_URL = f"sqlite:///{db_path}"
+
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -1890,7 +1897,7 @@ def _normalize_expert_local_language(language: Optional[str]) -> str:
     normalized = str(language or "fr").strip().lower()
     if normalized in {"moore", "mooree"}:
         return "moore"
-    if normalized not in {"fr", "moore", "dioula", "fulfulde"}:
+    if normalized not in {"fr", "moore", "dioula", "fulfulde", "gourounsi", "bissa"}:
         return "fr"
     return normalized
 
@@ -1979,6 +1986,7 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
         translations[normalized_language] = {
             "question": str(value.get("question") or "").strip(),
             "text": str(value.get("text") or value.get("resolution") or "").strip(),
+            "speech_text": str(value.get("speech_text") or "").strip() or None,
             "summary": str(value.get("summary") or "").strip(),
             "actions": value.get("actions") if isinstance(value.get("actions"), list) else [],
             "audio_url": str(value.get("audio_url") or "").strip() or None,
@@ -1988,41 +1996,79 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
     return translations
 
 
-def _synthesize_local_translation_audio(text: str, language: str) -> Optional[Dict[str, Any]]:
+def _synthesize_local_translation_audio_bg(text: str, language: str, absolute_path: str) -> None:
     normalized_language = _normalize_expert_local_language(language)
     cleaned_text = str(text or "").strip()
     if not cleaned_text or not openai_client or not OPENAI_API_KEY:
+        return
+    try:
+        response = openai_client.audio.speech.create(
+            model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
+            voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
+            input=cleaned_text[:1200],
+        )
+        _ensure_parent_dir(absolute_path)
+        response.stream_to_file(absolute_path)
+        print(f"[INFO] Synthese TTS en arriere-plan terminee pour {normalized_language} : {absolute_path}")
+    except Exception as exc:
+        print(f"[WARN] Echec de synthese TTS en arriere-plan pour {normalized_language}: {exc}")
+
+
+def _synthesize_local_translation_audio(
+    text: str,
+    language: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_language = _normalize_expert_local_language(language)
+    cleaned_text = str(text or "").strip()
+    if not cleaned_text:
         return None
 
     digest = hashlib.sha1(f"{normalized_language}:{cleaned_text}".encode("utf-8")).hexdigest()[:20]
     file_name = f"guided-{normalized_language}-{digest}.mp3"
     relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, file_name).replace("\\", "/")
     absolute_path = os.path.abspath(relative_path)
+    audio_url = _build_upload_url(relative_path)
 
     if not os.path.exists(absolute_path):
-        _ensure_parent_dir(absolute_path)
-        try:
-            response = openai_client.audio.speech.create(
-                model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
-                voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
-                input=cleaned_text[:1200],
+        if background_tasks is not None:
+            background_tasks.add_task(
+                _synthesize_local_translation_audio_bg,
+                cleaned_text,
+                language,
+                absolute_path,
             )
-            response.stream_to_file(absolute_path)
-        except Exception as exc:
-            print(f"[WARN] Audio local indisponible pour {normalized_language}: {exc}")
-            return None
+            print(f"[INFO] Synthese TTS pour {normalized_language} planifiee en arriere-plan")
+        else:
+            if not openai_client or not OPENAI_API_KEY:
+                return None
+            _ensure_parent_dir(absolute_path)
+            try:
+                response = openai_client.audio.speech.create(
+                    model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
+                    voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
+                    input=cleaned_text[:1200],
+                )
+                response.stream_to_file(absolute_path)
+            except Exception as exc:
+                print(f"[WARN] Audio local indisponible synchrone pour {normalized_language}: {exc}")
+                return None
 
     return {
-        "audio_url": _build_upload_url(relative_path),
+        "audio_url": audio_url,
         "audio_mime_type": "audio/mpeg",
     }
 
 
-def _attach_local_translation_audio(translations: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _attach_local_translation_audio(
+    translations: Dict[str, Dict[str, Any]],
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Dict[str, Dict[str, Any]]:
     for language, payload in translations.items():
         if payload.get("audio_url"):
             continue
-        audio_meta = _synthesize_local_translation_audio(payload.get("text") or payload.get("summary") or "", language)
+        text_to_speak = payload.get("speech_text") or payload.get("text") or payload.get("summary") or ""
+        audio_meta = _synthesize_local_translation_audio(text_to_speak, language, background_tasks)
         if not audio_meta:
             continue
         payload.update(audio_meta)
@@ -2143,20 +2189,44 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         actions_str = "\nACTIONS À TRADUIRE:\n" + "\n".join([f"- {a}" for a in actions_fr])
 
     return (
-        "Tu es un traducteur expert en langues nationales du Burkina Faso (Mooré, Dioula, Fulfuldé).\n"
-        "Tu traduis une fiche de conseil agricole/santé pour un paysan en zone rurale.\n"
-        "IMPORTANT: Utilise un langage ORAL, imagé, respectant les expressions culturelles locales.\n"
-        "Le ton doit être CHALEUREUX, CONSEILLER et RASSURANT (respecte la ponctuation pour la lecture vocale).\n"
-        "Retourne uniquement un JSON strict avec cette structure:\n"
+        "Tu es un traducteur expert et natif des langues nationales du Burkina Faso (Mooré, Dioula, Fulfuldé, Gourounsi, Bissa).\n"
+        "Ta mission est de traduire une fiche de conseil agricole/santé/sécurité pour des producteurs ruraux.\n"
+        "Pour ce faire, mobilises activement toutes tes connaissances linguistiques externes, dictionnaires bilingues, grammaires académiques et bases de données linguistiques intégrées pour ces cinq langues afin d'obtenir la traduction la plus précise possible.\n"
+        "CRITÈRES DE HAUTE QUALITÉ (OBJECTIF 90%+ DE FIDÉLITÉ NATURELLE ET PRÉCISION GRAMMATICALE) :\n"
+        "1. **Règles Grammaticales, Conjugaison & Base de Données Externe** : Appuie-toi sur les règles académiques officielles et ton savoir de la morphologie et de la syntaxe du Mooré, Dioula, Fulfuldé, Gourounsi et Bissa.\n"
+        "2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
+        "3. **Gestion des mots difficiles / Synonymes** : Si un mot spécifique (terme technique, moderne ou peu usité) n'a pas de traduction littérale directe reconnue, utilise des synonymes, des paraphrases ou des équivalents imagés naturels en langue locale plutôt que de le laisser en français ou d'inventer un calque artificiel.\n"
+        "4. **Ton de Prononciation & Clarté** : Le ton doit être CHALEUREUX, RASSURANT, CONSEILLER et ORAL (adapté à l'écoute par des personnes analphabètes).\n"
+        "5. **Double format de texte** :\n"
+        "   - `text` : La traduction textuelle officielle, écrite selon l'orthographe correcte standardisée de la langue (avec les caractères spéciaux appropriés si nécessaires).\n"
+        "   - `speech_text` : Une transcription phonétique francophone simplifiée spécifiquement optimisée pour qu'un moteur de synthèse vocale (TTS) français la lise à voix haute de manière fluide et naturelle. Remplace les sons locaux par leur équivalent phonétique français (ex: pour le Mooré, écris 'ouaindé' au lieu de 'wẽndé', 'yee-kee' pour 'yiki', etc.). Insère des virgules ou points pour forcer des pauses naturelles et respecte la tonalité burkinabè.\n"
+        "\n"
+        "Structure JSON stricte attendue (retourne uniquement ce JSON, pas de markdown, pas de ```json) :\n"
         "{\n"
-        '  "moore": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]},\n'
-        '  "dioula": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]},\n'
-        '  "fulfulde": {"question": "...", "text": "...", "summary": "...", "actions": ["action 1", "action 2"]}\n'
+        '  "moore": {\n'
+        '    "question": "Traduction de la question (orthographe standard)",\n'
+        '    "text": "Traduction de la résolution (orthographe standard)",\n'
+        '    "speech_text": "Traduction de la résolution adaptée phonétiquement pour la lecture TTS en français",\n'
+        '    "summary": "Résumé court (orthographe standard)",\n'
+        '    "actions": ["Action 1 traduite (standard)", "Action 2 traduite (standard)", ...]\n'
+        '  },\n'
+        '  "dioula": {\n'
+        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...] \n'
+        '  },\n'
+        '  "fulfulde": {\n'
+        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
+        '  },\n'
+        '  "gourounsi": {\n'
+        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
+        '  },\n'
+        '  "bissa": {\n'
+        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
+        '  }\n'
         "}\n"
-        "Contraintes: pas de markdown, pas d'explication, langage concret, adapté aux analphabètes.\n"
-        f"Categorie: {category}\n"
-        f"Question FR: {question_fr}\n"
-        f"Resolution FR: {resolution_fr}"
+        "Contraintes : pas de markdown, pas d'explication.\n"
+        f"Catégorie : {category}\n"
+        f"Question FR : {question_fr}\n"
+        f"Résolution FR : {resolution_fr}"
         f"{actions_str}"
     )
 
@@ -2166,10 +2236,15 @@ def _build_entreprendre_translation_prompt(data: dict) -> str:
     calendrier = "\n".join([f"- {c.get('mois')}: {c.get('activite')} ({c.get('details')})" for c in data.get('calendrier_cultural', [])])
     gestion_eau = f"Techniques: {', '.join(data.get('gestion_eau', {}).get('techniques', []))}. Conseils: {data.get('gestion_eau', {}).get('conseils', '')}"
     
-    return f"""Tu es un expert en entrepreneuriat rural au Burkina Faso et un traducteur émérite en Mooré, Dioula et Fulfuldé.
-TA MISSION : Traduire les points clés d'un plan d'exploitation pour un entrepreneur local.
+    return f"""Tu es un traducteur expert émérite et natif en Mooré, Dioula, Fulfuldé, Gourounsi et Bissa au Burkina Faso.
+TA MISSION : Traduire les points clés d'un plan d'exploitation pour un producteur local.
 
-TON : Motivateur, pratique, respectueux des traditions mais tourné vers le progrès.
+EXIGENCE DE QUALITÉ (OBJECTIF 90%+ DE PROXIMITÉ NATURELLE) :
+1. Respecte rigoureusement les règles grammaticales, de conjugaison et d'accord de chaque langue locale du Burkina Faso.
+2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels et usuels possibles en langue locale sans altérer le sens original.
+3. **Gestion des mots difficiles / Synonymes** : Si un terme n'a pas d'équivalent direct, utilise des synonymes ou des périphrases imagées naturelles en langue locale plutôt que de le traduire littéralement.
+4. Utilise le ton de prononciation approprié (conseiller, motivateur, respectueux du savoir paysan).
+5. Adapte le vocabulaire technique agricole pour qu'il soit immédiatement compris par un locuteur natif rural.
 
 DONNÉES À TRADUIRE :
 1. Terrain : {data.get('description_terrain')}
@@ -2188,7 +2263,9 @@ RETOURNE UNIQUEMENT un objet JSON avec cette structure :
     "gestion_eau": "..."
   }},
   "dioula": {{ ... idem ... }},
-  "fulfulde": {{ ... idem ... }}
+  "fulfulde": {{ ... idem ... }},
+  "gourounsi": {{ ... idem ... }},
+  "bissa": {{ ... idem ... }}
 }}
 
 RETOURNE SEULEMENT LE JSON PUR."""
@@ -2214,25 +2291,36 @@ def _generate_local_translations_with_openai(prompt: str) -> Dict[str, Any]:
             }
         ],
         temperature=0.2,
-        max_tokens=900,
+        max_tokens=2500,
     )
     content = response.choices[0].message.content if response.choices else ""
     return _parse_json_object_from_text(content or "")
 
 
-def _generate_local_translations(question_fr: str, resolution_fr: str, category: str, actions_fr: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+def _generate_local_translations(
+    question_fr: str,
+    resolution_fr: str,
+    category: str,
+    background_tasks: Optional[BackgroundTasks] = None,
+    actions_fr: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    # NOTE: Dictionnaire local Burkina Dict temporairement désactivé/contourné.
+    # Priorité absolue à Gemini (gemini-2.5-flash) pour la traduction des langues locales burkinabè
+    # car il gère parfaitement Mooré, Dioula et Fulfuldé sans boucles de répétition, contrairement à OpenAI.
+
     prompt = _build_local_translation_prompt(question_fr, resolution_fr, category, actions_fr)
     provider_errors: List[str] = []
 
+    # Priorité absolue à Gemini pour la qualité et la fluidité des langues africaines
     try:
         parsed = _generate_local_translations_with_gemini(prompt)
-        print("[INFO] Traduction locale generee via Gemini")
+        print("[INFO] Traduction locale generee en priorite via Gemini")
     except Exception as gemini_exc:
         provider_errors.append(f"gemini: {gemini_exc}")
         print(f"[WARN] Traduction Gemini indisponible, fallback OpenAI: {gemini_exc}")
         try:
             parsed = _generate_local_translations_with_openai(prompt)
-            print("[INFO] Traduction locale generee via OpenAI")
+            print("[INFO] Traduction locale generee via OpenAI (fallback)")
         except Exception as openai_exc:
             provider_errors.append(f"openai: {openai_exc}")
             raise HTTPException(
@@ -2243,7 +2331,7 @@ def _generate_local_translations(question_fr: str, resolution_fr: str, category:
     normalized = _normalize_expert_local_translations(parsed)
     if not normalized:
         raise HTTPException(status_code=502, detail="La traduction locale renvoyée est vide")
-    return _attach_local_translation_audio(normalized)
+    return _attach_local_translation_audio(normalized, background_tasks)
 
 
 def _history_sort_value(value: Any) -> str:
@@ -2746,6 +2834,7 @@ def _serialize_offline_generated_entry(entry: OfflineKnowledgeEntryDB) -> Dict[s
         "image_description": response_payload.get("image_description"),
         "video_description": response_payload.get("video_description"),
         "video_steps": response_payload.get("video_steps"),
+        "response_json": response_payload,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
         "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
     }
@@ -3336,6 +3425,7 @@ app = FastAPI(
 )
 
 app.include_router(agri_services.router)
+app.include_router(yingr_ai_api.router)
 
 # CORS - origines locales explicites pour le front web et mobile
 app.add_middleware(
@@ -4120,15 +4210,53 @@ def generate_llm_answer_with_general_knowledge(
             "Réponds TOUJOURS de manière pratique pour aider la communauté à résoudre ses difficultés."
         )
 
-    try:
-        # Utiliser Gemini au lieu d'OpenAI
+    def call_openai():
+        if not openai_client or not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY non configuree")
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        return response.choices[0].message.content if response.choices else ""
+
+    def call_gemini():
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY non configuree")
         full_prompt = system_prompt + "\n\n" + user_prompt
         model = genai.GenerativeModel('gemini-2.5-flash')
         result = model.generate_content(full_prompt)
         return result.text
-    except Exception as e:
-        print("⚠️ Erreur appel Gemini (generate_llm_answer_with_general_knowledge):", repr(e))
-        return None
+
+    provider_errors = []
+    if AI_PROVIDER == "openai":
+        try:
+            return call_openai()
+        except Exception as openai_exc:
+            provider_errors.append(f"openai: {openai_exc}")
+            print(f"[WARN] OpenAI error in general LLM answer, fallback Gemini: {openai_exc}")
+            try:
+                return call_gemini()
+            except Exception as gemini_exc:
+                provider_errors.append(f"gemini: {gemini_exc}")
+                print(f"⚠️ Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
+                return None
+    else:
+        try:
+            return call_gemini()
+        except Exception as gemini_exc:
+            provider_errors.append(f"gemini: {gemini_exc}")
+            print(f"[WARN] Gemini error in general LLM answer, fallback OpenAI: {gemini_exc}")
+            try:
+                return call_openai()
+            except Exception as openai_exc:
+                provider_errors.append(f"openai: {openai_exc}")
+                print(f"⚠️ Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
+                return None
 
 
 def resolve_knowledge_answer(
@@ -4440,16 +4568,53 @@ def generate_llm_answer(
             "- Utilise français clair + mots locaux si approprié (ex: 'zaï', 'daba', 'vétérinaire')"
         )
 
-    try:
-        # Utiliser Gemini au lieu d'OpenAI
+    def call_openai():
+        if not openai_client or not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY non configuree")
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        return response.choices[0].message.content if response.choices else ""
+
+    def call_gemini():
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY non configuree")
         full_prompt = system_prompt + "\n\n" + user_prompt
         model = genai.GenerativeModel('gemini-2.5-flash')
         result = model.generate_content(full_prompt)
         return result.text
-    except Exception as e:
-        print("⚠️ Erreur appel Gemini (generate_llm_answer):", repr(e))
-        # En cas d'erreur LLM, on revient à la réponse structurée basée sur la fiche locale.
-        return build_structured_from_rag()
+
+    provider_errors = []
+    if AI_PROVIDER == "openai":
+        try:
+            return call_openai()
+        except Exception as openai_exc:
+            provider_errors.append(f"openai: {openai_exc}")
+            print(f"[WARN] OpenAI error in generate_llm_answer, fallback Gemini: {openai_exc}")
+            try:
+                return call_gemini()
+            except Exception as gemini_exc:
+                provider_errors.append(f"gemini: {gemini_exc}")
+                print(f"⚠️ Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
+                return build_structured_from_rag()
+    else:
+        try:
+            return call_gemini()
+        except Exception as gemini_exc:
+            provider_errors.append(f"gemini: {gemini_exc}")
+            print(f"[WARN] Gemini error in generate_llm_answer, fallback OpenAI: {gemini_exc}")
+            try:
+                return call_openai()
+            except Exception as openai_exc:
+                provider_errors.append(f"openai: {openai_exc}")
+                print(f"⚠️ Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
+                return build_structured_from_rag()
 
 # ==========================================
 # ROUTES API (Avec analyse IA restaurée)
@@ -5870,7 +6035,9 @@ async def get_system_settings():
     settings_path = "backend/system_settings.json"
     default_settings = {
         "elevenlabs_voice_id": "EXAVITQu4vr4xnSDxMaL", # Bella par défaut
-        "ai_model": "eleven_multilingual_v2"
+        "ai_model": "eleven_multilingual_v2",
+        "whatsapp_webhook_url": "",
+        "alert_target_phone": "+22670000017"
     }
     
     if not os.path.exists(settings_path):
@@ -6336,6 +6503,7 @@ async def import_knowledge_from_json(
 @app.post("/api/localization/translate")
 async def translate_localization_payload(
     payload: LocalizationTranslateIn,
+    background_tasks: BackgroundTasks,
     current_identity: Any = Depends(get_current_user_or_expert),
 ):
     del current_identity
@@ -6343,6 +6511,7 @@ async def translate_localization_payload(
         payload.question_fr,
         payload.resolution_fr,
         _normalize_expert_local_category(payload.category),
+        background_tasks,
         payload.actions_fr,
     )
     return {
@@ -6460,6 +6629,7 @@ async def update_expert_local_knowledge_item(
 @app.post("/api/expert/local-knowledge/{item_id}/translate")
 async def translate_expert_local_knowledge_item(
     item_id: int,
+    background_tasks: BackgroundTasks,
     current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
@@ -6471,6 +6641,7 @@ async def translate_expert_local_knowledge_item(
         item.question_fr,
         item.resolution_fr,
         item.category,
+        background_tasks,
     )
     item.translations_json = json.dumps(
         {**_load_json_dict(item.translations_json), **translations},
@@ -6847,8 +7018,22 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
         # Notification automatique vers WhatsApp (via Webhook) et Africa's Talking
         try:
             import httpx
-            whatsapp_webhook = os.getenv("WHATSAPP_WEBHOOK_URL")
-            alert_phone = os.getenv("ALERT_TARGET_PHONE", "+22670000017")
+            sys_settings = {}
+            settings_path = "backend/system_settings.json"
+            if os.path.exists(settings_path):
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        sys_settings = json.load(f)
+                except:
+                    pass
+
+            whatsapp_webhook = sys_settings.get("whatsapp_webhook_url") or os.getenv("WHATSAPP_WEBHOOK_URL")
+            alert_phone = sys_settings.get("alert_target_phone") or os.getenv("ALERT_TARGET_PHONE", "+22670000017")
+            
+            # Nettoyage automatique pour WhatsApp (pas de +, pas d'espaces)
+            clean_phone = alert_phone.replace("+", "").replace(" ", "").strip()
+            if clean_phone.startswith("00"):
+                clean_phone = clean_phone[2:]
             
             message_payload = f"🚨 *NOUVEAU SIGNALEMENT SONGRA ({alert.type.upper()})* 🚨\n\n"
             message_payload += f"👤 *Auteur* : {alert.phoneNumber or 'Anonyme'}\n"
@@ -6860,13 +7045,13 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
                 if lat and lng:
                     message_payload += f"📍 *Position* : https://maps.google.com/?q={lat},{lng}\n"
                 
-            print(f"[WHATSAPP OUTGOING] Destinataire: {alert_phone} | Message: {message_payload}")
+            print(f"[WHATSAPP OUTGOING] Destinataire: {clean_phone} | Message: {message_payload}")
             
             # 1. Si Webhook configuré
             if whatsapp_webhook and whatsapp_webhook != "votre_webhook_url":
                 async with httpx.AsyncClient() as client:
                     await client.post(whatsapp_webhook, json={
-                        "to": alert_phone,
+                        "to": clean_phone,
                         "message": message_payload,
                         "type": alert.type
                     }, timeout=5.0)
@@ -9158,6 +9343,77 @@ async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User
     }
 
 
+class LocalTranslateIn(BaseModel):
+    text: str
+    target_lang: str
+
+
+@app.post("/api/translate/local")
+async def local_dictionary_translate(payload: LocalTranslateIn):
+    # Traduction avec LLM (priorité Gemini, fallback OpenAI) pour garantir une traduction naturelle et fluide,
+    # sans calque littéral mot-à-mot ni jargon incompréhensible, en attendant la complétude de Burkina Dict.
+    target_lang_label = payload.target_lang.strip().lower()
+    
+    # Résoudre les étiquettes de langue
+    lang_names = {
+        "moore": "Mooré",
+        "dioula": "Dioula",
+        "fulfulde": "Fulfuldé",
+        "gourounsi": "Gourounsi",
+        "bissa": "Bissa"
+    }
+    target_lang_name = lang_names.get(target_lang_label, target_lang_label.capitalize())
+
+    prompt = (
+        f"Tu es un traducteur expert natif en langue {target_lang_name} (Burkina Faso).\n"
+        f"Traduis le texte français suivant en {target_lang_name}.\n"
+        f"CRITÈRES DE HAUTE QUALITÉ :\n"
+        f"1. Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
+        f"2. Si un mot spécifique (technique ou moderne) n'a pas d'équivalent direct, utilise des synonymes ou des paraphrases naturelles en langue locale plutôt que de le traduire littéralement.\n"
+        f"3. Le ton doit être oral, clair et adapté à des producteurs ruraux.\n"
+        f"4. Retourne UNIQUEMENT la traduction finale brute en {target_lang_name}. N'écris pas d'introduction, d'explication, ni de bloc de code markdown.\n\n"
+        f"Texte français à traduire : {payload.text}"
+    )
+
+    try:
+        # Priorité absolue à Gemini pour la qualité et fluidité des langues africaines
+        if GEMINI_API_KEY:
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            result = model.generate_content(prompt)
+            translation = result.text.strip()
+            # Nettoyer les éventuels restes de format markdown de bloc de code
+            translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
+            translation = re.sub(r"\n```$", "", translation)
+            translation = translation.strip()
+            if translation:
+                print(f"[INFO] Traduction locale /api/translate/local generee via Gemini pour {target_lang_name}")
+                return {"translation": translation}
+        
+        # Fallback OpenAI
+        if openai_client and OPENAI_API_KEY:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=2500,
+            )
+            content = response.choices[0].message.content if response.choices else ""
+            translation = (content or "").strip()
+            # Nettoyer markdown
+            translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
+            translation = re.sub(r"\n```$", "", translation)
+            translation = translation.strip()
+            if translation:
+                print(f"[INFO] Traduction locale /api/translate/local generee via OpenAI (fallback) pour {target_lang_name}")
+                return {"translation": translation}
+
+    except Exception as exc:
+        print(f"[WARN] Echec de traduction locale LLM /api/translate/local: {exc}")
+
+    # Fallback ultime sur le texte brut
+    return {"translation": payload.text}
+
+
 # ==========================================
 # LANCEMENT
 # ==========================================
@@ -9190,17 +9446,17 @@ if __name__ == "__main__":
             )
             db.add(expert)
             db.commit()
-            print("✓ Expert test créé: test@resolvehub.bf / test123")
+            print("[OK] Expert test créé: test@resolvehub.bf / test123")
         # Charger la base de connaissances locale depuis le JSON
         try:
             load_knowledge_from_json(db)
             total_items = db.query(KnowledgeItem).count()
-            print(f"✓ Base de connaissances chargée ({total_items} fiches)")
+            print(f"[OK] Base de connaissances chargée ({total_items} fiches)")
         except Exception as e_load:
-            print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+            print(f"[ERROR] Chargement base de connaissances: {e_load}")
         db.close()
     except Exception as e:
-        print(f"⚠️ Erreur création expert: {e}")
+        print(f"[ERROR] Création expert: {e}")
     
     # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
     # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
