@@ -36,6 +36,7 @@ from gemini_vision import GeminiVisionEngine
 import v2_services
 import agri_services
 import yingr_ai_api
+from burkina_translator import translate_module_response, VALID_LANGS as _TRANSLATOR_VALID_LANGS, LANG_NAMES as _TRANSLATOR_LANG_NAMES
 
 
 os.makedirs("uploads", exist_ok=True)
@@ -640,6 +641,7 @@ class MobileQuestionCreate(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
+    target_lang: Optional[str] = None  # Langue locale cible : "moore", "dioula", "fulfulde", "gourounsi", "bissa"
 
 class ReplyMessage(BaseModel):
     message: str
@@ -2193,7 +2195,7 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         "Ta mission est de traduire une fiche de conseil agricole/santé/sécurité pour des producteurs ruraux.\n"
         "Pour ce faire, mobilises activement toutes tes connaissances linguistiques externes, dictionnaires bilingues, grammaires académiques et bases de données linguistiques intégrées pour ces cinq langues afin d'obtenir la traduction la plus précise possible.\n"
         "CRITÈRES DE HAUTE QUALITÉ (OBJECTIF 90%+ DE FIDÉLITÉ NATURELLE ET PRÉCISION GRAMMATICALE) :\n"
-        "1. **Règles Grammaticales, Conjugaison & Base de Données Externe** : Appuie-toi sur les règles académiques officielles et ton savoir de la morphologie et de la syntaxe du Mooré, Dioula, Fulfuldé, Gourounsi et Bissa.\n"
+        "1. **Règles Grammaticales, Conjugaison & Base de Données Externe** : Appuie-toi sur les règles académiques officielles et ton savoir encyclopédique de la morphologie et de la syntaxe du Mooré, Dioula, Fulfuldé, Gourounsi et Bissa. Utilise des expressions idiomatiques authentiques du Burkina Faso plutôt que des calques mot-à-mot du français. Assure-toi que les termes techniques (médicaux, agricoles, de sécurité) soient traduits par leur équivalent culturel exact.\n"
         "2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
         "3. **Gestion des mots difficiles / Synonymes** : Si un mot spécifique (terme technique, moderne ou peu usité) n'a pas de traduction littérale directe reconnue, utilise des synonymes, des paraphrases ou des équivalents imagés naturels en langue locale plutôt que de le laisser en français ou d'inventer un calque artificiel.\n"
         "4. **Ton de Prononciation & Clarté** : Le ton doit être CHALEUREUX, RASSURANT, CONSEILLER et ORAL (adapté à l'écoute par des personnes analphabètes).\n"
@@ -2240,7 +2242,7 @@ def _build_entreprendre_translation_prompt(data: dict) -> str:
 TA MISSION : Traduire les points clés d'un plan d'exploitation pour un producteur local.
 
 EXIGENCE DE QUALITÉ (OBJECTIF 90%+ DE PROXIMITÉ NATURELLE) :
-1. Respecte rigoureusement les règles grammaticales, de conjugaison et d'accord de chaque langue locale du Burkina Faso.
+1. Respecte rigoureusement les règles grammaticales, de conjugaison et d'accord de chaque langue locale du Burkina Faso. Évite les calques du français.
 2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels et usuels possibles en langue locale sans altérer le sens original.
 3. **Gestion des mots difficiles / Synonymes** : Si un terme n'a pas d'équivalent direct, utilise des synonymes ou des périphrases imagées naturelles en langue locale plutôt que de le traduire littéralement.
 4. Utilise le ton de prononciation approprié (conseiller, motivateur, respectueux du savoir paysan).
@@ -3283,6 +3285,139 @@ class ResilientVisionEngine:
 
 
 cv_engine = ResilientVisionEngine(GEMINI_API_KEY, openai_client)
+
+# ==========================================
+# TRADUCTION LOCALE — LANGUES DU BURKINA FASO
+# ==========================================
+
+_LOCAL_LANG_NAMES = {
+    "moore":    "Mooré",
+    "dioula":   "Dioula",
+    "fulfulde": "Fulfuldé",
+    "gourounsi":"Gourounsi",
+    "bissa":    "Bissa",
+}
+
+# Champs du diagnostic à traduire (clés JSON retournées par le scanner)
+_ANALYSIS_FIELDS_TO_TRANSLATE = [
+    "what_i_see",
+    "disease_detected",
+    "analysis",
+    "detailed_analysis",
+    "treatment",
+    "treatment_local",
+    "treatment_chemical",
+    "prevention",
+    "urgency_message",
+    "recommendations",
+    "consultation_type",
+    "symptoms_observed",
+]
+
+
+def translate_analysis_to_local_lang(analysis: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
+    """Traduit les champs textuels d'un diagnostic vers une langue locale burkinabè.
+
+    Args:
+        analysis  : dict retourné par cv_engine.analyze_images()
+        target_lang : code langue ("moore", "dioula", "fulfulde", "gourounsi", "bissa")
+
+    Returns:
+        Copie du dict d'analyse avec un sous-objet 'local_translation' contenant
+        chaque champ traduit dans la langue cible, plus les métadonnées phonétiques.
+    """
+    lang_name = _LOCAL_LANG_NAMES.get(target_lang)
+    if not lang_name or not GEMINI_API_KEY:
+        return analysis  # pas de clé Gemini ou langue inconnue → on renvoie l'original
+
+    # Collecter les champs textuels non vides à traduire
+    fields_to_translate: Dict[str, str] = {}
+    for field in _ANALYSIS_FIELDS_TO_TRANSLATE:
+        value = analysis.get(field)
+        if isinstance(value, str) and value.strip():
+            fields_to_translate[field] = value.strip()
+        elif isinstance(value, list):
+            # listes de strings (ex: recommendations)
+            joined = " | ".join([str(v) for v in value if v])
+            if joined:
+                fields_to_translate[field] = joined
+
+    if not fields_to_translate:
+        return analysis
+
+    fields_json = json.dumps(fields_to_translate, ensure_ascii=False, indent=2)
+
+    prompt = f"""Vous êtes un linguiste expert en langues locales du Burkina Faso.
+Votre tâche est de traduire les champs d'un diagnostic médical / agricole / vétérinaire
+du Français vers la langue locale : {lang_name} (code: {target_lang}).
+
+NORMES DE TRANSCRIPTION (Commission Nationale des Langues du Burkina Faso) :
+- Utilisez les caractères officiels : 'ɛ' et 'ɔ' lorsque requis.
+- Nasalisation : insérer 'n' immédiatement après la voyelle nasalisée.
+- Longueur vocalique : doublez la voyelle longue (ex: 'ee', 'oo').
+- Emprunts : adaptez phonologiquement les termes techniques sans traduction directe.
+- Tons : respectez les intonations dans l'écriture phonétique.
+
+CONSIGNES STRICTES :
+1. Traduisez chaque champ de manière fluide et naturelle (pas mot-à-mot).
+2. Pour les termes médicaux/agricoles sans équivalent local, adaptez phonologiquement
+   ou utilisez une périphrase explicative dans la langue cible.
+3. Renvoyez UNIQUEMENT du JSON valide, sans aucune explication extérieure.
+4. Pour chaque champ traduit, ajoutez aussi sa transcription phonétique (lecture française).
+
+Champs à traduire (JSON) :
+{fields_json}
+
+Format de réponse JSON strict :
+{{
+  "translations": {{
+    "<nom_champ>": {{
+      "text": "<traduction dans {lang_name}>",
+      "phonetic": "<transcription phonétique pour lecture française>",
+      "vocal_writing": "<écriture syllabique avec tirets pour TTS>"
+    }}
+  }},
+  "target_lang": "{target_lang}",
+  "lang_name": "{lang_name}",
+  "confidence": <score 0.0-1.0>
+}}"""
+
+    import urllib.request as _urllib_req
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload_req = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1
+        }
+    }
+    try:
+        req = _urllib_req.Request(
+            url,
+            data=json.dumps(payload_req).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with _urllib_req.urlopen(req, timeout=15) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            text_res = resp_data["candidates"][0]["content"]["parts"][0]["text"]
+            translation_result = json.loads(text_res.strip())
+
+        # Fusionner le résultat de traduction dans l'analyse
+        analysis_copy = dict(analysis)
+        analysis_copy["local_translation"] = translation_result
+        return analysis_copy
+
+    except Exception as e:
+        print(f"[TRADUCTION] Échec traduction vers {lang_name}: {e}")
+        # En cas d'échec, on renvoie l'analyse originale sans traduction
+        analysis_copy = dict(analysis)
+        analysis_copy["local_translation"] = {
+            "error": f"Traduction vers {lang_name} échouée : {str(e)}",
+            "target_lang": target_lang,
+            "lang_name": lang_name
+        }
+        return analysis_copy
 
 # ==========================================
 # MODULE IA TEXTE (NLP Local) - RESTAURÉ
@@ -4757,30 +4892,54 @@ async def analyze_scanner_photo(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Analyse UNIQUEMENT une photo du scanner - pas de ticket, pas de chat IA."""
+    """Analyse UNIQUEMENT une photo du scanner - pas de ticket, pas de chat IA.
     
+    Si `target_lang` est fourni ("moore", "dioula", "fulfulde", "gourounsi", "bissa"),
+    le diagnostic est automatiquement traduit dans la langue locale choisie.
+    Le résultat de traduction est disponible dans `analysis.local_translation`.
+    """
+
     # Collecter les photos
     photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
-    
+
     if not photo_payloads:
         raise HTTPException(status_code=400, detail="Aucune photo fournie")
-    
+
+    # Valider la langue cible si fournie
+    valid_langs = {"moore", "dioula", "fulfulde", "gourounsi", "bissa"}
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang not in valid_langs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Langue '{target_lang}' non reconnue. Valeurs acceptées : {sorted(valid_langs)}"
+        )
+
     try:
-        # Analyser les photos avec Gemini
+        # 1. Analyser les photos avec Gemini / GPT-4o
         photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
         photo_analysis = cv_engine.analyze_images(
-            photo_data_list, 
-            data.content or "", 
+            photo_data_list,
+            data.content or "",
             data.category or "agriculture"
         )
-        
+
+        # 2. Traduire le diagnostic si une langue locale est demandée
+        if target_lang:
+            print(f"[TRADUCTION] Traduction du diagnostic vers '{target_lang}'...")
+            photo_analysis = translate_analysis_to_local_lang(photo_analysis, target_lang)
+
         return {
             "status": "success",
             "analysis": photo_analysis,
             "category": data.category,
-            "model": photo_analysis.get("model", "gemini-2.5-flash")
+            "model": photo_analysis.get("model", "gemini-2.5-flash"),
+            "translated": target_lang is not None,
+            "target_lang": target_lang,
+            "lang_name": _LOCAL_LANG_NAMES.get(target_lang) if target_lang else None,
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Analyse scanner photo: {e}")
         return {
@@ -8513,6 +8672,7 @@ class V2AnalyzeRequest(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     generate_media: Optional[bool] = True
+    target_lang: Optional[str] = None  # Langue locale : "moore", "dioula", "fulfulde", "gourounsi", "bissa"
 
 class V2EntreprendreRequest(BaseModel):
     text: Optional[str] = ""
@@ -8521,6 +8681,7 @@ class V2EntreprendreRequest(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     generate_media: Optional[bool] = True
+    target_lang: Optional[str] = None  # Langue locale cible
 
 class V2VideoIllustrationRequest(BaseModel):
     diagnostic: str
@@ -8710,6 +8871,16 @@ async def v2_analyze(
 
     duration = int((_time.time() - start_time) * 1000)
 
+    # ── TRADUCTION LOCALE (silencieuse, mode tâche invisible) ──────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            final_response = translate_module_response(
+                final_response, target_lang, GEMINI_API_KEY, category
+            )
+        except Exception as _te:
+            print(f"[TRANSLATOR] Erreur traduction v2/analyze: {_te}")
+
     return {
         "status": "success",
         **final_response,
@@ -8718,6 +8889,9 @@ async def v2_analyze(
             "model": "gemini-2.5-flash",
             "from_cache": analysis.get("from_cache", False),
             "fallback_used": analysis.get("from_fallback", False),
+            "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+            "target_lang": target_lang,
+            "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         },
     }
 
@@ -8757,7 +8931,23 @@ async def v2_scanner_analyze(
     except Exception as e:
         print(f"[OFFLINE-CORPUS] Erreur persistance v2/scanner: {e}")
 
-    return {"status": "success", **final_response}
+    # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            final_response = translate_module_response(
+                final_response, target_lang, GEMINI_API_KEY, category
+            )
+        except Exception as _te:
+            print(f"[TRANSLATOR] Erreur traduction v2/scanner: {_te}")
+
+    return {
+        "status": "success",
+        **final_response,
+        "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+        "target_lang": target_lang,
+        "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
+    }
 
 
 @app.post("/api/v2/assistant/query")
@@ -8795,7 +8985,23 @@ async def v2_assistant_query(
     except Exception as e:
         print(f"[OFFLINE-CORPUS] Erreur persistance v2/assistant: {e}")
 
-    return {"status": "success", **final_response}
+    # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            final_response = translate_module_response(
+                final_response, target_lang, GEMINI_API_KEY, category
+            )
+        except Exception as _te:
+            print(f"[TRANSLATOR] Erreur traduction v2/assistant: {_te}")
+
+    return {
+        "status": "success",
+        **final_response,
+        "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+        "target_lang": target_lang,
+        "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
+    }
 
 
 @app.post("/api/v2/entreprendre")
