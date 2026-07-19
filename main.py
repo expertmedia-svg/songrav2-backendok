@@ -597,6 +597,32 @@ def _ensure_user_auth_columns() -> None:
 _ensure_user_auth_columns()
 
 
+def _ensure_expert_profile_columns() -> None:
+    """Ajouter les colonnes de profil expert si elles sont absentes (SQLite et PostgreSQL).
+
+    Meme piege que pour users : le modele Expert a recu zone/project/language/
+    institution sans migration associee, donc toute requete sur experts (dont
+    /api/auth/login) plantait avec "no such column: experts.zone".
+    """
+    try:
+        with engine.connect() as conn:
+            migrations = [
+                ("zone", "TEXT", "TEXT"),
+                ("project", "TEXT", "TEXT"),
+                ("language", "TEXT", "TEXT"),
+                ("institution", "TEXT", "TEXT"),
+            ]
+            for col, sqlite_ddl, postgres_ddl in migrations:
+                _add_column_if_missing(conn, "experts", col, sqlite_ddl, postgres_ddl)
+            conn.commit()
+            print("  [OK] Colonnes de profil expert verifiees sur experts")
+    except Exception as e:
+        print(f"[WARN] Impossible d'ajouter les colonnes de profil expert: {e}")
+
+
+_ensure_expert_profile_columns()
+
+
 def _ensure_media_column_for_knowledge_items() -> None:
     """S'assurer que la colonne 'media' existe dans la table knowledge_items.
 
