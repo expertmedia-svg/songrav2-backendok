@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1721404801,
+    "title": "Conseils de semis de maïs pour la saison humide",
+    "category": "agriculture",
+    "language": "Mooré",
+    "region": "Centre-Ouest",
+    "description": "Comment bien espacer ses semis et utiliser le compost organique.",
+    "offline_allowed": true,
+    "audio_url": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+    "timestamp": "2026-07-19T10:00:00.000000",
+    "listeners": 12
+  },
+  {
+    "id": 1721404802,
+    "title": "Prévention de la peste des petits ruminants",
+    "category": "elevage",
+    "language": "Dioula",
+    "region": "Boucle du Mouhoun",
+    "description": "Calendrier de vaccination et hygiène des bergeries.",
+    "offline_allowed": true,
+    "audio_url": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+    "timestamp": "2026-07-19T11:30:00.000000",
+    "listeners": 8
+  },
+  {
+    "id": 1721404803,
+    "title": "Alerte météo: Fortes pluies à venir cette semaine",
+    "category": "marche",
+    "language": "Français",
+    "region": "National",
+    "description": "Recommandations urgentes pour la protection des récoltes stockées.",
+    "offline_allowed": true,
+    "audio_url": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+    "timestamp": "2026-07-19T12:00:00.000000",
+    "listeners": 45
+  }
+]

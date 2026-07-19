@@ -264,6 +264,68 @@ def translate_text(
     return {"translation": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
 
 
+def translate_and_summarize_for_speech(
+    text: str,
+    target_lang: str,
+    gemini_api_key: Optional[str] = None,
+    category: Optional[str] = None,
+    max_sentences: int = 3,
+) -> Dict[str, Any]:
+    """Résume un texte français long puis le traduit en langue locale pour la VOIX.
+
+    Contrairement à translate_text() (traduction intégrale), cette fonction est
+    destinée à la lecture audio : la réponse peut être longue (plusieurs
+    paragraphes issus du LLM), mais une voix qui lit tout mot-à-mot en langue
+    locale est lente et fatigante à l'oral. On demande donc à Gemini un résumé
+    court ORAL (2-3 phrases), déjà en langue locale, plus sa transcription
+    phonétique syllabique (speech_text) destinée à être lue par une voix TTS
+    française (cf. _TRANSCRIPTION_RULES) pour un rendu sonore réaliste.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"summary": "", "speech_text": "", "confidence": 1.0, "source": "empty"}
+    if target_lang not in VALID_LANGS:
+        return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "invalid_lang"}
+    if not gemini_api_key:
+        return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "no_gemini_key"}
+
+    lang_name = LANG_NAMES[target_lang]
+    dict_context = _build_dict_context(text, target_lang)
+    dict_str = ""
+    if dict_context:
+        dict_str = (
+            "\nExtrait du dictionnaire local (a respecter en priorite) :\n"
+            + json.dumps(dict_context, ensure_ascii=False, indent=2) + "\n"
+        )
+    cat_ctx = f"Contexte : {category}. " if category else ""
+
+    prompt = (
+        f"Tu es un linguiste expert natif en {lang_name} (Burkina Faso).\n\n"
+        f"{cat_ctx}Voici une reponse ecrite en francais, potentiellement longue. "
+        f"Ta tache : 1) resumer son message essentiel en {max_sentences} phrases courtes MAXIMUM, "
+        f"adaptees a une lecture ORALE (ton chaleureux, direct, actionnable) ; "
+        f"2) traduire ce resume du Francais vers le {lang_name} (code: {target_lang}).\n\n"
+        f"{_TRANSCRIPTION_RULES}\n\n{_TRANSLATION_PRINCIPLES}\n{dict_str}\n"
+        f"TEXTE COMPLET A RESUMER PUIS TRADUIRE :\n\"\"\"{text}\"\"\"\n\n"
+        f"REPONSE JSON STRICTE :\n"
+        "{\n"
+        f'  "summary": "<resume en {max_sentences} phrases max, traduit en {lang_name}>",\n'
+        '  "speech_text": "<version phonetique francisee et syllabique du resume, pour lecture TTS>",\n'
+        '  "confidence": <0.0-1.0>\n'
+        "}"
+    )
+    ai = _call_gemini_translation(prompt, gemini_api_key)
+    if ai and ai.get("summary"):
+        return {
+            "summary": ai.get("summary", text),
+            "speech_text": ai.get("speech_text", ai.get("summary", text)),
+            "confidence": float(ai.get("confidence", 0.75)),
+            "source": "gemini_ai_summary",
+        }
+
+    return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
+
+
 _SONGRA_TEXT_FIELDS = [
     "what_i_see", "disease_detected", "analysis", "detailed_analysis",
     "treatment", "treatment_local", "treatment_chemical", "prevention",

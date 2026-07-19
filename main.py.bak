@@ -530,66 +530,33 @@ class RuralContactDB(Base):
 #     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 # 
 # 
-Base.metadata.create_all(bind=engine)
-#
-#
-def _is_sqlite_engine() -> bool:
-    return str(engine.url).startswith("sqlite")
-
-
-def _table_columns(conn, table: str) -> List[str]:
-    """Liste les colonnes d'une table, compatible SQLite et PostgreSQL."""
-    if _is_sqlite_engine():
-        return [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")]
-    result = conn.exec_driver_sql(
-        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
-    )
-    return [row[0] for row in result]
-
-
-def _add_column_if_missing(
-    conn, table: str, column: str, sqlite_ddl: str, postgres_ddl: Optional[str] = None
-) -> None:
-    """Ajoute une colonne a une table si elle est absente.
-
-    SQLite n'a pas de "ADD COLUMN IF NOT EXISTS" : on verifie via PRAGMA avant.
-    PostgreSQL le supporte nativement. Les deux moteurs different aussi sur la
-    syntaxe des types/DEFAULT (ex: DATETIME vs TIMESTAMP, DEFAULT 0 vs DEFAULT
-    FALSE) d'ou les deux variantes de DDL.
-    """
-    if _is_sqlite_engine():
-        if column not in _table_columns(conn, table):
-            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sqlite_ddl}")
-    else:
-        conn.exec_driver_sql(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {postgres_ddl or sqlite_ddl}"
-        )
-
-
+# Base.metadata.create_all(bind=engine)
+# 
+# 
 def _ensure_user_auth_columns() -> None:
-    """Ajouter les colonnes d'auth mobile si elles sont absentes (SQLite et PostgreSQL).
+    """Ajouter les colonnes d'auth mobile si elles sont absentes."""
+    if not str(engine.url).startswith("sqlite"):
+        return
 
-    IMPORTANT : tant que ces colonnes manquent sur la base reellement utilisee
-    par le serveur (ex: PostgreSQL en production), TOUTE requete authentifiee
-    (login, register, scanner, assistant vocal, ...) echoue avec une erreur 500
-    non geree des que l'ORM lit la table users - avant meme d'atteindre l'IA.
-    """
     try:
         with engine.connect() as conn:
-            migrations = [
-                ("password_hash", "TEXT", "TEXT"),
-                ("is_anonymized", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE"),
-                ("is_premium", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE"),
-                ("premium_expires_at", "DATETIME", "TIMESTAMP"),
-                ("messages_used", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
-                ("messages_limit", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
-                ("is_active", "BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT TRUE"),
-                ("role", "VARCHAR DEFAULT 'utilisateur'", "VARCHAR DEFAULT 'utilisateur'"),
-            ]
-            for col, sqlite_ddl, postgres_ddl in migrations:
-                _add_column_if_missing(conn, "users", col, sqlite_ddl, postgres_ddl)
+            result = conn.exec_driver_sql("PRAGMA table_info(users)")
+            columns = [row[1] for row in result]
+
+            migrations = {
+                "password_hash": "ALTER TABLE users ADD COLUMN password_hash TEXT",
+                "is_anonymized": "ALTER TABLE users ADD COLUMN is_anonymized BOOLEAN DEFAULT 0",
+                "is_premium": "ALTER TABLE users ADD COLUMN is_premium BOOLEAN DEFAULT 0",
+                "premium_expires_at": "ALTER TABLE users ADD COLUMN premium_expires_at DATETIME",
+                "messages_used": "ALTER TABLE users ADD COLUMN messages_used INTEGER DEFAULT 0",
+                "messages_limit": "ALTER TABLE users ADD COLUMN messages_limit INTEGER DEFAULT 1",
+            }
+
+            for col, sql in migrations.items():
+                if col not in columns:
+                    conn.exec_driver_sql(sql)
+                    print(f"  [OK] Colonne '{col}' ajoutée à users")
             conn.commit()
-            print("  [OK] Colonnes d'auth utilisateur verifiees sur users")
     except Exception as e:
         print(f"[WARN] Impossible d'ajouter les colonnes d'auth utilisateur: {e}")
 
@@ -597,42 +564,25 @@ def _ensure_user_auth_columns() -> None:
 _ensure_user_auth_columns()
 
 
-def _ensure_expert_profile_columns() -> None:
-    """Ajouter les colonnes de profil expert si elles sont absentes (SQLite et PostgreSQL).
-
-    Meme piege que pour users : le modele Expert a recu zone/project/language/
-    institution sans migration associee, donc toute requete sur experts (dont
-    /api/auth/login) plantait avec "no such column: experts.zone".
-    """
-    try:
-        with engine.connect() as conn:
-            migrations = [
-                ("zone", "TEXT", "TEXT"),
-                ("project", "TEXT", "TEXT"),
-                ("language", "TEXT", "TEXT"),
-                ("institution", "TEXT", "TEXT"),
-            ]
-            for col, sqlite_ddl, postgres_ddl in migrations:
-                _add_column_if_missing(conn, "experts", col, sqlite_ddl, postgres_ddl)
-            conn.commit()
-            print("  [OK] Colonnes de profil expert verifiees sur experts")
-    except Exception as e:
-        print(f"[WARN] Impossible d'ajouter les colonnes de profil expert: {e}")
-
-
-_ensure_expert_profile_columns()
-
-
 def _ensure_media_column_for_knowledge_items() -> None:
     """S'assurer que la colonne 'media' existe dans la table knowledge_items.
 
-    Utile quand la base existait avant l'ajout de ce champ : on ajoute
+    Utile quand la base SQLite existait avant l'ajout de ce champ : on ajoute
     simplement la colonne manquante sans casser les données existantes.
     """
+    # Fonction principalement pensée pour SQLite (dev/local). Pour d'autres
+    # SGBD avec migrations gérées, on ne fait rien ici.
+    if not str(engine.url).startswith("sqlite"):
+        return
+
     try:
         with engine.connect() as conn:
-            _add_column_if_missing(conn, "knowledge_items", "media", "TEXT", "TEXT")
-            conn.commit()
+            # Récupérer la liste des colonnes existantes
+            result = conn.exec_driver_sql("PRAGMA table_info(knowledge_items)")
+            columns = [row[1] for row in result]  # row[1] = nom de colonne
+
+            if "media" not in columns:
+                conn.exec_driver_sql("ALTER TABLE knowledge_items ADD COLUMN media TEXT")
     except Exception as e:
         # On loggue mais on ne bloque pas le démarrage de l'API
         print(f"[WARN] Impossible d'ajouter la colonne 'media' à knowledge_items: {e}")
@@ -642,11 +592,18 @@ _ensure_media_column_for_knowledge_items()
 
 
 def _ensure_ticket_photo_columns() -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+
     try:
         with engine.connect() as conn:
-            _add_column_if_missing(conn, "tickets", "photo_paths_json", "TEXT", "TEXT")
-            _add_column_if_missing(conn, "tickets", "internal_notes", "TEXT", "TEXT")
-            conn.commit()
+            result = conn.exec_driver_sql("PRAGMA table_info(tickets)")
+            columns = [row[1] for row in result]
+
+            if "photo_paths_json" not in columns:
+                conn.exec_driver_sql("ALTER TABLE tickets ADD COLUMN photo_paths_json TEXT")
+            if "internal_notes" not in columns:
+                conn.exec_driver_sql("ALTER TABLE tickets ADD COLUMN internal_notes TEXT")
     except Exception as e:
         print(f"[WARN] Impossible d'ajouter des colonnes à tickets: {e}")
 
@@ -670,8 +627,6 @@ class MessageCreate(BaseModel):
     photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
     generate_media: Optional[bool] = False
-    target_lang: Optional[str] = None  # Langue locale cible
-
 
 class ExpertLogin(BaseModel):
     email: str
@@ -2053,85 +2008,10 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
     return translations
 
 
-def _google_translate_tts_chunks(text: str, max_len: int = 200) -> List[str]:
-    """Découpe le texte en morceaux compatibles avec la limite non documentée
-    (~200 caractères) de l'API Google Translate TTS, sans couper au milieu d'un mot."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= max_len:
-        return [text]
-
-    chunks: List[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining.strip())
-            break
-        window = remaining[:max_len]
-        cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "), window.rfind(", "))
-        if cut < max_len // 2:
-            cut = window.rfind(" ")
-        cut = cut + 1 if cut > 0 else max_len
-        chunks.append(remaining[:cut].strip())
-        remaining = remaining[cut:].strip()
-    return [c for c in chunks if c]
-
-
-def _synthesize_google_translate_tts(text: str, absolute_path: str) -> bool:
-    """Synthèse vocale via Google Translate TTS (gratuit, sans clé API, HTTPS
-    simple - contrairement à l'API Azure "tts.speech.microsoft.com" qui exige
-    une clé d'abonnement payante, et au trick WebSocket edge-tts qui échoue
-    de façon non fiable sur cet hébergement).
-
-    Ne supporte pas les langues locales (moore/dioula/...) directement : on
-    lit toujours la transcription phonétique francisée (speech_text) avec une
-    voix française - c'est exactement l'usage prévu de ce champ.
-    """
-    import urllib.parse
-    import urllib.request
-
-    chunks = _google_translate_tts_chunks(text)
-    if not chunks:
-        return False
-
-    audio_bytes = bytearray()
-    try:
-        for chunk in chunks:
-            params = urllib.parse.urlencode({
-                "ie": "UTF-8",
-                "q": chunk,
-                "tl": "fr",
-                "client": "tw-ob",
-            })
-            req = urllib.request.Request(
-                f"https://translate.google.com/translate_tts?{params}",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                audio_bytes.extend(resp.read())
-        if not audio_bytes:
-            return False
-        _ensure_parent_dir(absolute_path)
-        with open(absolute_path, "wb") as f:
-            f.write(bytes(audio_bytes))
-        return True
-    except Exception as exc:
-        print(f"[WARN] Google Translate TTS echec: {exc}")
-        return False
-
-
 def _synthesize_local_translation_audio_bg(text: str, language: str, absolute_path: str) -> None:
     normalized_language = _normalize_expert_local_language(language)
     cleaned_text = str(text or "").strip()
-    if not cleaned_text:
-        return
-
-    if _synthesize_google_translate_tts(cleaned_text[:1200], absolute_path):
-        print(f"[INFO] Synthese Google Translate TTS en arriere-plan terminee pour {normalized_language} : {absolute_path}")
-        return
-
-    if not openai_client or not OPENAI_API_KEY:
+    if not cleaned_text or not openai_client or not OPENAI_API_KEY:
         return
     try:
         response = openai_client.audio.speech.create(
@@ -2141,7 +2021,7 @@ def _synthesize_local_translation_audio_bg(text: str, language: str, absolute_pa
         )
         _ensure_parent_dir(absolute_path)
         response.stream_to_file(absolute_path)
-        print(f"[INFO] Synthese TTS (repli OpenAI) en arriere-plan terminee pour {normalized_language} : {absolute_path}")
+        print(f"[INFO] Synthese TTS en arriere-plan terminee pour {normalized_language} : {absolute_path}")
     except Exception as exc:
         print(f"[WARN] Echec de synthese TTS en arriere-plan pour {normalized_language}: {exc}")
 
@@ -2172,20 +2052,19 @@ def _synthesize_local_translation_audio(
             )
             print(f"[INFO] Synthese TTS pour {normalized_language} planifiee en arriere-plan")
         else:
-            if not _synthesize_google_translate_tts(cleaned_text[:1200], absolute_path):
-                if not openai_client or not OPENAI_API_KEY:
-                    return None
-                _ensure_parent_dir(absolute_path)
-                try:
-                    response = openai_client.audio.speech.create(
-                        model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
-                        voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
-                        input=cleaned_text[:1200],
-                    )
-                    response.stream_to_file(absolute_path)
-                except Exception as exc:
-                    print(f"[WARN] Audio local indisponible synchrone pour {normalized_language}: {exc}")
-                    return None
+            if not openai_client or not OPENAI_API_KEY:
+                return None
+            _ensure_parent_dir(absolute_path)
+            try:
+                response = openai_client.audio.speech.create(
+                    model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
+                    voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
+                    input=cleaned_text[:1200],
+                )
+                response.stream_to_file(absolute_path)
+            except Exception as exc:
+                print(f"[WARN] Audio local indisponible synchrone pour {normalized_language}: {exc}")
+                return None
 
     return {
         "audio_url": audio_url,
@@ -2206,45 +2085,6 @@ def _attach_local_translation_audio(
             continue
         payload.update(audio_meta)
     return translations
-
-
-def _build_voice_reply_audio(
-    text: str,
-    target_lang: str,
-    category: Optional[str] = None,
-    background_tasks: Optional[BackgroundTasks] = None,
-) -> Optional[Dict[str, Any]]:
-    """Resume + traduit une reponse francaise en langue locale et synthetise l'audio.
-
-    Destine a la VOIX de l'assistant (pas au texte affiche a l'ecran) : lire mot a
-    mot une reponse LLM complete en langue locale est long et fatigant a l'oral,
-    donc Gemini produit d'abord un resume oral court, puis sa transcription
-    phonetique syllabique (speech_text) est lue par la voix TTS francaise pour un
-    rendu sonore realiste (cf. burkina_translator._TRANSCRIPTION_RULES).
-    """
-    cleaned_text = str(text or "").strip()
-    if not cleaned_text or target_lang not in _TRANSLATOR_VALID_LANGS:
-        return None
-
-    from burkina_translator import translate_and_summarize_for_speech
-    result = translate_and_summarize_for_speech(
-        cleaned_text, target_lang, GEMINI_API_KEY, category
-    )
-    speech_text = (result.get("speech_text") or result.get("summary") or "").strip()
-    if not speech_text:
-        return None
-
-    audio_meta = _synthesize_local_translation_audio(speech_text, target_lang, background_tasks)
-    if not audio_meta:
-        return None
-
-    return {
-        "voice_summary": result.get("summary"),
-        "speech_text": speech_text,
-        "audio_url": audio_meta.get("audio_url"),
-        "audio_mime_type": audio_meta.get("audio_mime_type"),
-        "confidence": result.get("confidence"),
-    }
 
 
 def _normalize_expert_local_audio(raw: Any) -> Dict[str, Dict[str, Any]]:
@@ -5713,20 +5553,9 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     Utilisé par l'application pour discuter avec l'IA et affiner le problème.
     Aucun Ticket/Message n'est créé ici, uniquement une réponse IA.
     """
-    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(data.content, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale assistant legacy ({target_lang} -> fr): '{data.content}' -> '{translated_text}'")
-            data.content = translated_text
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale assistant legacy: {e_trans}")
 
     # 1. Analyse IA texte
     ai_result = ai_engine.classify(data.content)
-
 
     # 2. Déterminer la catégorie finale et le domaine RAG
     nlp_category = ai_result.get("category", "agriculture")
@@ -5885,56 +5714,6 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     elif video_result and video_result.get("fallback"):
         response["video_description"] = video_result.get("video_description")
         response["video_steps"] = video_result.get("steps_visuelles")
-
-    # ── TRADUCTION DE LA REPONSE VERS LA LANGUE LOCALE ───────────────────────
-    # Sans ca, la reponse construite plus haut reste toujours en francais meme
-    # quand l'utilisateur a choisi une langue locale (Moore, Dioula, ...) : le
-    # client vocal ne fait qu'une traduction cote app fragile et silencieuse en
-    # cas d'echec. On traduit ici directement les champs texte principaux, en
-    # remplacant leur valeur francaise par la traduction (le francais original
-    # reste disponible dans conversation_context / ai_analysis).
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        # Texte source (francais) a utiliser pour la synthese vocale, capture
-        # AVANT que les champs ci-dessous ne soient ecrases par leur traduction.
-        source_text_for_voice = response.get("llm_answer") or response.get("rag_fallback_answer") or ""
-
-        try:
-            from burkina_translator import translate_fields
-            fields_to_translate: Dict[str, str] = {}
-            if response.get("llm_answer"):
-                fields_to_translate["llm_answer"] = response["llm_answer"]
-            if response.get("rag_fallback_answer"):
-                fields_to_translate["rag_fallback_answer"] = response["rag_fallback_answer"]
-
-            if fields_to_translate:
-                translated_fields = translate_fields(
-                    fields_to_translate, target_lang, GEMINI_API_KEY, chosen_category
-                )
-                for field_name, result in translated_fields.items():
-                    translated_value = (result or {}).get("translation")
-                    if translated_value:
-                        response[field_name] = translated_value
-
-            response["translated"] = bool(fields_to_translate)
-            response["target_lang"] = target_lang
-            response["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
-        except Exception as e_resp_trans:
-            print(f"[TRANSLATOR] Erreur traduction reponse assistant legacy: {e_resp_trans}")
-
-        # Synthese vocale reelle : un resume court est traduit puis transcrit
-        # phonetiquement (syllabe par syllabe) pour etre lu par la voix TTS
-        # francaise de facon realiste, au lieu de laisser l'app lire le texte
-        # francais brut avec un moteur TTS local qui ne connait pas la langue.
-        try:
-            voice_payload = _build_voice_reply_audio(
-                source_text_for_voice, target_lang, chosen_category
-            )
-            if voice_payload:
-                response["voice_summary"] = voice_payload.get("voice_summary")
-                response["audio_url"] = voice_payload.get("audio_url")
-                response["audio_mime_type"] = voice_payload.get("audio_mime_type")
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale assistant legacy: {e_voice}")
 
     return response
 
@@ -7354,105 +7133,105 @@ class SOSAlertDB(Base):
     notified_authorities = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-class ChatMessageDB(Base):
-    __tablename__ = "chat_messages"
-    id = Column(Integer, primary_key=True, index=True)
-    sender = Column(String, nullable=False)  # numéro ou nom affiché
-    text = Column(Text, nullable=False)
-    is_bot = Column(Boolean, default=False)
-    room = Column(String, default="general")
-    sender_role = Column(String, default="member")
-    report_count = Column(Integer, default=0)
-    is_hidden = Column(Boolean, default=False)
-    is_pinned = Column(Boolean, default=False)
-    pinned_at = Column(DateTime, nullable=True)
-    audio_url = Column(String, nullable=True)  # URL du fichier audio communautaire
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class CommunityFieldCaseDB(Base):
-    __tablename__ = "community_field_cases"
-    id = Column(Integer, primary_key=True, index=True)
-    room = Column(String, default="general")
-    category = Column(String, default="agriculture")
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-    reporter_name = Column(String, nullable=False)
-    reporter_phone = Column(String, nullable=True)
-    contributor_role = Column(String, default="member")
-    severity = Column(String, default="medium")
-    status = Column(String, default="new")
-    location_label = Column(String, nullable=True)
-    latitude = Column(Float, nullable=True)
-    longitude = Column(Float, nullable=True)
-    crop_or_livestock = Column(String, nullable=True)
-    tags_json = Column(Text, nullable=True)
-    before_photo_paths_json = Column(Text, nullable=True)
-    before_audio_paths_json = Column(Text, nullable=True)
-    after_photo_paths_json = Column(Text, nullable=True)
-    after_audio_paths_json = Column(Text, nullable=True)
-    promoted_to_offline = Column(Boolean, default=False)
-    resolved_at = Column(DateTime, nullable=True)
-    last_follow_up_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class CommunitySolutionDB(Base):
-    __tablename__ = "community_case_solutions"
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, nullable=False, index=True)
-    author_name = Column(String, nullable=False)
-    author_phone = Column(String, nullable=True)
-    contributor_role = Column(String, default="member")
-    text = Column(Text, nullable=False)
-    action_taken = Column(Text, nullable=True)
-    cost_note = Column(String, nullable=True)
-    delay_note = Column(String, nullable=True)
-    result_status = Column(String, default="proposed")
-    photo_paths_json = Column(Text, nullable=True)
-    is_expert = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class CommunitySolutionFeedbackDB(Base):
-    __tablename__ = "community_solution_feedback"
-    id = Column(Integer, primary_key=True, index=True)
-    solution_id = Column(Integer, nullable=False, index=True)
-    voter_name = Column(String, nullable=False)
-    voter_phone = Column(String, nullable=True)
-    feedback_type = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class CommunityCaseConfirmationDB(Base):
-    __tablename__ = "community_case_confirmations"
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, nullable=False, index=True)
-    confirmer_name = Column(String, nullable=False)
-    confirmer_phone = Column(String, nullable=True)
-    contributor_role = Column(String, default="member")
-    note = Column(Text, nullable=True)
-    location_label = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class CommunityCaseFollowUpDB(Base):
-    __tablename__ = "community_case_followups"
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, nullable=False, index=True)
-    author_name = Column(String, nullable=False)
-    author_phone = Column(String, nullable=True)
-    contributor_role = Column(String, default="member")
-    note = Column(Text, nullable=False)
-    status_after = Column(String, nullable=True)
-    outcome_label = Column(String, nullable=True)
-    photo_paths_json = Column(Text, nullable=True)
-    audio_paths_json = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-Base.metadata.create_all(bind=engine)
+# class ChatMessageDB(Base):
+#     __tablename__ = "chat_messages"
+#     id = Column(Integer, primary_key=True, index=True)
+#     sender = Column(String, nullable=False)  # numéro ou nom affiché
+#     text = Column(Text, nullable=False)
+#     is_bot = Column(Boolean, default=False)
+#     room = Column(String, default="general")
+#     sender_role = Column(String, default="member")
+#     report_count = Column(Integer, default=0)
+#     is_hidden = Column(Boolean, default=False)
+#     is_pinned = Column(Boolean, default=False)
+#     pinned_at = Column(DateTime, nullable=True)
+#     audio_url = Column(String, nullable=True)  # URL du fichier audio communautaire
+#     created_at = Column(DateTime, default=datetime.utcnow)
+# 
+# 
+# class CommunityFieldCaseDB(Base):
+#     __tablename__ = "community_field_cases"
+#     id = Column(Integer, primary_key=True, index=True)
+#     room = Column(String, default="general")
+#     category = Column(String, default="agriculture")
+#     title = Column(String, nullable=False)
+#     description = Column(Text, nullable=False)
+#     reporter_name = Column(String, nullable=False)
+#     reporter_phone = Column(String, nullable=True)
+#     contributor_role = Column(String, default="member")
+#     severity = Column(String, default="medium")
+#     status = Column(String, default="new")
+#     location_label = Column(String, nullable=True)
+#     latitude = Column(Float, nullable=True)
+#     longitude = Column(Float, nullable=True)
+#     crop_or_livestock = Column(String, nullable=True)
+#     tags_json = Column(Text, nullable=True)
+#     before_photo_paths_json = Column(Text, nullable=True)
+#     before_audio_paths_json = Column(Text, nullable=True)
+#     after_photo_paths_json = Column(Text, nullable=True)
+#     after_audio_paths_json = Column(Text, nullable=True)
+#     promoted_to_offline = Column(Boolean, default=False)
+#     resolved_at = Column(DateTime, nullable=True)
+#     last_follow_up_at = Column(DateTime, nullable=True)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+# 
+# 
+# class CommunitySolutionDB(Base):
+#     __tablename__ = "community_case_solutions"
+#     id = Column(Integer, primary_key=True, index=True)
+#     case_id = Column(Integer, nullable=False, index=True)
+#     author_name = Column(String, nullable=False)
+#     author_phone = Column(String, nullable=True)
+#     contributor_role = Column(String, default="member")
+#     text = Column(Text, nullable=False)
+#     action_taken = Column(Text, nullable=True)
+#     cost_note = Column(String, nullable=True)
+#     delay_note = Column(String, nullable=True)
+#     result_status = Column(String, default="proposed")
+#     photo_paths_json = Column(Text, nullable=True)
+#     is_expert = Column(Boolean, default=False)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+# 
+# 
+# class CommunitySolutionFeedbackDB(Base):
+#     __tablename__ = "community_solution_feedback"
+#     id = Column(Integer, primary_key=True, index=True)
+#     solution_id = Column(Integer, nullable=False, index=True)
+#     voter_name = Column(String, nullable=False)
+#     voter_phone = Column(String, nullable=True)
+#     feedback_type = Column(String, nullable=False)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+# 
+# 
+# class CommunityCaseConfirmationDB(Base):
+#     __tablename__ = "community_case_confirmations"
+#     id = Column(Integer, primary_key=True, index=True)
+#     case_id = Column(Integer, nullable=False, index=True)
+#     confirmer_name = Column(String, nullable=False)
+#     confirmer_phone = Column(String, nullable=True)
+#     contributor_role = Column(String, default="member")
+#     note = Column(Text, nullable=True)
+#     location_label = Column(String, nullable=True)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+# 
+# 
+# class CommunityCaseFollowUpDB(Base):
+#     __tablename__ = "community_case_followups"
+#     id = Column(Integer, primary_key=True, index=True)
+#     case_id = Column(Integer, nullable=False, index=True)
+#     author_name = Column(String, nullable=False)
+#     author_phone = Column(String, nullable=True)
+#     contributor_role = Column(String, default="member")
+#     note = Column(Text, nullable=False)
+#     status_after = Column(String, nullable=True)
+#     outcome_label = Column(String, nullable=True)
+#     photo_paths_json = Column(Text, nullable=True)
+#     audio_paths_json = Column(Text, nullable=True)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+# 
+# Base.metadata.create_all(bind=engine)
 # 
 # 
 def _ensure_community_case_media_columns() -> None:
@@ -7493,10 +7272,14 @@ _ensure_community_case_media_columns()
 
 def _ensure_sos_description_column() -> None:
     """Migration: ajouter la colonne 'description' à sos_alerts si absente."""
+    if not str(engine.url).startswith("sqlite"):
+        return
     try:
         with engine.connect() as conn:
-            _add_column_if_missing(conn, "sos_alerts", "description", "TEXT", "TEXT")
-            conn.commit()
+            result = conn.exec_driver_sql("PRAGMA table_info(sos_alerts)")
+            columns = [row[1] for row in result]
+            if "description" not in columns:
+                conn.exec_driver_sql("ALTER TABLE sos_alerts ADD COLUMN description TEXT")
     except Exception as e:
         print(f"[WARN] Impossible d'ajouter la colonne 'description' à sos_alerts: {e}")
 
@@ -7505,15 +7288,38 @@ _ensure_sos_description_column()
 
 def _ensure_chat_message_columns() -> None:
     """Migration légère pour enrichir le module communauté."""
+    if not str(engine.url).startswith("sqlite"):
+        return
+
     try:
         with engine.connect() as conn:
-            _add_column_if_missing(conn, "chat_messages", "room", "TEXT DEFAULT 'general'", "TEXT DEFAULT 'general'")
-            _add_column_if_missing(conn, "chat_messages", "sender_role", "TEXT DEFAULT 'member'", "TEXT DEFAULT 'member'")
-            _add_column_if_missing(conn, "chat_messages", "report_count", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0")
-            _add_column_if_missing(conn, "chat_messages", "is_hidden", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE")
-            _add_column_if_missing(conn, "chat_messages", "is_pinned", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE")
-            _add_column_if_missing(conn, "chat_messages", "pinned_at", "DATETIME", "TIMESTAMP")
-            conn.commit()
+            result = conn.exec_driver_sql("PRAGMA table_info(chat_messages)")
+            columns = [row[1] for row in result]
+
+            if "room" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN room TEXT DEFAULT 'general'"
+                )
+            if "sender_role" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN sender_role TEXT DEFAULT 'member'"
+                )
+            if "report_count" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN report_count INTEGER DEFAULT 0"
+                )
+            if "is_hidden" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN is_hidden BOOLEAN DEFAULT 0"
+                )
+            if "is_pinned" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN is_pinned BOOLEAN DEFAULT 0"
+                )
+            if "pinned_at" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN pinned_at DATETIME"
+                )
     except Exception as e:
         print(f"[WARN] Impossible d'ajouter les colonnes de communauté: {e}")
 
@@ -9279,26 +9085,17 @@ async def v2_analyze(
 
     # ── TRADUCTION LOCALE (silencieuse, mode tâche invisible) ──────────────
     target_lang = (data.target_lang or "").strip().lower() or None
-    voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
             final_response = translate_module_response(
                 final_response, target_lang, GEMINI_API_KEY, category
             )
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/analyze: {_te}")
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/analyze: {e_voice}")
 
     return {
         "status": "success",
         **final_response,
-        "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
         "_meta": {
             "duration_ms": duration,
             "model": "gemini-2.5-flash",
@@ -9321,18 +9118,6 @@ async def v2_scanner_analyze(
     text = data.text or data.content or ""
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
-
-    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale scanner ({target_lang} -> fr): '{text}' -> '{translated_text}'")
-            text = translated_text
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale scanner: {e_trans}")
-
 
     if not images_b64:
         raise HTTPException(status_code=400, detail="Le scanner nécessite au moins une photo.")
@@ -9360,19 +9145,13 @@ async def v2_scanner_analyze(
 
     # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
     target_lang = (data.target_lang or "").strip().lower() or None
-    voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
             final_response = translate_module_response(
                 final_response, target_lang, GEMINI_API_KEY, category
             )
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/scanner: {_te}")
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/scanner: {e_voice}")
 
     return {
         "status": "success",
@@ -9380,9 +9159,6 @@ async def v2_scanner_analyze(
         "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
-        "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
     }
 
 
@@ -9396,17 +9172,6 @@ async def v2_assistant_query(
     text = data.text or data.content or ""
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
-
-    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale assistant ({target_lang} -> fr): '{text}' -> '{translated_text}'")
-            text = translated_text
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale assistant: {e_trans}")
 
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
@@ -9434,9 +9199,7 @@ async def v2_assistant_query(
 
     # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
     target_lang = (data.target_lang or "").strip().lower() or None
-    voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
             final_response = translate_module_response(
                 final_response, target_lang, GEMINI_API_KEY, category
@@ -9444,23 +9207,12 @@ async def v2_assistant_query(
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/assistant: {_te}")
 
-        # Synthese vocale reelle (resume + transcription phonetique syllabique
-        # lue par la voix TTS francaise), au lieu de laisser l'app lire le
-        # texte francais/local brut avec un moteur TTS qui ne connait pas la langue.
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/assistant: {e_voice}")
-
     return {
         "status": "success",
         **final_response,
         "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
-        "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
     }
 
 
@@ -9976,39 +9728,6 @@ async def sync_rural_contacts(payload: RuralSyncPayload, current_user: User = De
         ]
     }
 
-class TranslateRequest(BaseModel):
-    text: str
-    target_language: str
-    category: Optional[str] = None
-
-
-@app.post("/api/translate")
-async def translate_text_endpoint(payload: TranslateRequest):
-    """Traduit un texte du Français vers une langue locale (Mooré, Dioula, etc.)"""
-    try:
-        from burkina_translator import translate_text
-        res = translate_text(
-            text=payload.text,
-            target_lang=payload.target_language.strip().lower(),
-            gemini_api_key=GEMINI_API_KEY,
-            category=payload.category
-        )
-        return {
-            "status": "success",
-            "translated_text": res.get("translation", payload.text),
-            "speech_text": res.get("speech_text", res.get("translation", payload.text)),
-            "confidence": res.get("confidence", 0.0),
-            "source": res.get("source", "unknown")
-        }
-    except Exception as e:
-        print(f"[TRANSLATOR] Erreur /api/translate: {e}")
-        return {
-            "status": "error",
-            "message": str(e),
-            "translated_text": payload.text,
-            "speech_text": payload.text
-        }
-
 # @app.post("/api/entreprendre/sync")
 # async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
 #     for r in payload.records:
@@ -10245,8 +9964,9 @@ async def create_admin_expert(payload: dict, db: Session = Depends(get_db)):
         
     expert = db.query(Expert).filter(Expert.email == email).first()
     if not expert:
-        # Create new (meme schema de hash que /api/auth/login : hash_password/verify_password)
-        password_hash = hash_password(payload.get("password", "expert123"))
+        # Create new
+        from passlib.hash import bcrypt
+        password_hash = bcrypt.hash(payload.get("password", "expert123"))
         expert = Expert(
             email=email,
             password_hash=password_hash,
@@ -10326,12 +10046,4 @@ async def update_ticket_status(
         ticket.resolved_at = datetime.utcnow()
     db.commit()
     return {"status": "success", "new_status": ticket.status}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    port = int(os.getenv("PORT", 3000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-
 
