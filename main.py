@@ -2053,10 +2053,85 @@ def _normalize_expert_local_translations(raw: Any) -> Dict[str, Dict[str, Any]]:
     return translations
 
 
+def _google_translate_tts_chunks(text: str, max_len: int = 200) -> List[str]:
+    """Découpe le texte en morceaux compatibles avec la limite non documentée
+    (~200 caractères) de l'API Google Translate TTS, sans couper au milieu d'un mot."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining.strip())
+            break
+        window = remaining[:max_len]
+        cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "), window.rfind(", "))
+        if cut < max_len // 2:
+            cut = window.rfind(" ")
+        cut = cut + 1 if cut > 0 else max_len
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    return [c for c in chunks if c]
+
+
+def _synthesize_google_translate_tts(text: str, absolute_path: str) -> bool:
+    """Synthèse vocale via Google Translate TTS (gratuit, sans clé API, HTTPS
+    simple - contrairement à l'API Azure "tts.speech.microsoft.com" qui exige
+    une clé d'abonnement payante, et au trick WebSocket edge-tts qui échoue
+    de façon non fiable sur cet hébergement).
+
+    Ne supporte pas les langues locales (moore/dioula/...) directement : on
+    lit toujours la transcription phonétique francisée (speech_text) avec une
+    voix française - c'est exactement l'usage prévu de ce champ.
+    """
+    import urllib.parse
+    import urllib.request
+
+    chunks = _google_translate_tts_chunks(text)
+    if not chunks:
+        return False
+
+    audio_bytes = bytearray()
+    try:
+        for chunk in chunks:
+            params = urllib.parse.urlencode({
+                "ie": "UTF-8",
+                "q": chunk,
+                "tl": "fr",
+                "client": "tw-ob",
+            })
+            req = urllib.request.Request(
+                f"https://translate.google.com/translate_tts?{params}",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                audio_bytes.extend(resp.read())
+        if not audio_bytes:
+            return False
+        _ensure_parent_dir(absolute_path)
+        with open(absolute_path, "wb") as f:
+            f.write(bytes(audio_bytes))
+        return True
+    except Exception as exc:
+        print(f"[WARN] Google Translate TTS echec: {exc}")
+        return False
+
+
 def _synthesize_local_translation_audio_bg(text: str, language: str, absolute_path: str) -> None:
     normalized_language = _normalize_expert_local_language(language)
     cleaned_text = str(text or "").strip()
-    if not cleaned_text or not openai_client or not OPENAI_API_KEY:
+    if not cleaned_text:
+        return
+
+    if _synthesize_google_translate_tts(cleaned_text[:1200], absolute_path):
+        print(f"[INFO] Synthese Google Translate TTS en arriere-plan terminee pour {normalized_language} : {absolute_path}")
+        return
+
+    if not openai_client or not OPENAI_API_KEY:
         return
     try:
         response = openai_client.audio.speech.create(
@@ -2066,7 +2141,7 @@ def _synthesize_local_translation_audio_bg(text: str, language: str, absolute_pa
         )
         _ensure_parent_dir(absolute_path)
         response.stream_to_file(absolute_path)
-        print(f"[INFO] Synthese TTS en arriere-plan terminee pour {normalized_language} : {absolute_path}")
+        print(f"[INFO] Synthese TTS (repli OpenAI) en arriere-plan terminee pour {normalized_language} : {absolute_path}")
     except Exception as exc:
         print(f"[WARN] Echec de synthese TTS en arriere-plan pour {normalized_language}: {exc}")
 
@@ -2097,19 +2172,20 @@ def _synthesize_local_translation_audio(
             )
             print(f"[INFO] Synthese TTS pour {normalized_language} planifiee en arriere-plan")
         else:
-            if not openai_client or not OPENAI_API_KEY:
-                return None
-            _ensure_parent_dir(absolute_path)
-            try:
-                response = openai_client.audio.speech.create(
-                    model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
-                    voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
-                    input=cleaned_text[:1200],
-                )
-                response.stream_to_file(absolute_path)
-            except Exception as exc:
-                print(f"[WARN] Audio local indisponible synchrone pour {normalized_language}: {exc}")
-                return None
+            if not _synthesize_google_translate_tts(cleaned_text[:1200], absolute_path):
+                if not openai_client or not OPENAI_API_KEY:
+                    return None
+                _ensure_parent_dir(absolute_path)
+                try:
+                    response = openai_client.audio.speech.create(
+                        model=os.getenv("OPENAI_TTS_MODEL", "tts-1-hd"),
+                        voice=os.getenv("OPENAI_TTS_VOICE", "onyx"),
+                        input=cleaned_text[:1200],
+                    )
+                    response.stream_to_file(absolute_path)
+                except Exception as exc:
+                    print(f"[WARN] Audio local indisponible synchrone pour {normalized_language}: {exc}")
+                    return None
 
     return {
         "audio_url": audio_url,
