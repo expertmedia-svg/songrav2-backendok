@@ -8,3 +8,8 @@ téléchargements/
 venv/
 .venv/
 instance/
+
+# Fichiers de donnees runtime generes par le serveur (ne doivent pas ecraser
+# la prod a chaque pull) et sauvegardes locales
+broadcasts.json
+*.bak
