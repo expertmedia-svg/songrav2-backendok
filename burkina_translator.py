@@ -1,4 +1,4 @@
-﻿"""
+"""
 burkina_translator.py
 =====================
 Moteur de traduction universel — Langues locales du Burkina Faso.
@@ -63,6 +63,13 @@ _FR_SYNONYMS: Dict[str, List[str]] = {
     "merci":        ["remerciement", "gratitude"],
     "aide":         ["assistance", "soutien", "secours"],
 }
+
+# Le lookup dictionnaire/synonyme ne fait du sens que pour un mot ou une courte
+# expression (cle du dictionnaire = 1 mot). Au-dela, "k in key.split()" matcherait
+# un simple mot du dictionnaire present n'importe ou dans une phrase/paragraphe et
+# retournerait CE SEUL MOT comme "traduction" de tout le texte (reponse tronquee/fausse).
+# Pour les textes plus longs on saute directement a la traduction Gemini (phrase complete).
+_SHORT_TEXT_MAX_WORDS = 4
 
 _dictionaries: Dict[str, Dict[str, Any]] = {}
 
@@ -159,7 +166,8 @@ _TRANSCRIPTION_RULES = (
     "- Longueur vocalique : doublez la voyelle longue (ex: 'ee', 'oo', 'aa').\n"
     "- Tons : respectez les tons (haut/moyen/bas) dans le speech_text.\n"
     "- Emprunts : adaptez phonologiquement les termes modernes (ex: 'mobili' pour vehicule).\n"
-    "- Ne jamais ecrire le mot francais brut pour un terme sans equivalent local."
+    "- Ne jamais ecrire le mot francais brut pour un terme sans equivalent local.\n"
+    "- Lecture vocale (speech_text) : utilisez impérativement un découpage phonétique francophone et syllabique en séparant les syllabes complexes par des tirets '-' ou des espaces légers (ex: 'ko-no-ko', 'ou-ain-dé' au lieu de 'ouaindé') pour forcer une élocution très lente, claire et décomposée par le moteur TTS."
 )
 
 _TRANSLATION_PRINCIPLES = (
@@ -213,13 +221,15 @@ def translate_text(
 
     lang_name = LANG_NAMES[target_lang]
 
-    d = _dict_lookup(text, target_lang)
-    if d:
-        return {"translation": d, "speech_text": d, "confidence": 1.0, "source": "local_dictionary"}
+    is_short_text = len(text.split()) <= _SHORT_TEXT_MAX_WORDS
+    if is_short_text:
+        d = _dict_lookup(text, target_lang)
+        if d:
+            return {"translation": d, "speech_text": d, "confidence": 1.0, "source": "local_dictionary"}
 
-    s = _synonym_lookup(text, target_lang)
-    if s:
-        return {"translation": s, "speech_text": s, "confidence": 0.85, "source": "local_synonym"}
+        s = _synonym_lookup(text, target_lang)
+        if s:
+            return {"translation": s, "speech_text": s, "confidence": 0.85, "source": "local_synonym"}
 
     if gemini_api_key:
         dict_context = _build_dict_context(text, target_lang)
@@ -282,14 +292,15 @@ def translate_fields(
     for field, text in fields.items():
         if not isinstance(text, str) or not text.strip():
             continue
-        d = _dict_lookup(text, target_lang)
-        if d:
-            results[field] = {"translation": d, "speech_text": d, "confidence": 1.0, "source": "local_dictionary"}
-            continue
-        s = _synonym_lookup(text, target_lang)
-        if s:
-            results[field] = {"translation": s, "speech_text": s, "confidence": 0.85, "source": "local_synonym"}
-            continue
+        if len(text.split()) <= _SHORT_TEXT_MAX_WORDS:
+            d = _dict_lookup(text, target_lang)
+            if d:
+                results[field] = {"translation": d, "speech_text": d, "confidence": 1.0, "source": "local_dictionary"}
+                continue
+            s = _synonym_lookup(text, target_lang)
+            if s:
+                results[field] = {"translation": s, "speech_text": s, "confidence": 0.85, "source": "local_synonym"}
+                continue
         needs_ai[field] = text.strip()
 
     if needs_ai and gemini_api_key:
@@ -370,3 +381,96 @@ def translate_module_response(
         "fields": translated,
     }
     return result
+
+
+def translate_query_to_french(
+    query: str,
+    source_lang: str,
+    gemini_api_key: Optional[str] = None,
+) -> str:
+    """Traduit une requête écrite ou vocale de l'utilisateur (en langue locale) vers le Français.
+    
+    1. Découpe en mots/syllabes et cherche des correspondances dans le dictionnaire local inversé.
+    2. Utilise Gemini AI si disponible pour reconstituer une phrase cohérente en Français
+       à partir des correspondances locales et du contexte global.
+    """
+    query = (query or "").strip()
+    if not query or source_lang not in VALID_LANGS:
+        return query
+
+    # Inverser le dictionnaire local de cette langue (local_word -> french_word)
+    d_local = _dictionaries.get(source_lang, {})
+    inverted_dict: Dict[str, str] = {}
+    for fr_word, entry in d_local.items():
+        local_val = entry.get("translation", "") if isinstance(entry, dict) else str(entry)
+        local_val = local_val.lower().strip()
+        if local_val and fr_word:
+            inverted_dict[local_val] = fr_word
+
+    # 1. Extraction par mot/syllabe local
+    words_in_query = re.sub(r"[.,!?;:()'\"\\/@]", " ", query.lower()).split()
+    matched_french_words = []
+    
+    # Recherche exacte de mots entiers ou de groupes de mots inversés
+    for local_phrase, fr_word in inverted_dict.items():
+        if local_phrase in query.lower():
+            matched_french_words.append(fr_word)
+            
+    # Recherche mot par mot ou par syllabe
+    for word in words_in_query:
+        if len(word) < 2:
+            continue
+        for local_phrase, fr_word in inverted_dict.items():
+            if word in local_phrase or local_phrase in word:
+                if fr_word not in matched_french_words:
+                    matched_french_words.append(fr_word)
+
+    # 2. Utilisation de Gemini pour affiner la traduction de la requête
+    lang_name = LANG_NAMES[source_lang]
+    if gemini_api_key:
+        dict_context_str = ""
+        if matched_french_words:
+            dict_context_str = (
+                "\nMots clés détectés localement et leurs correspondances :\n"
+                + ", ".join([f"{w} -> {inverted_dict.get(w, '') or w}" for w in matched_french_words[:15]])
+                + "\n"
+            )
+        
+        prompt = (
+            f"Tu es un traducteur et linguiste expert de la langue {lang_name} (Burkina Faso) vers le Français.\n"
+            f"L'utilisateur rural a posé une question en {lang_name}.\n"
+            f"Traduis cette question en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les maladies agricoles/d'élevage/urgences.\n\n"
+            f"Requête utilisateur en {lang_name} : \"{query}\"\n"
+            f"{dict_context_str}\n"
+            f"Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
+        )
+        
+        try:
+            import urllib.request
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-2.5-flash:generateContent?key={gemini_api_key}"
+            )
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1},
+            }
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                translated_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if translated_text:
+                    translated_text = re.sub(r'^["\']|["\']$', '', translated_text).strip()
+                    return translated_text
+        except Exception as e:
+            print(f"[TRANSLATOR] Échec traduction requête Gemini: {e}")
+
+    # Fallback local
+    if matched_french_words:
+        return " ".join(matched_french_words)
+        
+    return query
+

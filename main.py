@@ -375,6 +375,8 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     phone_number = Column(String, unique=True, nullable=False)
+    is_active = Column(Boolean, default=True)
+    role = Column(String, default="utilisateur")
     password_hash = Column(String, nullable=True)
     name = Column(String, nullable=True)
     location = Column(String, nullable=True)
@@ -393,6 +395,10 @@ class Expert(Base):
     full_name = Column(String, nullable=False)
     specialization = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
+    zone = Column(String, nullable=True)
+    project = Column(String, nullable=True)
+    language = Column(String, nullable=True)
+    institution = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Ticket(Base):
@@ -408,6 +414,7 @@ class Ticket(Base):
     ai_photo_analysis = Column(Text, nullable=True)
     photo_path = Column(String, nullable=True)  # NOM ORIGINAL - NE PAS CHANGER
     photo_paths_json = Column(Text, nullable=True)
+    internal_notes = Column(Text, nullable=True)
     resolution_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
@@ -435,6 +442,7 @@ class Message(Base):
     channel = Column(String, nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
     is_read = Column(Boolean, default=False)
+    audio_url = Column(String, nullable=True)  # URL du fichier audio de réponse expert
 
 class KnowledgeItem(Base):
     __tablename__ = "knowledge_items"
@@ -508,49 +516,82 @@ class RuralContactDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-class EntreprendreHistoryDB(Base):
-    __tablename__ = "entreprendre_history"
-    id = Column(String, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    category = Column(String, nullable=False)
-    user_query = Column(Text, nullable=False)
-    response_json = Column(Text, nullable=False)
-    photo_path = Column(String, nullable=True)
-    plot_id = Column(String, nullable=True)
-    translations_json = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
+# class EntreprendreHistoryDB(Base):
+#     __tablename__ = "entreprendre_history"
+#     id = Column(String, primary_key=True, index=True)
+#     user_id = Column(Integer, nullable=False, index=True)
+#     category = Column(String, nullable=False)
+#     user_query = Column(Text, nullable=False)
+#     response_json = Column(Text, nullable=False)
+#     photo_path = Column(String, nullable=True)
+#     plot_id = Column(String, nullable=True)
+#     translations_json = Column(Text, nullable=True)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+# 
+# 
 Base.metadata.create_all(bind=engine)
+#
+#
+def _is_sqlite_engine() -> bool:
+    return str(engine.url).startswith("sqlite")
+
+
+def _table_columns(conn, table: str) -> List[str]:
+    """Liste les colonnes d'une table, compatible SQLite et PostgreSQL."""
+    if _is_sqlite_engine():
+        return [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")]
+    result = conn.exec_driver_sql(
+        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
+    )
+    return [row[0] for row in result]
+
+
+def _add_column_if_missing(
+    conn, table: str, column: str, sqlite_ddl: str, postgres_ddl: Optional[str] = None
+) -> None:
+    """Ajoute une colonne a une table si elle est absente.
+
+    SQLite n'a pas de "ADD COLUMN IF NOT EXISTS" : on verifie via PRAGMA avant.
+    PostgreSQL le supporte nativement. Les deux moteurs different aussi sur la
+    syntaxe des types/DEFAULT (ex: DATETIME vs TIMESTAMP, DEFAULT 0 vs DEFAULT
+    FALSE) d'ou les deux variantes de DDL.
+    """
+    if _is_sqlite_engine():
+        if column not in _table_columns(conn, table):
+            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sqlite_ddl}")
+    else:
+        conn.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {postgres_ddl or sqlite_ddl}"
+        )
 
 
 def _ensure_user_auth_columns() -> None:
-    """Ajouter les colonnes d'auth mobile si elles sont absentes."""
-    if not str(engine.url).startswith("sqlite"):
-        return
+    """Ajouter les colonnes d'auth mobile si elles sont absentes (SQLite et PostgreSQL).
 
+    IMPORTANT : tant que ces colonnes manquent sur la base reellement utilisee
+    par le serveur (ex: PostgreSQL en production), TOUTE requete authentifiee
+    (login, register, scanner, assistant vocal, ...) echoue avec une erreur 500
+    non geree des que l'ORM lit la table users - avant meme d'atteindre l'IA.
+    """
     try:
         with engine.connect() as conn:
-            result = conn.exec_driver_sql("PRAGMA table_info(users)")
-            columns = [row[1] for row in result]
-
-            migrations = {
-                "password_hash": "ALTER TABLE users ADD COLUMN password_hash TEXT",
-                "is_anonymized": "ALTER TABLE users ADD COLUMN is_anonymized BOOLEAN DEFAULT 0",
-                "is_premium": "ALTER TABLE users ADD COLUMN is_premium BOOLEAN DEFAULT 0",
-                "premium_expires_at": "ALTER TABLE users ADD COLUMN premium_expires_at DATETIME",
-                "messages_used": "ALTER TABLE users ADD COLUMN messages_used INTEGER DEFAULT 0",
-                "messages_limit": "ALTER TABLE users ADD COLUMN messages_limit INTEGER DEFAULT 1",
-            }
-
-            for col, sql in migrations.items():
-                if col not in columns:
-                    conn.exec_driver_sql(sql)
-                    print(f"  ✓ Colonne '{col}' ajoutée à users")
+            migrations = [
+                ("password_hash", "TEXT", "TEXT"),
+                ("is_anonymized", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE"),
+                ("is_premium", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE"),
+                ("premium_expires_at", "DATETIME", "TIMESTAMP"),
+                ("messages_used", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
+                ("messages_limit", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
+                ("is_active", "BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT TRUE"),
+                ("role", "VARCHAR DEFAULT 'utilisateur'", "VARCHAR DEFAULT 'utilisateur'"),
+            ]
+            for col, sqlite_ddl, postgres_ddl in migrations:
+                _add_column_if_missing(conn, "users", col, sqlite_ddl, postgres_ddl)
             conn.commit()
+            print("  [OK] Colonnes d'auth utilisateur verifiees sur users")
     except Exception as e:
-        print(f"⚠️ Impossible d'ajouter les colonnes d'auth utilisateur: {e}")
+        print(f"[WARN] Impossible d'ajouter les colonnes d'auth utilisateur: {e}")
 
 
 _ensure_user_auth_columns()
@@ -559,43 +600,29 @@ _ensure_user_auth_columns()
 def _ensure_media_column_for_knowledge_items() -> None:
     """S'assurer que la colonne 'media' existe dans la table knowledge_items.
 
-    Utile quand la base SQLite existait avant l'ajout de ce champ : on ajoute
+    Utile quand la base existait avant l'ajout de ce champ : on ajoute
     simplement la colonne manquante sans casser les données existantes.
     """
-    # Fonction principalement pensée pour SQLite (dev/local). Pour d'autres
-    # SGBD avec migrations gérées, on ne fait rien ici.
-    if not str(engine.url).startswith("sqlite"):
-        return
-
     try:
         with engine.connect() as conn:
-            # Récupérer la liste des colonnes existantes
-            result = conn.exec_driver_sql("PRAGMA table_info(knowledge_items)")
-            columns = [row[1] for row in result]  # row[1] = nom de colonne
-
-            if "media" not in columns:
-                conn.exec_driver_sql("ALTER TABLE knowledge_items ADD COLUMN media TEXT")
+            _add_column_if_missing(conn, "knowledge_items", "media", "TEXT", "TEXT")
+            conn.commit()
     except Exception as e:
         # On loggue mais on ne bloque pas le démarrage de l'API
-        print(f"⚠️ Impossible d'ajouter la colonne 'media' à knowledge_items: {e}")
+        print(f"[WARN] Impossible d'ajouter la colonne 'media' à knowledge_items: {e}")
 
 
 _ensure_media_column_for_knowledge_items()
 
 
 def _ensure_ticket_photo_columns() -> None:
-    if not str(engine.url).startswith("sqlite"):
-        return
-
     try:
         with engine.connect() as conn:
-            result = conn.exec_driver_sql("PRAGMA table_info(tickets)")
-            columns = [row[1] for row in result]
-
-            if "photo_paths_json" not in columns:
-                conn.exec_driver_sql("ALTER TABLE tickets ADD COLUMN photo_paths_json TEXT")
+            _add_column_if_missing(conn, "tickets", "photo_paths_json", "TEXT", "TEXT")
+            _add_column_if_missing(conn, "tickets", "internal_notes", "TEXT", "TEXT")
+            conn.commit()
     except Exception as e:
-        print(f"⚠️ Impossible d'ajouter la colonne 'photo_paths_json' à tickets: {e}")
+        print(f"[WARN] Impossible d'ajouter des colonnes à tickets: {e}")
 
 
 _ensure_ticket_photo_columns()
@@ -617,6 +644,8 @@ class MessageCreate(BaseModel):
     photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
     generate_media: Optional[bool] = False
+    target_lang: Optional[str] = None  # Langue locale cible
+
 
 class ExpertLogin(BaseModel):
     email: str
@@ -2175,10 +2204,42 @@ def _upsert_expert_local_knowledge_from_legacy_seed(db: Session) -> int:
     return inserted
 
 
+def _extract_json_object_from_text(raw_text: str) -> Optional[str]:
+    cleaned = str(raw_text or "").replace("```json", "").replace("```", "").strip()
+    start = cleaned.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index in range(start, len(cleaned)):
+        char = cleaned[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                return cleaned[start : index + 1]
+
+    return None
+
+
 def _parse_json_object_from_text(raw_text: str) -> Dict[str, Any]:
     cleaned = str(raw_text or "").replace("```json", "").replace("```", "").strip()
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    payload = match.group(0) if match else cleaned
+    payload = _extract_json_object_from_text(cleaned) or cleaned
     parsed = json.loads(payload)
     if not isinstance(parsed, dict):
         raise ValueError("Réponse JSON invalide")
@@ -2201,14 +2262,14 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         "4. **Ton de Prononciation & Clarté** : Le ton doit être CHALEUREUX, RASSURANT, CONSEILLER et ORAL (adapté à l'écoute par des personnes analphabètes).\n"
         "5. **Double format de texte** :\n"
         "   - `text` : La traduction textuelle officielle, écrite selon l'orthographe correcte standardisée de la langue (avec les caractères spéciaux appropriés si nécessaires).\n"
-        "   - `speech_text` : Une transcription phonétique francophone simplifiée spécifiquement optimisée pour qu'un moteur de synthèse vocale (TTS) français la lise à voix haute de manière fluide et naturelle. Remplace les sons locaux par leur équivalent phonétique français (ex: pour le Mooré, écris 'ouaindé' au lieu de 'wẽndé', 'yee-kee' pour 'yiki', etc.). Insère des virgules ou points pour forcer des pauses naturelles et respecte la tonalité burkinabè.\n"
+        "   - `speech_text` : Une transcription phonétique francophone simplifiée spécifiquement optimisée pour la synthèse vocale. Utilisez impérativement un découpage syllabique et phonétique en séparant les syllabes complexes par des tirets '-' ou des espaces (ex: pour le Mooré, écris 'ou-ain-dé' au lieu de 'wẽndé', 'yee-kee' pour 'yiki', 'koa-a-da' pour 'koaada'). Insère des virgules ou points pour forcer des pauses naturelles et respecter la tonalité burkinabè, favorisant une lecture à voix très lente et claire.\n"
         "\n"
         "Structure JSON stricte attendue (retourne uniquement ce JSON, pas de markdown, pas de ```json) :\n"
         "{\n"
         '  "moore": {\n'
         '    "question": "Traduction de la question (orthographe standard)",\n'
         '    "text": "Traduction de la résolution (orthographe standard)",\n'
-        '    "speech_text": "Traduction de la résolution adaptée phonétiquement pour la lecture TTS en français",\n'
+        '    "speech_text": "Traduction de la résolution adaptée phonétiquement avec découpage syllabique (ex: ou-ain-dé, ko-no-ko) pour la lecture TTS en français",\n'
         '    "summary": "Résumé court (orthographe standard)",\n'
         '    "actions": ["Action 1 traduite (standard)", "Action 2 traduite (standard)", ...]\n'
         '  },\n'
@@ -2241,12 +2302,13 @@ def _build_entreprendre_translation_prompt(data: dict) -> str:
     return f"""Tu es un traducteur expert émérite et natif en Mooré, Dioula, Fulfuldé, Gourounsi et Bissa au Burkina Faso.
 TA MISSION : Traduire les points clés d'un plan d'exploitation pour un producteur local.
 
-EXIGENCE DE QUALITÉ (OBJECTIF 90%+ DE PROXIMITÉ NATURELLE) :
+EXIGENCE DE QUALITÉ (OBJECTIF 90%+ DE PROXIMITÉ NATURELLE ET PHONÉTIQUE DE LECTURE) :
 1. Respecte rigoureusement les règles grammaticales, de conjugaison et d'accord de chaque langue locale du Burkina Faso. Évite les calques du français.
 2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels et usuels possibles en langue locale sans altérer le sens original.
-3. **Gestion des mots difficiles / Synonymes** : Si un terme n'a pas d'équivalent direct, utilise des synonymes ou des périphrases imagées naturelles en langue locale plutôt que de le traduire littéralement.
-4. Utilise le ton de prononciation approprié (conseiller, motivateur, respectueux du savoir paysan).
-5. Adapte le vocabulaire technique agricole pour qu'il soit immédiatement compris par un locuteur natif rural.
+3. **Gestion des mots difficiles / Synonymes** : Si un terme n'a pas d'équivalent direct, utilise des synonymes ou des périphrases imagées naturelles en langue locale.
+4. Pour le champ `speech_text` : Rédige un résumé vocal continu de tout le plan d'exploitation (synthèse du terrain, des propositions, du découpage, du calendrier et de la gestion de l'eau) dans la langue locale, mais écrit sous forme de transcription phonétique francophone simplifiée, avec un découpage syllabique et phonétique très clair en séparant les syllabes complexes par des tirets '-' ou des espaces légers (ex: 'ou-ain-dé' pour Mooré wẽndé, 'yee-kee' pour yiki, 'koa-a-da' pour koaada). Cela permet à un moteur de synthèse vocale (TTS) français de le lire à voix très lente, claire et décomposée pour être parfaitement intelligible en zone rurale.
+5. Utilise le ton de prononciation approprié (conseiller, motivateur, respectueux du savoir paysan).
+6. Adapte le vocabulaire technique agricole pour qu'il soit immédiatement compris par un locuteur natif rural.
 
 DONNÉES À TRADUIRE :
 1. Terrain : {data.get('description_terrain')}
@@ -2262,12 +2324,41 @@ RETOURNE UNIQUEMENT un objet JSON avec cette structure :
     "propositions": ["titre: description", ...],
     "decoupage_terrain": "...",
     "calendrier": ["mois: activite", ...],
-    "gestion_eau": "..."
+    "gestion_eau": "...",
+    "speech_text": "Plan d'exploitation complet phonétisé avec découpage syllabique séparé par des tirets"
   }},
-  "dioula": {{ ... idem ... }},
-  "fulfulde": {{ ... idem ... }},
-  "gourounsi": {{ ... idem ... }},
-  "bissa": {{ ... idem ... }}
+  "dioula": {{
+    "description_terrain": "...",
+    "propositions": ["..."],
+    "decoupage_terrain": "...",
+    "calendrier": ["..."],
+    "gestion_eau": "...",
+    "speech_text": "..."
+  }},
+  "fulfulde": {{
+    "description_terrain": "...",
+    "propositions": ["..."],
+    "decoupage_terrain": "...",
+    "calendrier": ["..."],
+    "gestion_eau": "...",
+    "speech_text": "..."
+  }},
+  "gourounsi": {{
+    "description_terrain": "...",
+    "propositions": ["..."],
+    "decoupage_terrain": "...",
+    "calendrier": ["..."],
+    "gestion_eau": "...",
+    "speech_text": "..."
+  }},
+  "bissa": {{
+    "description_terrain": "...",
+    "propositions": ["..."],
+    "decoupage_terrain": "...",
+    "calendrier": ["..."],
+    "gestion_eau": "...",
+    "speech_text": "..."
+  }}
 }}
 
 RETOURNE SEULEMENT LE JSON PUR."""
@@ -2820,6 +2911,20 @@ def _serialize_offline_generated_entry(entry: OfflineKnowledgeEntryDB) -> Dict[s
     tags = _load_json_list(entry.tags_json)
     response_payload = _parse_offline_response_json(entry)
     keywords = _extract_offline_keywords(tags, entry.title, entry.question, entry.answer)
+    
+    # Check media presence status before stripping
+    has_image = bool(response_payload.get("image_base64") or response_payload.get("imageBase64"))
+    has_video = bool(response_payload.get("video_url") or response_payload.get("video_base64") or response_payload.get("videoBase64") or response_payload.get("video_steps"))
+    
+    # Strip massive base64 strings to prevent client OutOfMemoryError
+    keys_to_strip = ["image_base64", "imageBase64", "video_base64", "videoBase64", "input_photo_base64"]
+    for key in keys_to_strip:
+        if key in response_payload:
+            del response_payload[key]
+        if "diagnostic" in response_payload and isinstance(response_payload["diagnostic"], dict):
+            if key in response_payload["diagnostic"]:
+                del response_payload["diagnostic"][key]
+
     return {
         "id": f"generated-{entry.id}",
         "domain": entry.domain,
@@ -2831,8 +2936,8 @@ def _serialize_offline_generated_entry(entry: OfflineKnowledgeEntryDB) -> Dict[s
         "language": "fr",
         "source": f"generated:{entry.source_kind}",
         "source_kind": entry.source_kind,
-        "has_image": bool(response_payload.get("image_base64")),
-        "has_video": bool(response_payload.get("video_url") or response_payload.get("video_base64") or response_payload.get("video_steps")),
+        "has_image": has_image,
+        "has_video": has_video,
         "image_description": response_payload.get("image_description"),
         "video_description": response_payload.get("video_description"),
         "video_steps": response_payload.get("video_steps"),
@@ -3170,10 +3275,10 @@ FORMAT JSON:
                     analysis_json = json.loads(json_str)
                     print(f"✅ JSON parsé avec succès: {analysis_json.get('disease_detected', 'N/A')}")
                 else:
-                    print(f"⚠️ Pas de JSON trouvé dans la réponse")
+                    print(f"[WARN] Pas de JSON trouvé dans la réponse")
                     
             except json.JSONDecodeError as je:
-                print(f"⚠️ JSON parsing error: {je}")
+                print(f"[WARN] JSON parsing error: {je}")
                 # Essayer de nettoyer et re-parser
                 try:
                     # Remplacer characteres problématiques
@@ -3195,7 +3300,7 @@ FORMAT JSON:
                         detected = 'Détecté' if keyword not in ['aucun', 'aucune', 'normal', 'sain'] else 'Aucune maladie'
                         break
                 
-                print(f"⚠️ Utilisant response par défaut avec keyword matching")
+                print(f"[WARN] Utilisant response par défaut avec keyword matching")
                 analysis_json = {
                     "disease_detected": detected,
                     "confidence": 0.4,
@@ -3738,11 +3843,32 @@ def _validate_user_credentials(phone_number: str, password: str) -> None:
 # INITIALISATION AU DÉMARRAGE
 # ==========================================
 
+def _run_startup_migrations(db: Session):
+    """S'assurer que les colonnes audio_url existent dans les tables messages et chat_messages."""
+    from sqlalchemy import text
+    # 1. messages
+    try:
+        db.execute(text("ALTER TABLE messages ADD COLUMN audio_url TEXT;"))
+        db.commit()
+        print("[OK] Migration startup: audio_url ajoutée à la table messages")
+    except Exception:
+        db.rollback()
+        
+    # 2. chat_messages
+    try:
+        db.execute(text("ALTER TABLE chat_messages ADD COLUMN audio_url TEXT;"))
+        db.commit()
+        print("[OK] Migration startup: audio_url ajoutée à la table chat_messages")
+    except Exception:
+        db.rollback()
+
+
 @app.on_event("startup")
 async def startup_seed_data():
     """Initialiser les données minimales au démarrage, y compris sous Gunicorn."""
     try:
         db = SessionLocal()
+        _run_startup_migrations(db)
         existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
         if not existing:
             expert = Expert(
@@ -3754,28 +3880,53 @@ async def startup_seed_data():
             )
             db.add(expert)
             db.commit()
-            print("✓ Expert test créé: test@resolvehub.bf / test123")
+            print("[OK] Expert test créé: test@resolvehub.bf / test123")
 
         try:
             load_knowledge_from_json(db)
             total_items = db.query(KnowledgeItem).count()
-            print(f"✓ Base de connaissances chargée ({total_items} fiches)")
+            print(f"[OK] Base de connaissances chargée ({total_items} fiches)")
         except Exception as e_load:
-            print(f"⚠️ Erreur chargement base de connaissances: {e_load}")
+            print(f"[WARN] Erreur chargement base de connaissances: {e_load}")
+
+        try:
+            # Seed default emergency numbers if empty
+            if db.query(EmergencyNumber).count() == 0:
+                defaults = [
+                    # MAERAH
+                    {"label": "🌾 MAERAH - Numéro vert", "number": "(+226) 51 51 34 04", "description": "Numéro vert officiel du Ministère de l'Agriculture, de l'Eau, des Ressources Animales et Halieutiques.", "display_order": 1},
+                    {"label": "🌾 MAERAH - Standard central", "number": "(+226) 25 49 99 00 à 09", "description": "Standard central (secrétariat et directions à Ouaga 2000).", "display_order": 2},
+                    # Urgences Sécuritaires
+                    {"label": "🛡️ CNVA - Alerte sécurité", "number": "10 10", "description": "Centre National de Veille et d'Alerte, numéro d'urgence gratuit pour signaler attaques, suspects ou coupeurs de route.", "display_order": 3},
+                    {"label": "🛡️ Collaboration FDS - Terrorisme", "number": "199", "description": "Ligne verte d'urgence dédiée au signalement d'actes de terrorisme et collaboration avec les FDS.", "display_order": 4},
+                    {"label": "🛡️ Anti-corruption", "number": "80 00 11 50", "description": "Numéro vert anti-corruption pour dénoncer anonymement les manquements.", "display_order": 5},
+                    # Urgences Sanitaires
+                    {"label": "🩺 Urgence Sanitaire - CORUS", "number": "35 35", "description": "Numéro vert du CORUS pour signaler toute menace ou urgence liée à la santé publique.", "display_order": 6},
+                    {"label": "🩺 Protection Civile", "number": "112", "description": "Ligne d'urgence d'assistance générale et de protection civile.", "display_order": 7},
+                    # Lignes directes
+                    {"label": "📞 Police Nationale (Standard)", "number": "(+226) 25 31 68 91", "description": "Ligne d'assistance directe en cas de saturation.", "display_order": 8},
+                    {"label": "📞 Sapeurs-Pompiers", "number": "(+226) 25 40 96 96 / 25 40 26", "description": "Sapeurs-Pompiers (Ouagadougou) en cas de saturation.", "display_order": 9},
+                ]
+                for item in defaults:
+                    db.add(EmergencyNumber(**item))
+                db.commit()
+                print("[OK] Numéros d'urgence par défaut créés")
+        except Exception as e_emerg:
+            print(f"[WARN] Erreur initialisation numéros d'urgence: {e_emerg}")
 
         try:
             _ensure_audio_map_store()
             migrated_entries = _upsert_expert_local_knowledge_from_legacy_seed(db)
             if migrated_entries > 0:
-                print(f"✓ Fiches locales expertes migrées ({migrated_entries})")
+                print(f"[OK] Fiches locales expertes migrées ({migrated_entries})")
         except Exception as e_local_knowledge:
-            print(f"⚠️ Erreur initialisation studio expert local: {e_local_knowledge}")
+            print(f"[WARN] Erreur initialisation studio expert local: {e_local_knowledge}")
 
         try:
             backfilled = _backfill_resolved_tickets_to_offline_corpus(db)
-            print(f"✓ Corpus offline enrichi depuis {backfilled} tickets resolus")
+            print(f"[OK] Corpus offline enrichi depuis {backfilled} tickets resolus")
         except Exception as e_backfill:
-            print(f"⚠️ Erreur backfill tickets resolus: {e_backfill}")
+            print(f"[WARN] Erreur backfill tickets resolus: {e_backfill}")
         finally:
             db.close()
     except Exception as e:
@@ -3809,11 +3960,11 @@ def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json"
         with open(file_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except Exception as e:
-        print(f"⚠️ Impossible de charger {file_path}: {e}")
+        print(f"[WARN] Impossible de charger {file_path}: {e}")
         return
 
     if not isinstance(raw, list):
-        print("⚠️ knowledge_base.json doit contenir une liste d'entrées")
+        print("[WARN] knowledge_base.json doit contenir une liste d'entrées")
         return
 
     for item in raw:
@@ -3830,7 +3981,7 @@ def load_knowledge_from_json(db: Session, file_path: str = "knowledge_base.json"
                 media=item.get("media"),
             )
         except Exception as e:
-            print(f"⚠️ Erreur lors de l'import d'une entrée de connaissance: {e}")
+            print(f"[WARN] Erreur lors de l'import d'une entrée de connaissance: {e}")
 
     db.commit()
 
@@ -4378,7 +4529,7 @@ def generate_llm_answer_with_general_knowledge(
                 return call_gemini()
             except Exception as gemini_exc:
                 provider_errors.append(f"gemini: {gemini_exc}")
-                print(f"⚠️ Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
+                print(f"[WARN] Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
                 return None
     else:
         try:
@@ -4390,7 +4541,7 @@ def generate_llm_answer_with_general_knowledge(
                 return call_openai()
             except Exception as openai_exc:
                 provider_errors.append(f"openai: {openai_exc}")
-                print(f"⚠️ Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
+                print(f"[WARN] Erreur complete (generate_llm_answer_with_general_knowledge): {' | '.join(provider_errors)}")
                 return None
 
 
@@ -4655,10 +4806,10 @@ def generate_llm_answer(
             f"FICHES DE CONNAISSANCE DISPONIBLES :\n{context_text}\n\n"
             "INSTRUCTIONS STRICTES :\n"
             "1️⃣ Commence OBLIGATOIREMENT par : 'D'après l'analyse de ta photo :'\n"
-            "2️⃣ Expose d'abord le diagnostic détecté\n"
-            "3️⃣ Donne des actions CONCRÈTES basées sur ce diagnostic\n"
-            "4️⃣ Dis clairement si expert est nécessaire\n"
-            "5️⃣ Max 10-15 phrases. Langage SIMPLE.\n"
+            "2️⃣ Expose d'abord le diagnostic détecté de façon ultra-brève\n"
+            "3️⃣ Donne des actions ultra-brèves basées sur ce diagnostic (max 2 actions)\n"
+            "4️⃣ Dis clairement en 1 courte phrase si un expert est nécessaire\n"
+            "5️⃣ Sois extrêmement bref et concis. Maximum 4 à 5 courtes phrases simples au total pour faciliter la traduction.\n"
             "6️⃣ Ne varie PAS du diagnostic. S'il y a des fiches pertinentes, base-toi dessus.\n"
             "Si tu n'as pas assez d'infos des fiches, dis-le franchement.\n\n"
             f"{focus_instruction}"
@@ -4674,32 +4825,17 @@ def generate_llm_answer(
             f"{focus_instruction}"
             f"{conversation_text}\n"
             "✅ STRUCTURE OBLIGATOIRE POUR CONSULTATION EN LIGNE:\n\n"
-            "1️⃣ **DIAGNOSTIC & ANALYSE** (2-3 phrases max):\n"
-            "   → Ce que tu comprends du problème de l'utilisateur\n"
-            "   → Pourquoi c'est important d'agir\n\n"
-            "2️⃣ **RECOMMANDATIONS PRATIQUES** (5-7 étapes numérotées 1., 2., 3., etc):\n"
-            "   → Actions concrètes que l'utilisateur peut faire MAINTENANT\n"
-            "   → Étapes réalistes au Burkina Faso (sans équipement avancé)\n"
-            "   → Chaque point doit être actionnable immédiatement\n\n"
-            "3️⃣ **SOLUTIONS/RESSOURCES LOCALES** (si applicable):\n"
-            "   → Produits ou services disponibles au Burkina Faso\n"
-            "   → Remèdes locaux efficaces\n"
-            "   → Contacts ou où trouver aide (agent agricole, vétérinaire local, etc)\n\n"
-            "4️⃣ **QUAND CONSULTER UN EXPERT** (critères très clairs):\n"
-            "   → Signes d'urgence à monitorer\n"
-            "   → S'il y a [condition X], impossible d'attendre\n"
-            "   → Contact: agent agricole/vétérinaire/service de santé local\n\n"
-            "5️⃣ **PRÉVENTION** (1-2 phrases):\n"
-            "   → Comment éviter ce problème à l'avenir\n"
-            "   → Bonnes pratiques pour durabilité\n\n"
+            "1️⃣ **DIAGNOSTIC & ANALYSE** (1 phrase max):\n"
+            "   → Ce que tu comprends du problème de l'utilisateur de façon très brève.\n\n"
+            "2️⃣ **RECOMMANDATIONS PRATIQUES** (3 étapes max, numérotées 1., 2., 3.):\n"
+            "   → Actions concrètes ultra-brèves (max 8 mots par étape) adaptées au Burkina Faso.\n\n"
+            "3️⃣ **QUAND CONSULTER UN EXPERT** (1 phrase max):\n"
+            "   → Recommandation claire de consulter un expert local (vétérinaire/agronome/santé).\n\n"
             "⚠️ RÈGLES STRICTES:\n"
             "- Langage TRÈS SIMPLE (populations peu alphabétisées Burkina Faso)\n"
-            "- Phrases COURTES (max 15-20 mots par phrase)\n"
-            "- PAS de jargon technique sans explication\n"
+            "- Phrases COURTES (max 10 mots par phrase)\n"
             "- BASÉ 100% sur les fiches fournies\n"
-            "- Si fiches insuffisantes: dis clairement 'Je n'ai pas assez d'infos spécialisées, consulte un expert local pour vérification'\n"
-            "- TOUJOURS recommander expert si: situation complexe, doute OU danger potentiel\n"
-            "- MAX 15-20 phrases TOTAL (sois concis mais complet)\n"
+            "- Sois extrêmement bref et concis : maximum 4 à 6 phrases au total pour faciliter la traduction.\n"
             "- Utilise français clair + mots locaux si approprié (ex: 'zaï', 'daba', 'vétérinaire')"
         )
 
@@ -4736,7 +4872,7 @@ def generate_llm_answer(
                 return call_gemini()
             except Exception as gemini_exc:
                 provider_errors.append(f"gemini: {gemini_exc}")
-                print(f"⚠️ Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
+                print(f"[WARN] Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
                 return build_structured_from_rag()
     else:
         try:
@@ -4748,7 +4884,7 @@ def generate_llm_answer(
                 return call_openai()
             except Exception as openai_exc:
                 provider_errors.append(f"openai: {openai_exc}")
-                print(f"⚠️ Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
+                print(f"[WARN] Erreur complete (generate_llm_answer): {' | '.join(provider_errors)}")
                 return build_structured_from_rag()
 
 # ==========================================
@@ -4838,54 +4974,54 @@ async def get_authenticated_user(current_user: User = Depends(get_current_user))
     return serialize_user(current_user)
 
 
-@app.get("/api/dashboard")
-async def get_user_dashboard(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    recent_questions = await get_user_tickets(current_user.phone_number, db)
-    recent_questions = recent_questions[:5]
-
-    preferred_domain = next(
-        (item.get("category") for item in recent_questions if item.get("category")),
-        "agriculture",
-    )
-    ai_suggestions = retrieve_knowledge(db, preferred_domain, preferred_domain, limit=3)
-
-    community_messages = (
-        db.query(ChatMessageDB)
-        .filter(ChatMessageDB.is_hidden == False)
-        .order_by(ChatMessageDB.created_at.desc())
-        .limit(6)
-        .all()
-    )
-
-    return {
-        "user": serialize_user(current_user),
-        "recent_questions": recent_questions,
-        "ai_suggestions": [
-            {
-                "id": item.get("id"),
-                "title": item.get("title"),
-                "answer": item.get("answer"),
-                "domain": item.get("domain"),
-                "tags": item.get("tags") or [],
-            }
-            for item in ai_suggestions
-        ],
-        "community_activity": [
-            {
-                "id": message.id,
-                "sender": message.sender,
-                "text": message.text,
-                "is_bot": message.is_bot,
-                "created_at": message.created_at.isoformat() if message.created_at else None,
-            }
-            for message in community_messages
-        ],
-    }
-
-
+# @app.get("/api/dashboard")
+# async def get_user_dashboard(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db),
+# ):
+#     recent_questions = await get_user_tickets(current_user.phone_number, db)
+#     recent_questions = recent_questions[:5]
+# 
+#     preferred_domain = next(
+#         (item.get("category") for item in recent_questions if item.get("category")),
+#         "agriculture",
+#     )
+#     ai_suggestions = retrieve_knowledge(db, preferred_domain, preferred_domain, limit=3)
+# 
+#     community_messages = (
+#         db.query(ChatMessageDB)
+#         .filter(ChatMessageDB.is_hidden == False)
+#         .order_by(ChatMessageDB.created_at.desc())
+#         .limit(6)
+#         .all()
+#     )
+# 
+#     return {
+#         "user": serialize_user(current_user),
+#         "recent_questions": recent_questions,
+#         "ai_suggestions": [
+#             {
+#                 "id": item.get("id"),
+#                 "title": item.get("title"),
+#                 "answer": item.get("answer"),
+#                 "domain": item.get("domain"),
+#                 "tags": item.get("tags") or [],
+#             }
+#             for item in ai_suggestions
+#         ],
+#         "community_activity": [
+#             {
+#                 "id": message.id,
+#                 "sender": message.sender,
+#                 "text": message.text,
+#                 "is_bot": message.is_bot,
+#                 "created_at": message.created_at.isoformat() if message.created_at else None,
+#             }
+#             for message in community_messages
+#         ],
+#     }
+# 
+# 
 @app.post("/api/scanner/analyze")
 async def analyze_scanner_photo(
     data: MobileQuestionCreate,
@@ -5139,9 +5275,11 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
             "location": user.location if user else None
         },
         "messages": [{
+            "id": msg.id,
             "content": msg.content,
             "sender_type": msg.sender_type,
-            "sent_at": msg.sent_at
+            "sent_at": msg.sent_at,
+            "audio_url": _build_upload_url(msg.audio_url) if msg.audio_url else None
         } for msg in messages]
     }
 
@@ -5329,13 +5467,13 @@ Appelez les secours pendant que vous effectuez ces gestes
         fallback_used = knowledge_result['knowledge_fallback_used']
         
         if knowledge_mode == "rag_strict":
-            print(f"✓ [RAG-STRICT] {len(rag_items)} fiche(s) trouvée(s) dans le domaine exact")
+            print(f"[OK] [RAG-STRICT] {len(rag_items)} fiche(s) trouvée(s) dans le domaine exact")
         elif knowledge_mode == "rag_expanded":
             print(f"⚠ [RAG-EXPANDED] {len(rag_items)} fiche(s) trouvée(s) (recherche élargie dans d'autres domaines)")
         elif knowledge_mode == "llm_general_knowledge":
-            print(f"⚡ [LLM-GENERAL] Pas de fiche RAG, utilisation des connaissances générales de Lia")
+            print(f"[INFO] [LLM-GENERAL] Pas de fiche RAG, utilisation des connaissances générales de Lia")
         elif knowledge_mode == "no_match":
-            print(f"✗ [NO-MATCH] Aucune connaissance trouvée, réponse générique")
+            print(f"[ERROR] [NO-MATCH] Aucune connaissance trouvée, réponse générique")
         
         for idx, item in enumerate(rag_items, start=1):
             print(f"  - FICHE {idx}: {item.get('title')} (domaine: {item.get('domain')})")
@@ -5434,9 +5572,20 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     Utilisé par l'application pour discuter avec l'IA et affiner le problème.
     Aucun Ticket/Message n'est créé ici, uniquement une réponse IA.
     """
+    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            from burkina_translator import translate_query_to_french
+            translated_text = translate_query_to_french(data.content, target_lang, GEMINI_API_KEY)
+            print(f"[TRANSLATOR] Traduction requête locale assistant legacy ({target_lang} -> fr): '{data.content}' -> '{translated_text}'")
+            data.content = translated_text
+        except Exception as e_trans:
+            print(f"[TRANSLATOR] Erreur traduction requête locale assistant legacy: {e_trans}")
 
     # 1. Analyse IA texte
     ai_result = ai_engine.classify(data.content)
+
 
     # 2. Déterminer la catégorie finale et le domaine RAG
     nlp_category = ai_result.get("category", "agriculture")
@@ -5551,13 +5700,13 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     try:
         knowledge_mode = knowledge_result['knowledge_mode']
         if knowledge_mode == "rag_strict":
-            print(f"✓ [ASSISTANT] RAG-STRICT | {len(rag_items)} fiches trouvées")
+            print(f"[OK] [ASSISTANT] RAG-STRICT | {len(rag_items)} fiches trouvées")
         elif knowledge_mode == "rag_expanded":
             print(f"⚠ [ASSISTANT] RAG-EXPANDED | {len(rag_items)} fiches (recherche élargie)")
         elif knowledge_mode == "llm_general_knowledge":
-            print(f"⚡ [ASSISTANT] LLM-GENERAL | Connaissances générales sans RAG")
+            print(f"[INFO] [ASSISTANT] LLM-GENERAL | Connaissances générales sans RAG")
         elif knowledge_mode == "no_match":
-            print(f"✗ [ASSISTANT] NO-MATCH | Aucune source disponible")
+            print(f"[ERROR] [ASSISTANT] NO-MATCH | Aucune source disponible")
     except Exception as e:
         print(f"[ASSISTANT] Log error: {e}")
 
@@ -5596,6 +5745,37 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         response["video_description"] = video_result.get("video_description")
         response["video_steps"] = video_result.get("steps_visuelles")
 
+    # ── TRADUCTION DE LA REPONSE VERS LA LANGUE LOCALE ───────────────────────
+    # Sans ca, la reponse construite plus haut reste toujours en francais meme
+    # quand l'utilisateur a choisi une langue locale (Moore, Dioula, ...) : le
+    # client vocal ne fait qu'une traduction cote app fragile et silencieuse en
+    # cas d'echec. On traduit ici directement les champs texte principaux, en
+    # remplacant leur valeur francaise par la traduction (le francais original
+    # reste disponible dans conversation_context / ai_analysis).
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            from burkina_translator import translate_fields
+            fields_to_translate: Dict[str, str] = {}
+            if response.get("llm_answer"):
+                fields_to_translate["llm_answer"] = response["llm_answer"]
+            if response.get("rag_fallback_answer"):
+                fields_to_translate["rag_fallback_answer"] = response["rag_fallback_answer"]
+
+            if fields_to_translate:
+                translated_fields = translate_fields(
+                    fields_to_translate, target_lang, GEMINI_API_KEY, chosen_category
+                )
+                for field_name, result in translated_fields.items():
+                    translated_value = (result or {}).get("translation")
+                    if translated_value:
+                        response[field_name] = translated_value
+
+            response["translated"] = bool(fields_to_translate)
+            response["target_lang"] = target_lang
+            response["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
+        except Exception as e_resp_trans:
+            print(f"[TRANSLATOR] Erreur traduction reponse assistant legacy: {e_resp_trans}")
+
     return response
 
 @app.post("/api/tickets/{ticket_id}/reply")
@@ -5623,6 +5803,54 @@ async def reply_to_ticket(
     
     db.commit()
     return {"status": "success"}
+
+
+@app.post("/api/tickets/{ticket_id}/reply-audio")
+async def reply_to_ticket_with_audio(
+    ticket_id: int,
+    audio_file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Permet à l'expert de répondre par message vocal à un ticket."""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    # Sauvegarder le fichier audio
+    audio_dir = "uploads/audio/expert-replies"
+    os.makedirs(audio_dir, exist_ok=True)
+    
+    ext = os.path.splitext(audio_file.filename or "audio.webm")[1].lower() or ".webm"
+    allowed_audio_exts = [".webm", ".ogg", ".mp3", ".wav", ".m4a", ".mp4", ".mpeg"]
+    if ext not in allowed_audio_exts:
+        ext = ".webm"
+    
+    filename = f"expert_reply_{ticket_id}_{int(time.time())}{ext}"
+    filepath = os.path.join(audio_dir, filename)
+    
+    content_bytes = await audio_file.read()
+    with open(filepath, "wb") as buffer:
+        buffer.write(content_bytes)
+    
+    audio_relative_path = f"uploads/audio/expert-replies/{filename}"
+    
+    # Créer le message avec audio_url
+    message = Message(
+        ticket_id=ticket_id,
+        sender_type="expert",
+        sender_id=1,
+        content="🔊 Réponse vocale de l'expert",
+        channel="web",
+        audio_url=audio_relative_path
+    )
+    db.add(message)
+    
+    if not ticket.expert_id:
+        ticket.expert_id = 1
+        ticket.status = "assigned"
+    
+    db.commit()
+    return {"status": "success", "audio_url": f"/{audio_relative_path}"}
 
 @app.post("/api/tickets/{ticket_id}/send-to-expert")
 async def send_ticket_to_expert(
@@ -6191,7 +6419,7 @@ async def delete_audio_mapping(key: str, language: str):
 @app.get("/api/admin/settings")
 async def get_system_settings():
     """Récupère les réglages système (Voice ID, etc)."""
-    settings_path = "backend/system_settings.json"
+    settings_path = os.path.join(BACKEND_DIR, "system_settings.json")
     default_settings = {
         "elevenlabs_voice_id": "EXAVITQu4vr4xnSDxMaL", # Bella par défaut
         "ai_model": "eleven_multilingual_v2",
@@ -6211,7 +6439,7 @@ async def get_system_settings():
 @app.post("/api/admin/settings")
 async def update_system_settings(payload: Dict[str, Any]):
     """Met à jour les réglages système."""
-    settings_path = "backend/system_settings.json"
+    settings_path = os.path.join(BACKEND_DIR, "system_settings.json")
     existing = {}
     if os.path.exists(settings_path):
         try:
@@ -6231,6 +6459,10 @@ async def create_broadcast(
     file: UploadFile = File(...),
     title: str = Form(...),
     category: str = Form("general"),
+    language: str = Form("Français"),
+    region: str = Form("Toutes"),
+    description: str = Form(""),
+    offline_allowed: bool = Form(True),
 ):
     """Crée une nouvelle diffusion communautaire (Journal Vocal)."""
     os.makedirs("uploads/broadcasts", exist_ok=True)
@@ -6241,7 +6473,7 @@ async def create_broadcast(
         shutil.copyfileobj(file.file, buffer)
     
     # Enregistrer dans broadcasts.json
-    db_path = "backend/broadcasts.json"
+    db_path = os.path.join(BACKEND_DIR, "broadcasts.json")
     broadcasts = []
     if os.path.exists(db_path):
         try:
@@ -6253,6 +6485,10 @@ async def create_broadcast(
         "id": int(time.time()),
         "title": title,
         "category": category,
+        "language": language,
+        "region": region,
+        "description": description,
+        "offline_allowed": offline_allowed,
         "audio_url": f"/uploads/broadcasts/{filename}",
         "timestamp": datetime.now().isoformat(),
         "listeners": 0
@@ -6267,7 +6503,7 @@ async def create_broadcast(
 @app.get("/api/community/broadcasts")
 async def get_broadcasts():
     """Récupère les dernières diffusions pour l'app mobile."""
-    db_path = "backend/broadcasts.json"
+    db_path = os.path.join(BACKEND_DIR, "broadcasts.json")
     if not os.path.exists(db_path):
         return []
     try:
@@ -6275,7 +6511,7 @@ async def get_broadcasts():
             return json.load(f)
     except:
         return []
-
+# 
 @app.post("/api/admin/upload")
 async def upload_general_file(file: UploadFile = File(...)):
     """Upload un fichier générique (image, audio, etc) vers le dossier uploads."""
@@ -6685,7 +6921,7 @@ async def translate_localization_payload(
 async def list_expert_local_knowledge(
     category: Optional[str] = None,
     language: Optional[str] = None,
-    limit: int = Query(default=200, le=500),
+    limit: int = Query(default=200, le=10000),
     db: Session = Depends(get_db),
 ):
     query = db.query(ExpertLocalKnowledgeDB)
@@ -6970,6 +7206,7 @@ class ChatMessageDB(Base):
     is_hidden = Column(Boolean, default=False)
     is_pinned = Column(Boolean, default=False)
     pinned_at = Column(DateTime, nullable=True)
+    audio_url = Column(String, nullable=True)  # URL du fichier audio communautaire
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -7056,8 +7293,8 @@ class CommunityCaseFollowUpDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
-
-
+# 
+# 
 def _ensure_community_case_media_columns() -> None:
     try:
         with engine.connect() as conn:
@@ -7088,7 +7325,7 @@ def _ensure_community_case_media_columns() -> None:
                     "ALTER TABLE community_case_followups ADD COLUMN IF NOT EXISTS audio_paths_json TEXT"
                 )
     except Exception as e:
-        print(f"⚠️ Impossible d'ajouter les colonnes audio des cas terrain: {e}")
+        print(f"[WARN] Impossible d'ajouter les colonnes audio des cas terrain: {e}")
 
 
 _ensure_community_case_media_columns()
@@ -7096,56 +7333,29 @@ _ensure_community_case_media_columns()
 
 def _ensure_sos_description_column() -> None:
     """Migration: ajouter la colonne 'description' à sos_alerts si absente."""
-    if not str(engine.url).startswith("sqlite"):
-        return
     try:
         with engine.connect() as conn:
-            result = conn.exec_driver_sql("PRAGMA table_info(sos_alerts)")
-            columns = [row[1] for row in result]
-            if "description" not in columns:
-                conn.exec_driver_sql("ALTER TABLE sos_alerts ADD COLUMN description TEXT")
+            _add_column_if_missing(conn, "sos_alerts", "description", "TEXT", "TEXT")
+            conn.commit()
     except Exception as e:
-        print(f"⚠️ Impossible d'ajouter la colonne 'description' à sos_alerts: {e}")
+        print(f"[WARN] Impossible d'ajouter la colonne 'description' à sos_alerts: {e}")
 
 _ensure_sos_description_column()
 
 
 def _ensure_chat_message_columns() -> None:
     """Migration légère pour enrichir le module communauté."""
-    if not str(engine.url).startswith("sqlite"):
-        return
-
     try:
         with engine.connect() as conn:
-            result = conn.exec_driver_sql("PRAGMA table_info(chat_messages)")
-            columns = [row[1] for row in result]
-
-            if "room" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN room TEXT DEFAULT 'general'"
-                )
-            if "sender_role" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN sender_role TEXT DEFAULT 'member'"
-                )
-            if "report_count" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN report_count INTEGER DEFAULT 0"
-                )
-            if "is_hidden" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN is_hidden BOOLEAN DEFAULT 0"
-                )
-            if "is_pinned" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN is_pinned BOOLEAN DEFAULT 0"
-                )
-            if "pinned_at" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN pinned_at DATETIME"
-                )
+            _add_column_if_missing(conn, "chat_messages", "room", "TEXT DEFAULT 'general'", "TEXT DEFAULT 'general'")
+            _add_column_if_missing(conn, "chat_messages", "sender_role", "TEXT DEFAULT 'member'", "TEXT DEFAULT 'member'")
+            _add_column_if_missing(conn, "chat_messages", "report_count", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0")
+            _add_column_if_missing(conn, "chat_messages", "is_hidden", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE")
+            _add_column_if_missing(conn, "chat_messages", "is_pinned", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE")
+            _add_column_if_missing(conn, "chat_messages", "pinned_at", "DATETIME", "TIMESTAMP")
+            conn.commit()
     except Exception as e:
-        print(f"⚠️ Impossible d'ajouter les colonnes de communauté: {e}")
+        print(f"[WARN] Impossible d'ajouter les colonnes de communauté: {e}")
 
 
 _ensure_chat_message_columns()
@@ -7178,7 +7388,7 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
         try:
             import httpx
             sys_settings = {}
-            settings_path = "backend/system_settings.json"
+            settings_path = os.path.join(BACKEND_DIR, "system_settings.json")
             if os.path.exists(settings_path):
                 try:
                     with open(settings_path, "r", encoding="utf-8") as f:
@@ -7233,7 +7443,7 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
                 async with httpx.AsyncClient() as client:
                     await client.post(url, headers=headers, data=data, timeout=5.0)
         except Exception as alert_err:
-            print(f"⚠️ Erreur lors de l'envoi de la notification externe: {alert_err}")
+            print(f"[WARN] Erreur lors de l'envoi de la notification externe: {alert_err}")
 
         
         print(f"🚨 ALERTE SOS REÇUE - Type: {alert.type}, Tel: {alert.phoneNumber}")
@@ -7425,342 +7635,343 @@ def _community_person_filter(phone_field: Any, name_field: Any, phone_number: Op
     return name_field == (name or "")
 
 
-def _build_community_contributor_profile(
-    db: Session,
-    *,
-    name: Optional[str],
-    phone_number: Optional[str],
-    preferred_role: Optional[str] = None,
-    is_expert: bool = False,
-) -> Dict[str, Any]:
-    display_name = (name or "Membre SONGRA").strip() or "Membre SONGRA"
-    if is_expert or preferred_role == "expert":
-        role_key = "expert"
-        return {
-            "name": display_name,
-            "role_key": role_key,
-            "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
-            "case_count": 0,
-            "solution_count": 0,
-            "confirmation_count": 0,
-            "follow_up_count": 0,
-        }
-
-    case_count = db.query(CommunityFieldCaseDB).filter(
-        _community_person_filter(
-            CommunityFieldCaseDB.reporter_phone,
-            CommunityFieldCaseDB.reporter_name,
-            phone_number,
-            display_name,
-        )
-    ).count()
-    solution_count = db.query(CommunitySolutionDB).filter(
-        _community_person_filter(
-            CommunitySolutionDB.author_phone,
-            CommunitySolutionDB.author_name,
-            phone_number,
-            display_name,
-        )
-    ).count()
-    confirmation_count = db.query(CommunityCaseConfirmationDB).filter(
-        _community_person_filter(
-            CommunityCaseConfirmationDB.confirmer_phone,
-            CommunityCaseConfirmationDB.confirmer_name,
-            phone_number,
-            display_name,
-        )
-    ).count()
-    follow_up_count = db.query(CommunityCaseFollowUpDB).filter(
-        _community_person_filter(
-            CommunityCaseFollowUpDB.author_phone,
-            CommunityCaseFollowUpDB.author_name,
-            phone_number,
-            display_name,
-        )
-    ).count()
-
-    if preferred_role in {"observer", "solver", "referent"}:
-        role_key = preferred_role
-    elif solution_count >= 3 and follow_up_count >= 1:
-        role_key = "referent"
-    elif solution_count >= 2:
-        role_key = "solver"
-    elif case_count + confirmation_count + follow_up_count >= 3:
-        role_key = "observer"
-    else:
-        role_key = "member"
-
-    return {
-        "name": display_name,
-        "role_key": role_key,
-        "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
-        "case_count": case_count,
-        "solution_count": solution_count,
-        "confirmation_count": confirmation_count,
-        "follow_up_count": follow_up_count,
-    }
-
-
-def _serialize_community_solution_feedback_counts(db: Session, solution_id: int) -> Dict[str, int]:
-    rows = (
-        db.query(
-            CommunitySolutionFeedbackDB.feedback_type,
-            func.count(CommunitySolutionFeedbackDB.id),
-        )
-        .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
-        .group_by(CommunitySolutionFeedbackDB.feedback_type)
-        .all()
-    )
-    counts = {"useful": 0, "tested": 0, "worked": 0, "failed": 0}
-    for feedback_type, total in rows:
-        if feedback_type in counts:
-            counts[feedback_type] = int(total or 0)
-    return counts
-
-
-def _serialize_community_solution(db: Session, solution: CommunitySolutionDB) -> Dict[str, Any]:
-    feedback = _serialize_community_solution_feedback_counts(db, solution.id)
-    contributor = _build_community_contributor_profile(
-        db,
-        name=solution.author_name,
-        phone_number=solution.author_phone,
-        preferred_role=solution.contributor_role,
-        is_expert=bool(solution.is_expert),
-    )
-    return {
-        "id": solution.id,
-        "case_id": solution.case_id,
-        "author": contributor,
-        "text": solution.text,
-        "action_taken": solution.action_taken,
-        "cost_note": solution.cost_note,
-        "delay_note": solution.delay_note,
-        "result_status": solution.result_status,
-        "photos": _serialize_community_photo_urls(solution.photo_paths_json),
-        "feedback": feedback,
-        "created_at": solution.created_at.isoformat() if solution.created_at else None,
-        "updated_at": solution.updated_at.isoformat() if solution.updated_at else None,
-    }
-
-
-def _serialize_community_confirmation(db: Session, confirmation: CommunityCaseConfirmationDB) -> Dict[str, Any]:
-    return {
-        "id": confirmation.id,
-        "case_id": confirmation.case_id,
-        "contributor": _build_community_contributor_profile(
-            db,
-            name=confirmation.confirmer_name,
-            phone_number=confirmation.confirmer_phone,
-            preferred_role=confirmation.contributor_role,
-        ),
-        "note": confirmation.note,
-        "location_label": confirmation.location_label,
-        "created_at": confirmation.created_at.isoformat() if confirmation.created_at else None,
-    }
-
-
-def _serialize_community_follow_up(db: Session, follow_up: CommunityCaseFollowUpDB) -> Dict[str, Any]:
-    return {
-        "id": follow_up.id,
-        "case_id": follow_up.case_id,
-        "contributor": _build_community_contributor_profile(
-            db,
-            name=follow_up.author_name,
-            phone_number=follow_up.author_phone,
-            preferred_role=follow_up.contributor_role,
-        ),
-        "note": follow_up.note,
-        "status_after": _normalize_community_case_status(follow_up.status_after),
-        "status_after_label": COMMUNITY_CASE_STATUS_LABELS.get(
-            _normalize_community_case_status(follow_up.status_after),
-            COMMUNITY_CASE_STATUS_LABELS["new"],
-        ),
-        "outcome_label": follow_up.outcome_label,
-        "photos": _serialize_community_photo_urls(follow_up.photo_paths_json),
-        "audios": _serialize_community_audio_urls(follow_up.audio_paths_json),
-        "created_at": follow_up.created_at.isoformat() if follow_up.created_at else None,
-    }
-
-
-def _serialize_community_field_case_summary(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
-    solution_count = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.case_id == case.id).count()
-    confirmation_count = db.query(CommunityCaseConfirmationDB).filter(CommunityCaseConfirmationDB.case_id == case.id).count()
-    follow_up_count = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.case_id == case.id).count()
-    contributor = _build_community_contributor_profile(
-        db,
-        name=case.reporter_name,
-        phone_number=case.reporter_phone,
-        preferred_role=case.contributor_role,
-    )
-    normalized_status = _normalize_community_case_status(case.status)
-    normalized_severity = _normalize_community_case_severity(case.severity)
-    tags = _load_json_list(case.tags_json)
-    return {
-        "id": case.id,
-        "room": _normalize_community_room(case.room),
-        "room_label": COMMUNITY_ROOM_LABELS.get(_normalize_community_room(case.room), "General"),
-        "category": case.category,
-        "title": case.title,
-        "description": case.description,
-        "reporter": contributor,
-        "severity": normalized_severity,
-        "severity_label": COMMUNITY_CASE_SEVERITY_LABELS.get(normalized_severity, "Moyenne"),
-        "status": normalized_status,
-        "status_label": COMMUNITY_CASE_STATUS_LABELS.get(normalized_status, "Nouveau"),
-        "location_label": case.location_label,
-        "latitude": case.latitude,
-        "longitude": case.longitude,
-        "crop_or_livestock": case.crop_or_livestock,
-        "tags": tags,
-        "before_photos": _serialize_community_photo_urls(case.before_photo_paths_json),
-        "before_audios": _serialize_community_audio_urls(case.before_audio_paths_json),
-        "after_photos": _serialize_community_photo_urls(case.after_photo_paths_json),
-        "after_audios": _serialize_community_audio_urls(case.after_audio_paths_json),
-        "solution_count": solution_count,
-        "confirmation_count": confirmation_count,
-        "follow_up_count": follow_up_count,
-        "promoted_to_offline": bool(case.promoted_to_offline),
-        "created_at": case.created_at.isoformat() if case.created_at else None,
-        "updated_at": case.updated_at.isoformat() if case.updated_at else None,
-        "resolved_at": case.resolved_at.isoformat() if case.resolved_at else None,
-        "last_follow_up_at": case.last_follow_up_at.isoformat() if case.last_follow_up_at else None,
-    }
-
-
-def _serialize_community_field_case_detail(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
-    summary = _serialize_community_field_case_summary(db, case)
-    solutions = (
-        db.query(CommunitySolutionDB)
-        .filter(CommunitySolutionDB.case_id == case.id)
-        .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
-        .all()
-    )
-    confirmations = (
-        db.query(CommunityCaseConfirmationDB)
-        .filter(CommunityCaseConfirmationDB.case_id == case.id)
-        .order_by(CommunityCaseConfirmationDB.created_at.desc(), CommunityCaseConfirmationDB.id.desc())
-        .all()
-    )
-    follow_ups = (
-        db.query(CommunityCaseFollowUpDB)
-        .filter(CommunityCaseFollowUpDB.case_id == case.id)
-        .order_by(CommunityCaseFollowUpDB.created_at.desc(), CommunityCaseFollowUpDB.id.desc())
-        .all()
-    )
-    summary["solutions"] = [_serialize_community_solution(db, item) for item in solutions]
-    summary["confirmations"] = [_serialize_community_confirmation(db, item) for item in confirmations]
-    summary["follow_ups"] = [_serialize_community_follow_up(db, item) for item in follow_ups]
-    return summary
-
-
-def _build_community_case_offline_payload(case: CommunityFieldCaseDB, solution: Optional[CommunitySolutionDB]) -> Dict[str, Any]:
-    summary_parts: List[str] = []
-    if case.crop_or_livestock:
-        summary_parts.append(f"Sujet: {case.crop_or_livestock}")
-    if case.location_label:
-        summary_parts.append(f"Zone: {case.location_label}")
-    summary_parts.append(case.description)
-    if solution and solution.action_taken:
-        summary_parts.append(f"Action testee: {solution.action_taken}")
-    if solution and solution.text:
-        summary_parts.append(f"Retour terrain: {solution.text}")
-    if solution and solution.delay_note:
-        summary_parts.append(f"Delai observe: {solution.delay_note}")
-    if solution and solution.cost_note:
-        summary_parts.append(f"Cout: {solution.cost_note}")
-
-    diagnostic = {
-        "description": case.title,
-        "type": case.category,
-        "causes": _load_json_list(case.tags_json),
-    }
-    actions = []
-    if solution and solution.action_taken:
-        actions.append({"texte": solution.action_taken})
-    if solution and solution.text:
-        actions.append({"texte": solution.text})
-
-    return {
-        "message": "\n\n".join(part for part in summary_parts if part).strip(),
-        "diagnostic": diagnostic,
-        "actions": actions,
-    }
-
-
-def _promote_community_case_to_offline(db: Session, case: CommunityFieldCaseDB) -> None:
-    if not case or _normalize_community_case_status(case.status) != "resolved":
-        return
-    best_solution = (
-        db.query(CommunitySolutionDB)
-        .filter(CommunitySolutionDB.case_id == case.id)
-        .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
-        .first()
-    )
-    payload = _build_community_case_offline_payload(case, best_solution)
-    _persist_offline_knowledge_entry(
-        db=db,
-        user_id=None,
-        source_kind="community_case",
-        category=case.category,
-        question_text=case.description,
-        response_payload=payload,
-    )
-    case.promoted_to_offline = True
-    db.commit()
-
-
-def _serialize_community_message(message: ChatMessageDB) -> Dict[str, Any]:
-    normalized_room = _normalize_community_room(message.room)
-    sender_role = message.sender_role or ("assistant" if message.is_bot else "member")
-    return {
-        "id": message.id,
-        "sender": message.sender,
-        "text": message.text,
-        "is_bot": message.is_bot,
-        "created_at": message.created_at.isoformat() if message.created_at else None,
-        "room": normalized_room,
-        "room_label": COMMUNITY_ROOM_LABELS.get(normalized_room, "Général"),
-        "sender_role": sender_role,
-        "is_expert": sender_role == "expert",
-        "report_count": message.report_count or 0,
-        "is_pinned": bool(message.is_pinned),
-        "pinned_at": message.pinned_at.isoformat() if message.pinned_at else None,
-    }
-
-
-def _get_pinned_community_message(db: Session, room: str) -> Optional[ChatMessageDB]:
-    return (
-        db.query(ChatMessageDB)
-        .filter(ChatMessageDB.room == room)
-        .filter(ChatMessageDB.is_hidden == False)
-        .filter(ChatMessageDB.is_pinned == True)
-        .order_by(ChatMessageDB.pinned_at.desc(), ChatMessageDB.id.desc())
-        .first()
-    )
-
-
-def _set_pinned_community_message(
-    db: Session,
-    message: ChatMessageDB,
-    pinned: bool,
-) -> ChatMessageDB:
-    db.query(ChatMessageDB).filter(ChatMessageDB.room == message.room).update(
-        {ChatMessageDB.is_pinned: False, ChatMessageDB.pinned_at: None},
-        synchronize_session=False,
-    )
-
-    if pinned:
-        message.is_pinned = True
-        message.pinned_at = datetime.utcnow()
-    else:
-        message.is_pinned = False
-        message.pinned_at = None
-
-    db.commit()
-    db.refresh(message)
-    return message
-
-
+# def _build_community_contributor_profile(
+#     db: Session,
+#     *,
+#     name: Optional[str],
+#     phone_number: Optional[str],
+#     preferred_role: Optional[str] = None,
+#     is_expert: bool = False,
+# ) -> Dict[str, Any]:
+#     display_name = (name or "Membre SONGRA").strip() or "Membre SONGRA"
+#     if is_expert or preferred_role == "expert":
+#         role_key = "expert"
+#         return {
+#             "name": display_name,
+#             "role_key": role_key,
+#             "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
+#             "case_count": 0,
+#             "solution_count": 0,
+#             "confirmation_count": 0,
+#             "follow_up_count": 0,
+#         }
+# 
+#     case_count = db.query(CommunityFieldCaseDB).filter(
+#         _community_person_filter(
+#             CommunityFieldCaseDB.reporter_phone,
+#             CommunityFieldCaseDB.reporter_name,
+#             phone_number,
+#             display_name,
+#         )
+#     ).count()
+#     solution_count = db.query(CommunitySolutionDB).filter(
+#         _community_person_filter(
+#             CommunitySolutionDB.author_phone,
+#             CommunitySolutionDB.author_name,
+#             phone_number,
+#             display_name,
+#         )
+#     ).count()
+#     confirmation_count = db.query(CommunityCaseConfirmationDB).filter(
+#         _community_person_filter(
+#             CommunityCaseConfirmationDB.confirmer_phone,
+#             CommunityCaseConfirmationDB.confirmer_name,
+#             phone_number,
+#             display_name,
+#         )
+#     ).count()
+#     follow_up_count = db.query(CommunityCaseFollowUpDB).filter(
+#         _community_person_filter(
+#             CommunityCaseFollowUpDB.author_phone,
+#             CommunityCaseFollowUpDB.author_name,
+#             phone_number,
+#             display_name,
+#         )
+#     ).count()
+# 
+#     if preferred_role in {"observer", "solver", "referent"}:
+#         role_key = preferred_role
+#     elif solution_count >= 3 and follow_up_count >= 1:
+#         role_key = "referent"
+#     elif solution_count >= 2:
+#         role_key = "solver"
+#     elif case_count + confirmation_count + follow_up_count >= 3:
+#         role_key = "observer"
+#     else:
+#         role_key = "member"
+# 
+#     return {
+#         "name": display_name,
+#         "role_key": role_key,
+#         "role_label": COMMUNITY_CONTRIBUTOR_ROLE_LABELS[role_key],
+#         "case_count": case_count,
+#         "solution_count": solution_count,
+#         "confirmation_count": confirmation_count,
+#         "follow_up_count": follow_up_count,
+#     }
+# 
+# 
+# def _serialize_community_solution_feedback_counts(db: Session, solution_id: int) -> Dict[str, int]:
+#     rows = (
+#         db.query(
+#             CommunitySolutionFeedbackDB.feedback_type,
+#             func.count(CommunitySolutionFeedbackDB.id),
+#         )
+#         .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
+#         .group_by(CommunitySolutionFeedbackDB.feedback_type)
+#         .all()
+#     )
+#     counts = {"useful": 0, "tested": 0, "worked": 0, "failed": 0}
+#     for feedback_type, total in rows:
+#         if feedback_type in counts:
+#             counts[feedback_type] = int(total or 0)
+#     return counts
+# 
+# 
+# def _serialize_community_solution(db: Session, solution: CommunitySolutionDB) -> Dict[str, Any]:
+#     feedback = _serialize_community_solution_feedback_counts(db, solution.id)
+#     contributor = _build_community_contributor_profile(
+#         db,
+#         name=solution.author_name,
+#         phone_number=solution.author_phone,
+#         preferred_role=solution.contributor_role,
+#         is_expert=bool(solution.is_expert),
+#     )
+#     return {
+#         "id": solution.id,
+#         "case_id": solution.case_id,
+#         "author": contributor,
+#         "text": solution.text,
+#         "action_taken": solution.action_taken,
+#         "cost_note": solution.cost_note,
+#         "delay_note": solution.delay_note,
+#         "result_status": solution.result_status,
+#         "photos": _serialize_community_photo_urls(solution.photo_paths_json),
+#         "feedback": feedback,
+#         "created_at": solution.created_at.isoformat() if solution.created_at else None,
+#         "updated_at": solution.updated_at.isoformat() if solution.updated_at else None,
+#     }
+# 
+# 
+# def _serialize_community_confirmation(db: Session, confirmation: CommunityCaseConfirmationDB) -> Dict[str, Any]:
+#     return {
+#         "id": confirmation.id,
+#         "case_id": confirmation.case_id,
+#         "contributor": _build_community_contributor_profile(
+#             db,
+#             name=confirmation.confirmer_name,
+#             phone_number=confirmation.confirmer_phone,
+#             preferred_role=confirmation.contributor_role,
+#         ),
+#         "note": confirmation.note,
+#         "location_label": confirmation.location_label,
+#         "created_at": confirmation.created_at.isoformat() if confirmation.created_at else None,
+#     }
+# 
+# 
+# def _serialize_community_follow_up(db: Session, follow_up: CommunityCaseFollowUpDB) -> Dict[str, Any]:
+#     return {
+#         "id": follow_up.id,
+#         "case_id": follow_up.case_id,
+#         "contributor": _build_community_contributor_profile(
+#             db,
+#             name=follow_up.author_name,
+#             phone_number=follow_up.author_phone,
+#             preferred_role=follow_up.contributor_role,
+#         ),
+#         "note": follow_up.note,
+#         "status_after": _normalize_community_case_status(follow_up.status_after),
+#         "status_after_label": COMMUNITY_CASE_STATUS_LABELS.get(
+#             _normalize_community_case_status(follow_up.status_after),
+#             COMMUNITY_CASE_STATUS_LABELS["new"],
+#         ),
+#         "outcome_label": follow_up.outcome_label,
+#         "photos": _serialize_community_photo_urls(follow_up.photo_paths_json),
+#         "audios": _serialize_community_audio_urls(follow_up.audio_paths_json),
+#         "created_at": follow_up.created_at.isoformat() if follow_up.created_at else None,
+#     }
+# 
+# 
+# def _serialize_community_field_case_summary(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
+#     solution_count = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.case_id == case.id).count()
+#     confirmation_count = db.query(CommunityCaseConfirmationDB).filter(CommunityCaseConfirmationDB.case_id == case.id).count()
+#     follow_up_count = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.case_id == case.id).count()
+#     contributor = _build_community_contributor_profile(
+#         db,
+#         name=case.reporter_name,
+#         phone_number=case.reporter_phone,
+#         preferred_role=case.contributor_role,
+#     )
+#     normalized_status = _normalize_community_case_status(case.status)
+#     normalized_severity = _normalize_community_case_severity(case.severity)
+#     tags = _load_json_list(case.tags_json)
+#     return {
+#         "id": case.id,
+#         "room": _normalize_community_room(case.room),
+#         "room_label": COMMUNITY_ROOM_LABELS.get(_normalize_community_room(case.room), "General"),
+#         "category": case.category,
+#         "title": case.title,
+#         "description": case.description,
+#         "reporter": contributor,
+#         "severity": normalized_severity,
+#         "severity_label": COMMUNITY_CASE_SEVERITY_LABELS.get(normalized_severity, "Moyenne"),
+#         "status": normalized_status,
+#         "status_label": COMMUNITY_CASE_STATUS_LABELS.get(normalized_status, "Nouveau"),
+#         "location_label": case.location_label,
+#         "latitude": case.latitude,
+#         "longitude": case.longitude,
+#         "crop_or_livestock": case.crop_or_livestock,
+#         "tags": tags,
+#         "before_photos": _serialize_community_photo_urls(case.before_photo_paths_json),
+#         "before_audios": _serialize_community_audio_urls(case.before_audio_paths_json),
+#         "after_photos": _serialize_community_photo_urls(case.after_photo_paths_json),
+#         "after_audios": _serialize_community_audio_urls(case.after_audio_paths_json),
+#         "solution_count": solution_count,
+#         "confirmation_count": confirmation_count,
+#         "follow_up_count": follow_up_count,
+#         "promoted_to_offline": bool(case.promoted_to_offline),
+#         "created_at": case.created_at.isoformat() if case.created_at else None,
+#         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
+#         "resolved_at": case.resolved_at.isoformat() if case.resolved_at else None,
+#         "last_follow_up_at": case.last_follow_up_at.isoformat() if case.last_follow_up_at else None,
+#     }
+# 
+# 
+# def _serialize_community_field_case_detail(db: Session, case: CommunityFieldCaseDB) -> Dict[str, Any]:
+#     summary = _serialize_community_field_case_summary(db, case)
+#     solutions = (
+#         db.query(CommunitySolutionDB)
+#         .filter(CommunitySolutionDB.case_id == case.id)
+#         .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
+#         .all()
+#     )
+#     confirmations = (
+#         db.query(CommunityCaseConfirmationDB)
+#         .filter(CommunityCaseConfirmationDB.case_id == case.id)
+#         .order_by(CommunityCaseConfirmationDB.created_at.desc(), CommunityCaseConfirmationDB.id.desc())
+#         .all()
+#     )
+#     follow_ups = (
+#         db.query(CommunityCaseFollowUpDB)
+#         .filter(CommunityCaseFollowUpDB.case_id == case.id)
+#         .order_by(CommunityCaseFollowUpDB.created_at.desc(), CommunityCaseFollowUpDB.id.desc())
+#         .all()
+#     )
+#     summary["solutions"] = [_serialize_community_solution(db, item) for item in solutions]
+#     summary["confirmations"] = [_serialize_community_confirmation(db, item) for item in confirmations]
+#     summary["follow_ups"] = [_serialize_community_follow_up(db, item) for item in follow_ups]
+#     return summary
+# 
+# 
+# def _build_community_case_offline_payload(case: CommunityFieldCaseDB, solution: Optional[CommunitySolutionDB]) -> Dict[str, Any]:
+#     summary_parts: List[str] = []
+#     if case.crop_or_livestock:
+#         summary_parts.append(f"Sujet: {case.crop_or_livestock}")
+#     if case.location_label:
+#         summary_parts.append(f"Zone: {case.location_label}")
+#     summary_parts.append(case.description)
+#     if solution and solution.action_taken:
+#         summary_parts.append(f"Action testee: {solution.action_taken}")
+#     if solution and solution.text:
+#         summary_parts.append(f"Retour terrain: {solution.text}")
+#     if solution and solution.delay_note:
+#         summary_parts.append(f"Delai observe: {solution.delay_note}")
+#     if solution and solution.cost_note:
+#         summary_parts.append(f"Cout: {solution.cost_note}")
+# 
+#     diagnostic = {
+#         "description": case.title,
+#         "type": case.category,
+#         "causes": _load_json_list(case.tags_json),
+#     }
+#     actions = []
+#     if solution and solution.action_taken:
+#         actions.append({"texte": solution.action_taken})
+#     if solution and solution.text:
+#         actions.append({"texte": solution.text})
+# 
+#     return {
+#         "message": "\n\n".join(part for part in summary_parts if part).strip(),
+#         "diagnostic": diagnostic,
+#         "actions": actions,
+#     }
+# 
+# 
+# def _promote_community_case_to_offline(db: Session, case: CommunityFieldCaseDB) -> None:
+#     if not case or _normalize_community_case_status(case.status) != "resolved":
+#         return
+#     best_solution = (
+#         db.query(CommunitySolutionDB)
+#         .filter(CommunitySolutionDB.case_id == case.id)
+#         .order_by(CommunitySolutionDB.created_at.desc(), CommunitySolutionDB.id.desc())
+#         .first()
+#     )
+#     payload = _build_community_case_offline_payload(case, best_solution)
+#     _persist_offline_knowledge_entry(
+#         db=db,
+#         user_id=None,
+#         source_kind="community_case",
+#         category=case.category,
+#         question_text=case.description,
+#         response_payload=payload,
+#     )
+#     case.promoted_to_offline = True
+#     db.commit()
+# 
+# 
+# def _serialize_community_message(message: ChatMessageDB) -> Dict[str, Any]:
+#     normalized_room = _normalize_community_room(message.room)
+#     sender_role = message.sender_role or ("assistant" if message.is_bot else "member")
+#     return {
+#         "id": message.id,
+#         "sender": message.sender,
+#         "text": message.text,
+#         "is_bot": message.is_bot,
+#         "created_at": message.created_at.isoformat() if message.created_at else None,
+#         "room": normalized_room,
+#         "room_label": COMMUNITY_ROOM_LABELS.get(normalized_room, "Général"),
+#         "sender_role": sender_role,
+#         "is_expert": sender_role == "expert",
+#         "report_count": message.report_count or 0,
+#         "is_pinned": bool(message.is_pinned),
+#         "pinned_at": message.pinned_at.isoformat() if message.pinned_at else None,
+#         "audio_url": _build_upload_url(message.audio_url) if message.audio_url else None,
+#     }
+# 
+# 
+# def _get_pinned_community_message(db: Session, room: str) -> Optional[ChatMessageDB]:
+#     return (
+#         db.query(ChatMessageDB)
+#         .filter(ChatMessageDB.room == room)
+#         .filter(ChatMessageDB.is_hidden == False)
+#         .filter(ChatMessageDB.is_pinned == True)
+#         .order_by(ChatMessageDB.pinned_at.desc(), ChatMessageDB.id.desc())
+#         .first()
+#     )
+# 
+# 
+# def _set_pinned_community_message(
+#     db: Session,
+#     message: ChatMessageDB,
+#     pinned: bool,
+# ) -> ChatMessageDB:
+#     db.query(ChatMessageDB).filter(ChatMessageDB.room == message.room).update(
+#         {ChatMessageDB.is_pinned: False, ChatMessageDB.pinned_at: None},
+#         synchronize_session=False,
+#     )
+# 
+#     if pinned:
+#         message.is_pinned = True
+#         message.pinned_at = datetime.utcnow()
+#     else:
+#         message.is_pinned = False
+#         message.pinned_at = None
+# 
+#     db.commit()
+#     db.refresh(message)
+#     return message
+# 
+# 
 def _contains_blocked_community_text(text: str) -> bool:
     lowered = text.lower()
     return any(term in lowered for term in COMMUNITY_BLOCKED_TERMS)
@@ -7807,675 +8018,710 @@ def _build_contextual_bot_reply(db: Session, room: str, text: str) -> str:
 
     return BOT_REPLIES[hash(f"{room}:{text[:40]}") % len(BOT_REPLIES)]
 
-@app.get("/api/community/messages")
-async def get_community_messages(
-    room: Optional[str] = None,
-    limit: int = Query(default=50, le=200),
-    db: Session = Depends(get_db)
-):
-    """Récupérer les derniers messages du chat communautaire."""
-    query = db.query(ChatMessageDB).filter(ChatMessageDB.is_hidden == False)
-    if room is not None:
-        query = query.filter(ChatMessageDB.room == _normalize_community_room(room))
-
-    messages = query.order_by(
-        ChatMessageDB.created_at.desc(), ChatMessageDB.id.desc()
-    ).limit(limit).all()
-    messages.reverse()
-    return [_serialize_community_message(m) for m in messages]
-
-
-@app.get("/api/community/pinned")
-async def get_pinned_community_message(
-    room: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Récupérer l'annonce experte épinglée pour un salon."""
-    normalized_room = _normalize_community_room(room)
-    message = _get_pinned_community_message(db, normalized_room)
-    return {
-        "room": normalized_room,
-        "message": _serialize_community_message(message) if message else None,
-    }
-
-@app.post("/api/community/messages")
-async def post_community_message(
-    body: Dict[str, Any],
-    db: Session = Depends(get_db)
-):
-    """Poster un message dans le chat communautaire et générer une réponse bot."""
-    sender = (body.get("sender") or "Anonyme")[:80]
-    text = (body.get("text") or "").strip()
-    room = _normalize_community_room(body.get("room"))
-    sender_role = (body.get("sender_role") or "member").strip().lower()
-    if sender_role not in {"member", "expert", "assistant"}:
-        sender_role = "member"
-    if not text:
-        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
-    if len(text) > 1000:
-        raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
-    if _contains_blocked_community_text(text):
-        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
-
-    duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
-    duplicate = (
-        db.query(ChatMessageDB)
-        .filter(ChatMessageDB.sender == sender)
-        .filter(ChatMessageDB.text == text)
-        .filter(ChatMessageDB.room == room)
-        .filter(ChatMessageDB.created_at >= duplicate_since)
-        .filter(ChatMessageDB.is_hidden == False)
-        .first()
-    )
-    if duplicate:
-        raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
-
-    user_msg = ChatMessageDB(
-        sender=sender,
-        text=text,
-        is_bot=False,
-        room=room,
-        sender_role=sender_role,
-    )
-    db.add(user_msg)
-    db.commit()
-    db.refresh(user_msg)
-
-    bot_text = _build_contextual_bot_reply(db, room, text)
-    bot_msg = ChatMessageDB(
-        sender="Assistant SONGRA",
-        text=bot_text,
-        is_bot=True,
-        room=room,
-        sender_role="assistant",
-    )
-    db.add(bot_msg)
-    db.commit()
-    db.refresh(bot_msg)
-
-    return {
-        "user": _serialize_community_message(user_msg),
-        "bot": _serialize_community_message(bot_msg),
-    }
-
-
-@app.post("/api/community/messages/{message_id}/report")
-async def report_community_message(
-    message_id: int,
-    db: Session = Depends(get_db)
-):
-    """Signaler un message communautaire. Auto-masquage après plusieurs signalements."""
-    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Message introuvable")
-
-    if message.is_hidden:
-        return {
-            "success": True,
-            "message_id": message_id,
-            "report_count": message.report_count or 0,
-            "status": "hidden",
-        }
-
-    message.report_count = (message.report_count or 0) + 1
-    if message.report_count >= COMMUNITY_REPORT_HIDE_THRESHOLD:
-        message.is_hidden = True
-    db.commit()
-    db.refresh(message)
-
-    return {
-        "success": True,
-        "message_id": message.id,
-        "report_count": message.report_count,
-        "status": "hidden" if message.is_hidden else "reported",
-    }
-
-
-@app.post("/api/expert/community/messages")
-async def post_expert_community_message(
-    body: Dict[str, Any],
-    current_expert: Expert = Depends(get_current_expert),
-    db: Session = Depends(get_db),
-):
-    """Permet à un expert connecté de publier dans un salon communautaire."""
-    text = (body.get("text") or "").strip()
-    room = _normalize_community_room(body.get("room"))
-    pin_message = bool(body.get("pin"))
-    sender = (current_expert.full_name or current_expert.email or "Expert SONGRA").strip()[:80]
-
-    if not text:
-        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
-    if len(text) > 1000:
-        raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
-    if _contains_blocked_community_text(text):
-        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
-
-    duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
-    duplicate = (
-        db.query(ChatMessageDB)
-        .filter(ChatMessageDB.sender == sender)
-        .filter(ChatMessageDB.text == text)
-        .filter(ChatMessageDB.room == room)
-        .filter(ChatMessageDB.created_at >= duplicate_since)
-        .filter(ChatMessageDB.is_hidden == False)
-        .first()
-    )
-    if duplicate:
-        raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
-
-    expert_message = ChatMessageDB(
-        sender=sender,
-        text=text,
-        is_bot=False,
-        room=room,
-        sender_role="expert",
-    )
-    db.add(expert_message)
-    db.commit()
-    db.refresh(expert_message)
-
-    if pin_message:
-        expert_message = _set_pinned_community_message(db, expert_message, True)
-
-    return {
-        "success": True,
-        "message": _serialize_community_message(expert_message),
-    }
-
-
-@app.patch("/api/expert/community/messages/{message_id}/pin")
-async def pin_expert_community_message(
-    message_id: int,
-    body: Dict[str, Any],
-    current_expert: Expert = Depends(get_current_expert),
-    db: Session = Depends(get_db),
-):
-    """Épingler ou retirer une annonce experte dans un salon communautaire."""
-    del current_expert
-    pinned = bool(body.get("pinned", True))
-    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Message introuvable")
-    if message.is_hidden:
-        raise HTTPException(status_code=422, detail="Impossible d'épingler un message masqué")
-    if (message.sender_role or "") != "expert":
-        raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être épinglés")
-
-    updated_message = _set_pinned_community_message(db, message, pinned)
-    return {
-        "success": True,
-        "message": _serialize_community_message(updated_message),
-        "pinned": bool(updated_message.is_pinned),
-    }
-
-
-@app.patch("/api/expert/community/messages/{message_id}")
-async def update_expert_community_message(
-    message_id: int,
-    body: Dict[str, Any],
-    current_expert: Expert = Depends(get_current_expert),
-    db: Session = Depends(get_db),
-):
-    """Modifier directement un message expert communautaire, notamment une annonce épinglée."""
-    del current_expert
-    text = (body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
-    if len(text) > 1000:
-        raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
-    if _contains_blocked_community_text(text):
-        raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
-
-    message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Message introuvable")
-    if message.is_hidden:
-        raise HTTPException(status_code=422, detail="Impossible de modifier un message masqué")
-    if (message.sender_role or "") != "expert":
-        raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être modifiés")
-
-    message.text = text
-    db.commit()
-    db.refresh(message)
-
-    return {
-        "success": True,
-        "message": _serialize_community_message(message),
-    }
-
-
-@app.get("/api/community/field-cases")
-async def get_community_field_cases(
-    room: Optional[str] = None,
-    status: Optional[str] = None,
-    limit: int = Query(default=60, le=200),
-    db: Session = Depends(get_db),
-):
-    query = db.query(CommunityFieldCaseDB)
-    if room is not None:
-        query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
-    if status is not None:
-        query = query.filter(CommunityFieldCaseDB.status == _normalize_community_case_status(status))
-
-    cases = (
-        query.order_by(CommunityFieldCaseDB.updated_at.desc(), CommunityFieldCaseDB.id.desc())
-        .limit(limit)
-        .all()
-    )
-    return [_serialize_community_field_case_summary(db, item) for item in cases]
-
-
-@app.get("/api/community/field-cases/{case_id}")
-async def get_community_field_case_detail(case_id: int, db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-    return _serialize_community_field_case_detail(db, case)
-
-
-@app.post("/api/community/field-cases")
-async def create_community_field_case(body: Dict[str, Any], db: Session = Depends(get_db)):
-    reporter_name = (body.get("reporter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
-    reporter_phone = (body.get("reporter_phone") or body.get("phone_number") or "").strip()[:40] or None
-    room = _normalize_community_room(body.get("room"))
-    category = _normalize_community_category(body.get("category"), room)
-    description = (body.get("description") or "").strip()
-    location_label = (body.get("location_label") or "").strip()[:140] or None
-    crop_or_livestock = (body.get("crop_or_livestock") or "").strip()[:140] or None
-    severity = _normalize_community_case_severity(body.get("severity"))
-    tags = body.get("tags") or []
-    if not isinstance(tags, list):
-        tags = []
-
-    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
-    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
-    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
-    owner_id = int(datetime.utcnow().timestamp())
-    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_case") if photo_data_list else []
-    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_case_audio") if audio_payloads else []
-
-    if not description and not stored_paths and not stored_audio_paths:
-        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce signalement")
-
-    if not description:
-        description = "Signalement terrain envoye avec media sans texte."
-
-    title = _build_community_case_title(body.get("title") or "", description, room)
-
-    case = CommunityFieldCaseDB(
-        room=room,
-        category=category,
-        title=title,
-        description=description,
-        reporter_name=reporter_name,
-        reporter_phone=reporter_phone,
-        contributor_role="observer",
-        severity=severity,
-        status="new",
-        location_label=location_label,
-        latitude=body.get("latitude"),
-        longitude=body.get("longitude"),
-        crop_or_livestock=crop_or_livestock,
-        tags_json=json.dumps(_extract_offline_keywords(tags, title, description, crop_or_livestock), ensure_ascii=False),
-        before_photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
-        before_audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
-    )
-    db.add(case)
-    db.commit()
-    db.refresh(case)
-
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.post("/api/community/field-cases/{case_id}/solutions")
-async def add_solution_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-
-    author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
-    author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
-    text = (body.get("text") or "").strip()
-    action_taken = (body.get("action_taken") or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="La solution proposee est obligatoire")
-
-    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
-    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
-    owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
-    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_solution") if photo_data_list else []
-
-    solution = CommunitySolutionDB(
-        case_id=case_id,
-        author_name=author_name,
-        author_phone=author_phone,
-        contributor_role="solver",
-        text=text,
-        action_taken=action_taken or None,
-        cost_note=(body.get("cost_note") or "").strip()[:120] or None,
-        delay_note=(body.get("delay_note") or "").strip()[:120] or None,
-        result_status=(body.get("result_status") or "proposed").strip()[:80] or "proposed",
-        photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
-        is_expert=bool(body.get("is_expert", False)),
-    )
-    case.updated_at = datetime.utcnow()
-    db.add(solution)
-    db.commit()
-    db.refresh(solution)
-
-    return {
-        "success": True,
-        "solution": _serialize_community_solution(db, solution),
-        "case": _serialize_community_field_case_summary(db, case),
-    }
-
-
-@app.post("/api/community/solutions/{solution_id}/feedback")
-async def add_feedback_to_community_solution(solution_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    solution = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.id == solution_id).first()
-    if not solution:
-        raise HTTPException(status_code=404, detail="Solution introuvable")
-
-    voter_name = (body.get("voter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
-    voter_phone = (body.get("voter_phone") or body.get("phone_number") or "").strip()[:40] or None
-    feedback_type = _normalize_community_feedback_type(body.get("feedback_type"))
-
-    existing = (
-        db.query(CommunitySolutionFeedbackDB)
-        .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
-        .filter(
-            _community_person_filter(
-                CommunitySolutionFeedbackDB.voter_phone,
-                CommunitySolutionFeedbackDB.voter_name,
-                voter_phone,
-                voter_name,
-            )
-        )
-        .first()
-    )
-    if existing is None:
-        existing = CommunitySolutionFeedbackDB(
-            solution_id=solution_id,
-            voter_name=voter_name,
-            voter_phone=voter_phone,
-            feedback_type=feedback_type,
-        )
-        db.add(existing)
-    else:
-        existing.feedback_type = feedback_type
-        existing.created_at = datetime.utcnow()
-
-    db.commit()
-    db.refresh(solution)
-    return {
-        "success": True,
-        "solution": _serialize_community_solution(db, solution),
-    }
-
-
-@app.post("/api/community/field-cases/{case_id}/confirm")
-async def confirm_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-
-    confirmer_name = (body.get("confirmer_name") or body.get("sender") or "Acteur terrain").strip()[:80]
-    confirmer_phone = (body.get("confirmer_phone") or body.get("phone_number") or "").strip()[:40] or None
-
-    existing = (
-        db.query(CommunityCaseConfirmationDB)
-        .filter(CommunityCaseConfirmationDB.case_id == case_id)
-        .filter(
-            _community_person_filter(
-                CommunityCaseConfirmationDB.confirmer_phone,
-                CommunityCaseConfirmationDB.confirmer_name,
-                confirmer_phone,
-                confirmer_name,
-            )
-        )
-        .first()
-    )
-    if existing:
-        raise HTTPException(status_code=409, detail="Confirmation deja enregistree pour ce cas")
-
-    confirmation = CommunityCaseConfirmationDB(
-        case_id=case_id,
-        confirmer_name=confirmer_name,
-        confirmer_phone=confirmer_phone,
-        contributor_role="observer",
-        note=(body.get("note") or "").strip() or None,
-        location_label=(body.get("location_label") or "").strip()[:140] or None,
-    )
-    case.updated_at = datetime.utcnow()
-    db.add(confirmation)
-    db.commit()
-
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.post("/api/community/field-cases/{case_id}/follow-ups")
-async def add_follow_up_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-
-    author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
-    author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
-    note = (body.get("note") or "").strip()
-
-    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
-    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
-    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
-    owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
-    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
-    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
-
-    if not note and not stored_paths and not stored_audio_paths:
-        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
-    if not note:
-        note = "Retour terrain envoye avec media sans texte."
-
-    normalized_status = _normalize_community_case_status(body.get("status_after") or case.status)
-    follow_up = CommunityCaseFollowUpDB(
-        case_id=case_id,
-        author_name=author_name,
-        author_phone=author_phone,
-        contributor_role="observer",
-        note=note,
-        status_after=normalized_status,
-        outcome_label=(body.get("outcome_label") or "").strip()[:140] or None,
-        photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
-        audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
-    )
-    db.add(follow_up)
-
-    if stored_paths:
-        existing_after = _load_json_list(case.after_photo_paths_json)
-        case.after_photo_paths_json = json.dumps(existing_after + stored_paths, ensure_ascii=False)
-    if stored_audio_paths:
-        existing_after_audio = _load_json_list(case.after_audio_paths_json)
-        case.after_audio_paths_json = json.dumps(existing_after_audio + stored_audio_paths, ensure_ascii=False)
-    case.status = normalized_status
-    case.last_follow_up_at = datetime.utcnow()
-    case.updated_at = datetime.utcnow()
-    if normalized_status == "resolved":
-        case.resolved_at = datetime.utcnow()
-
-    db.commit()
-    db.refresh(case)
-    if normalized_status == "resolved":
-        _promote_community_case_to_offline(db, case)
-
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.patch("/api/community/follow-ups/{follow_up_id}")
-async def update_community_case_follow_up(follow_up_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    follow_up = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.id == follow_up_id).first()
-    if not follow_up:
-        raise HTTPException(status_code=404, detail="Suivi terrain introuvable")
-
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == follow_up.case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-
-    author_name = (body.get("author_name") or follow_up.author_name or "Acteur terrain").strip()[:80]
-    author_phone = (body.get("author_phone") or body.get("phone_number") or follow_up.author_phone or "").strip()[:40] or None
-    note = (body.get("note") or follow_up.note or "").strip()
-
-    normalized_status = _normalize_community_case_status(body.get("status_after") or follow_up.status_after or case.status)
-    photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
-    photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
-    audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
-    owner_id = case.id * 1000 + follow_up_id
-    stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
-    stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
-
-    if not note and not stored_paths and not stored_audio_paths:
-        raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
-    if not note:
-        note = "Retour terrain envoye avec media sans texte."
-
-    existing_follow_up_paths = _load_json_list(follow_up.photo_paths_json)
-    merged_follow_up_paths = existing_follow_up_paths + stored_paths if stored_paths else existing_follow_up_paths
-    existing_follow_up_audio_paths = _load_json_list(follow_up.audio_paths_json)
-    merged_follow_up_audio_paths = existing_follow_up_audio_paths + stored_audio_paths if stored_audio_paths else existing_follow_up_audio_paths
-
-    follow_up.author_name = author_name
-    follow_up.author_phone = author_phone
-    follow_up.note = note
-    follow_up.status_after = normalized_status
-    follow_up.outcome_label = (body.get("outcome_label") or "").strip()[:140] or None
-    follow_up.photo_paths_json = json.dumps(merged_follow_up_paths, ensure_ascii=False) if merged_follow_up_paths else None
-    follow_up.audio_paths_json = json.dumps(merged_follow_up_audio_paths, ensure_ascii=False) if merged_follow_up_audio_paths else None
-
-    if stored_paths:
-        case_after_paths = _load_json_list(case.after_photo_paths_json)
-        case.after_photo_paths_json = json.dumps(case_after_paths + stored_paths, ensure_ascii=False)
-    if stored_audio_paths:
-        case_after_audio_paths = _load_json_list(case.after_audio_paths_json)
-        case.after_audio_paths_json = json.dumps(case_after_audio_paths + stored_audio_paths, ensure_ascii=False)
-
-    case.status = normalized_status
-    case.last_follow_up_at = datetime.utcnow()
-    case.updated_at = datetime.utcnow()
-    if normalized_status == "resolved":
-        case.resolved_at = case.resolved_at or datetime.utcnow()
-
-    db.commit()
-    db.refresh(case)
-    if normalized_status == "resolved":
-        _promote_community_case_to_offline(db, case)
-
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.patch("/api/community/field-cases/{case_id}/status")
-async def update_community_field_case_status(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-
-    normalized_status = _normalize_community_case_status(body.get("status"))
-    case.status = normalized_status
-    case.updated_at = datetime.utcnow()
-    if normalized_status == "resolved":
-        case.resolved_at = datetime.utcnow()
-    db.commit()
-    db.refresh(case)
-    if normalized_status == "resolved":
-        _promote_community_case_to_offline(db, case)
-
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.post("/api/community/field-cases/{case_id}/promote-offline")
-async def promote_community_field_case_offline(case_id: int, db: Session = Depends(get_db)):
-    case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
-    if not case:
-        raise HTTPException(status_code=404, detail="Cas terrain introuvable")
-    if _normalize_community_case_status(case.status) != "resolved":
-        raise HTTPException(status_code=422, detail="Seuls les cas resolus peuvent alimenter la base hors ligne")
-
-    _promote_community_case_to_offline(db, case)
-    db.refresh(case)
-    return {
-        "success": True,
-        "case": _serialize_community_field_case_detail(db, case),
-    }
-
-
-@app.get("/api/community/trends")
-async def get_community_trends(
-    room: Optional[str] = None,
-    limit: int = Query(default=5, le=20),
-    db: Session = Depends(get_db),
-):
-    query = db.query(CommunityFieldCaseDB)
-    if room is not None:
-        query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
-    cases = query.order_by(CommunityFieldCaseDB.updated_at.desc()).limit(300).all()
-
-    status_counts: Dict[str, int] = {}
-    category_counts: Dict[str, int] = {}
-    location_counts: Dict[str, int] = {}
-    signal_counts: Dict[str, int] = {}
-    active_contributors = set()
-
-    for case in cases:
-        status_key = _normalize_community_case_status(case.status)
-        status_counts[status_key] = status_counts.get(status_key, 0) + 1
-        category_counts[case.category or "agriculture"] = category_counts.get(case.category or "agriculture", 0) + 1
-        if case.location_label:
-            location_counts[case.location_label] = location_counts.get(case.location_label, 0) + 1
-        trend_key = (case.crop_or_livestock or case.title or case.category or "terrain").strip()
-        signal_counts[trend_key] = signal_counts.get(trend_key, 0) + 1
-        active_contributors.add(case.reporter_phone or case.reporter_name)
-
-    return {
-        "overview": {
-            "total_cases": len(cases),
-            "active_contributors": len([item for item in active_contributors if item]),
-            "resolved_cases": status_counts.get("resolved", 0),
-            "watch_cases": status_counts.get("watch", 0),
-        },
-        "statuses": [
-            {
-                "key": key,
-                "label": COMMUNITY_CASE_STATUS_LABELS.get(key, key),
-                "count": count,
-            }
-            for key, count in sorted(status_counts.items(), key=lambda item: item[1], reverse=True)
-        ],
-        "categories": [
-            {"key": key, "count": count}
-            for key, count in sorted(category_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
-        ],
-        "hotspots": [
-            {"label": key, "count": count}
-            for key, count in sorted(location_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
-        ],
-        "signals": [
-            {"label": key, "count": count}
-            for key, count in sorted(signal_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
-        ],
-    }
-
+# @app.get("/api/community/messages")
+# async def get_community_messages(
+#     room: Optional[str] = None,
+#     limit: int = Query(default=50, le=200),
+#     db: Session = Depends(get_db)
+# ):
+#     """Récupérer les derniers messages du chat communautaire."""
+#     query = db.query(ChatMessageDB).filter(ChatMessageDB.is_hidden == False)
+#     if room is not None:
+#         query = query.filter(ChatMessageDB.room == _normalize_community_room(room))
+# 
+#     messages = query.order_by(
+#         ChatMessageDB.created_at.desc(), ChatMessageDB.id.desc()
+#     ).limit(limit).all()
+#     messages.reverse()
+#     return [_serialize_community_message(m) for m in messages]
+# 
+# 
+# @app.get("/api/community/pinned")
+# async def get_pinned_community_message(
+#     room: Optional[str] = None,
+#     db: Session = Depends(get_db)
+# ):
+#     """Récupérer l'annonce experte épinglée pour un salon."""
+#     normalized_room = _normalize_community_room(room)
+#     message = _get_pinned_community_message(db, normalized_room)
+#     return {
+#         "room": normalized_room,
+#         "message": _serialize_community_message(message) if message else None,
+#     }
+# 
+# @app.post("/api/community/messages")
+# async def post_community_message(
+#     body: Dict[str, Any],
+#     db: Session = Depends(get_db)
+# ):
+#     """Poster un message dans le chat communautaire et générer une réponse bot."""
+#     sender = (body.get("sender") or "Anonyme")[:80]
+#     text = (body.get("text") or "").strip()
+#     room = _normalize_community_room(body.get("room"))
+#     sender_role = (body.get("sender_role") or "member").strip().lower()
+#     if sender_role not in {"member", "expert", "assistant"}:
+#         sender_role = "member"
+#     if not text:
+#         raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
+#     if len(text) > 1000:
+#         raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+#     if _contains_blocked_community_text(text):
+#         raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
+# 
+#     duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
+#     duplicate = (
+#         db.query(ChatMessageDB)
+#         .filter(ChatMessageDB.sender == sender)
+#         .filter(ChatMessageDB.text == text)
+#         .filter(ChatMessageDB.room == room)
+#         .filter(ChatMessageDB.created_at >= duplicate_since)
+#         .filter(ChatMessageDB.is_hidden == False)
+#         .first()
+#     )
+#     if duplicate:
+#         raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
+# 
+#     user_msg = ChatMessageDB(
+#         sender=sender,
+#         text=text,
+#         is_bot=False,
+#         room=room,
+#         sender_role=sender_role,
+#     )
+#     db.add(user_msg)
+#     db.commit()
+#     db.refresh(user_msg)
+# 
+#     bot_text = _build_contextual_bot_reply(db, room, text)
+#     bot_msg = ChatMessageDB(
+#         sender="Assistant SONGRA",
+#         text=bot_text,
+#         is_bot=True,
+#         room=room,
+#         sender_role="assistant",
+#     )
+#     db.add(bot_msg)
+#     db.commit()
+#     db.refresh(bot_msg)
+# 
+#     return {
+#         "user": _serialize_community_message(user_msg),
+#         "bot": _serialize_community_message(bot_msg),
+#     }
+# 
+# 
+# @app.post("/api/community/messages/audio")
+# async def post_community_audio_message(
+#     sender: str = Form("Anonyme"),
+#     room: str = Form("general"),
+#     sender_role: str = Form("member"),
+#     audio_file: UploadFile = File(...),
+#     db: Session = Depends(get_db)
+# ):
+#     """Poster un message vocal dans le chat communautaire."""
+#     os.makedirs("uploads/community_audio", exist_ok=True)
+#     ext = os.path.splitext(audio_file.filename or "audio.webm")[1].lower() or ".webm"
+#     filename = f"comm_{int(time.time())}_{hashlib.md5((audio_file.filename or '').encode()).hexdigest()[:8]}{ext}"
+#     filepath = os.path.join("uploads/community_audio", filename)
+#     
+#     content = await audio_file.read()
+#     with open(filepath, "wb") as buffer:
+#         buffer.write(content)
+#         
+#     audio_relative_path = f"uploads/community_audio/{filename}"
+#     
+#     user_msg = ChatMessageDB(
+#         sender=sender,
+#         text="🔊 Message vocal",
+#         is_bot=False,
+#         room=room,
+#         sender_role=sender_role,
+#         audio_url=audio_relative_path
+#     )
+#     db.add(user_msg)
+#     db.commit()
+#     db.refresh(user_msg)
+#     
+#     return _serialize_community_message(user_msg)
+# 
+# 
+# @app.post("/api/community/messages/{message_id}/report")
+# async def report_community_message(
+#     message_id: int,
+#     db: Session = Depends(get_db)
+# ):
+#     """Signaler un message communautaire. Auto-masquage après plusieurs signalements."""
+#     message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+#     if not message:
+#         raise HTTPException(status_code=404, detail="Message introuvable")
+# 
+#     if message.is_hidden:
+#         return {
+#             "success": True,
+#             "message_id": message_id,
+#             "report_count": message.report_count or 0,
+#             "status": "hidden",
+#         }
+# 
+#     message.report_count = (message.report_count or 0) + 1
+#     if message.report_count >= COMMUNITY_REPORT_HIDE_THRESHOLD:
+#         message.is_hidden = True
+#     db.commit()
+#     db.refresh(message)
+# 
+#     return {
+#         "success": True,
+#         "message_id": message.id,
+#         "report_count": message.report_count,
+#         "status": "hidden" if message.is_hidden else "reported",
+#     }
+# 
+# 
+# @app.post("/api/expert/community/messages")
+# async def post_expert_community_message(
+#     body: Dict[str, Any],
+#     current_expert: Expert = Depends(get_current_expert),
+#     db: Session = Depends(get_db),
+# ):
+#     """Permet à un expert connecté de publier dans un salon communautaire."""
+#     text = (body.get("text") or "").strip()
+#     room = _normalize_community_room(body.get("room"))
+#     pin_message = bool(body.get("pin"))
+#     sender = (current_expert.full_name or current_expert.email or "Expert SONGRA").strip()[:80]
+# 
+#     if not text:
+#         raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
+#     if len(text) > 1000:
+#         raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+#     if _contains_blocked_community_text(text):
+#         raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
+# 
+#     duplicate_since = datetime.utcnow() - timedelta(seconds=COMMUNITY_DUPLICATE_WINDOW_SECONDS)
+#     duplicate = (
+#         db.query(ChatMessageDB)
+#         .filter(ChatMessageDB.sender == sender)
+#         .filter(ChatMessageDB.text == text)
+#         .filter(ChatMessageDB.room == room)
+#         .filter(ChatMessageDB.created_at >= duplicate_since)
+#         .filter(ChatMessageDB.is_hidden == False)
+#         .first()
+#     )
+#     if duplicate:
+#         raise HTTPException(status_code=409, detail="Message déjà publié récemment dans ce salon")
+# 
+#     expert_message = ChatMessageDB(
+#         sender=sender,
+#         text=text,
+#         is_bot=False,
+#         room=room,
+#         sender_role="expert",
+#     )
+#     db.add(expert_message)
+#     db.commit()
+#     db.refresh(expert_message)
+# 
+#     if pin_message:
+#         expert_message = _set_pinned_community_message(db, expert_message, True)
+# 
+#     return {
+#         "success": True,
+#         "message": _serialize_community_message(expert_message),
+#     }
+# 
+# 
+# @app.patch("/api/expert/community/messages/{message_id}/pin")
+# async def pin_expert_community_message(
+#     message_id: int,
+#     body: Dict[str, Any],
+#     current_expert: Expert = Depends(get_current_expert),
+#     db: Session = Depends(get_db),
+# ):
+#     """Épingler ou retirer une annonce experte dans un salon communautaire."""
+#     del current_expert
+#     pinned = bool(body.get("pinned", True))
+#     message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+#     if not message:
+#         raise HTTPException(status_code=404, detail="Message introuvable")
+#     if message.is_hidden:
+#         raise HTTPException(status_code=422, detail="Impossible d'épingler un message masqué")
+#     if (message.sender_role or "") != "expert":
+#         raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être épinglés")
+# 
+#     updated_message = _set_pinned_community_message(db, message, pinned)
+#     return {
+#         "success": True,
+#         "message": _serialize_community_message(updated_message),
+#         "pinned": bool(updated_message.is_pinned),
+#     }
+# 
+# 
+# @app.patch("/api/expert/community/messages/{message_id}")
+# async def update_expert_community_message(
+#     message_id: int,
+#     body: Dict[str, Any],
+#     current_expert: Expert = Depends(get_current_expert),
+#     db: Session = Depends(get_db),
+# ):
+#     """Modifier directement un message expert communautaire, notamment une annonce épinglée."""
+#     del current_expert
+#     text = (body.get("text") or "").strip()
+#     if not text:
+#         raise HTTPException(status_code=422, detail="Le message ne peut pas être vide")
+#     if len(text) > 1000:
+#         raise HTTPException(status_code=422, detail="Message trop long (max 1000 caractères)")
+#     if _contains_blocked_community_text(text):
+#         raise HTTPException(status_code=422, detail="Message bloqué par la modération légère de la communauté")
+# 
+#     message = db.query(ChatMessageDB).filter(ChatMessageDB.id == message_id).first()
+#     if not message:
+#         raise HTTPException(status_code=404, detail="Message introuvable")
+#     if message.is_hidden:
+#         raise HTTPException(status_code=422, detail="Impossible de modifier un message masqué")
+#     if (message.sender_role or "") != "expert":
+#         raise HTTPException(status_code=422, detail="Seuls les messages experts peuvent être modifiés")
+# 
+#     message.text = text
+#     db.commit()
+#     db.refresh(message)
+# 
+#     return {
+#         "success": True,
+#         "message": _serialize_community_message(message),
+#     }
+# 
+# 
+# @app.get("/api/community/field-cases")
+# async def get_community_field_cases(
+#     room: Optional[str] = None,
+#     status: Optional[str] = None,
+#     limit: int = Query(default=60, le=200),
+#     db: Session = Depends(get_db),
+# ):
+#     query = db.query(CommunityFieldCaseDB)
+#     if room is not None:
+#         query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
+#     if status is not None:
+#         query = query.filter(CommunityFieldCaseDB.status == _normalize_community_case_status(status))
+# 
+#     cases = (
+#         query.order_by(CommunityFieldCaseDB.updated_at.desc(), CommunityFieldCaseDB.id.desc())
+#         .limit(limit)
+#         .all()
+#     )
+#     return [_serialize_community_field_case_summary(db, item) for item in cases]
+# 
+# 
+# @app.get("/api/community/field-cases/{case_id}")
+# async def get_community_field_case_detail(case_id: int, db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+#     return _serialize_community_field_case_detail(db, case)
+# 
+# 
+# @app.post("/api/community/field-cases")
+# async def create_community_field_case(body: Dict[str, Any], db: Session = Depends(get_db)):
+#     reporter_name = (body.get("reporter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+#     reporter_phone = (body.get("reporter_phone") or body.get("phone_number") or "").strip()[:40] or None
+#     room = _normalize_community_room(body.get("room"))
+#     category = _normalize_community_category(body.get("category"), room)
+#     description = (body.get("description") or "").strip()
+#     location_label = (body.get("location_label") or "").strip()[:140] or None
+#     crop_or_livestock = (body.get("crop_or_livestock") or "").strip()[:140] or None
+#     severity = _normalize_community_case_severity(body.get("severity"))
+#     tags = body.get("tags") or []
+#     if not isinstance(tags, list):
+#         tags = []
+# 
+#     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+#     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+#     audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
+#     owner_id = int(datetime.utcnow().timestamp())
+#     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_case") if photo_data_list else []
+#     stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_case_audio") if audio_payloads else []
+# 
+#     if not description and not stored_paths and not stored_audio_paths:
+#         raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce signalement")
+# 
+#     if not description:
+#         description = "Signalement terrain envoye avec media sans texte."
+# 
+#     title = _build_community_case_title(body.get("title") or "", description, room)
+# 
+#     case = CommunityFieldCaseDB(
+#         room=room,
+#         category=category,
+#         title=title,
+#         description=description,
+#         reporter_name=reporter_name,
+#         reporter_phone=reporter_phone,
+#         contributor_role="observer",
+#         severity=severity,
+#         status="new",
+#         location_label=location_label,
+#         latitude=body.get("latitude"),
+#         longitude=body.get("longitude"),
+#         crop_or_livestock=crop_or_livestock,
+#         tags_json=json.dumps(_extract_offline_keywords(tags, title, description, crop_or_livestock), ensure_ascii=False),
+#         before_photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+#         before_audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
+#     )
+#     db.add(case)
+#     db.commit()
+#     db.refresh(case)
+# 
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.post("/api/community/field-cases/{case_id}/solutions")
+# async def add_solution_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+# 
+#     author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+#     author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
+#     text = (body.get("text") or "").strip()
+#     action_taken = (body.get("action_taken") or "").strip()
+#     if not text:
+#         raise HTTPException(status_code=422, detail="La solution proposee est obligatoire")
+# 
+#     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+#     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+#     owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
+#     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_solution") if photo_data_list else []
+# 
+#     solution = CommunitySolutionDB(
+#         case_id=case_id,
+#         author_name=author_name,
+#         author_phone=author_phone,
+#         contributor_role="solver",
+#         text=text,
+#         action_taken=action_taken or None,
+#         cost_note=(body.get("cost_note") or "").strip()[:120] or None,
+#         delay_note=(body.get("delay_note") or "").strip()[:120] or None,
+#         result_status=(body.get("result_status") or "proposed").strip()[:80] or "proposed",
+#         photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+#         is_expert=bool(body.get("is_expert", False)),
+#     )
+#     case.updated_at = datetime.utcnow()
+#     db.add(solution)
+#     db.commit()
+#     db.refresh(solution)
+# 
+#     return {
+#         "success": True,
+#         "solution": _serialize_community_solution(db, solution),
+#         "case": _serialize_community_field_case_summary(db, case),
+#     }
+# 
+# 
+# @app.post("/api/community/solutions/{solution_id}/feedback")
+# async def add_feedback_to_community_solution(solution_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     solution = db.query(CommunitySolutionDB).filter(CommunitySolutionDB.id == solution_id).first()
+#     if not solution:
+#         raise HTTPException(status_code=404, detail="Solution introuvable")
+# 
+#     voter_name = (body.get("voter_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+#     voter_phone = (body.get("voter_phone") or body.get("phone_number") or "").strip()[:40] or None
+#     feedback_type = _normalize_community_feedback_type(body.get("feedback_type"))
+# 
+#     existing = (
+#         db.query(CommunitySolutionFeedbackDB)
+#         .filter(CommunitySolutionFeedbackDB.solution_id == solution_id)
+#         .filter(
+#             _community_person_filter(
+#                 CommunitySolutionFeedbackDB.voter_phone,
+#                 CommunitySolutionFeedbackDB.voter_name,
+#                 voter_phone,
+#                 voter_name,
+#             )
+#         )
+#         .first()
+#     )
+#     if existing is None:
+#         existing = CommunitySolutionFeedbackDB(
+#             solution_id=solution_id,
+#             voter_name=voter_name,
+#             voter_phone=voter_phone,
+#             feedback_type=feedback_type,
+#         )
+#         db.add(existing)
+#     else:
+#         existing.feedback_type = feedback_type
+#         existing.created_at = datetime.utcnow()
+# 
+#     db.commit()
+#     db.refresh(solution)
+#     return {
+#         "success": True,
+#         "solution": _serialize_community_solution(db, solution),
+#     }
+# 
+# 
+# @app.post("/api/community/field-cases/{case_id}/confirm")
+# async def confirm_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+# 
+#     confirmer_name = (body.get("confirmer_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+#     confirmer_phone = (body.get("confirmer_phone") or body.get("phone_number") or "").strip()[:40] or None
+# 
+#     existing = (
+#         db.query(CommunityCaseConfirmationDB)
+#         .filter(CommunityCaseConfirmationDB.case_id == case_id)
+#         .filter(
+#             _community_person_filter(
+#                 CommunityCaseConfirmationDB.confirmer_phone,
+#                 CommunityCaseConfirmationDB.confirmer_name,
+#                 confirmer_phone,
+#                 confirmer_name,
+#             )
+#         )
+#         .first()
+#     )
+#     if existing:
+#         raise HTTPException(status_code=409, detail="Confirmation deja enregistree pour ce cas")
+# 
+#     confirmation = CommunityCaseConfirmationDB(
+#         case_id=case_id,
+#         confirmer_name=confirmer_name,
+#         confirmer_phone=confirmer_phone,
+#         contributor_role="observer",
+#         note=(body.get("note") or "").strip() or None,
+#         location_label=(body.get("location_label") or "").strip()[:140] or None,
+#     )
+#     case.updated_at = datetime.utcnow()
+#     db.add(confirmation)
+#     db.commit()
+# 
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.post("/api/community/field-cases/{case_id}/follow-ups")
+# async def add_follow_up_to_community_field_case(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+# 
+#     author_name = (body.get("author_name") or body.get("sender") or "Acteur terrain").strip()[:80]
+#     author_phone = (body.get("author_phone") or body.get("phone_number") or "").strip()[:40] or None
+#     note = (body.get("note") or "").strip()
+# 
+#     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+#     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+#     audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
+#     owner_id = case_id * 1000 + int(datetime.utcnow().timestamp())
+#     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+#     stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
+# 
+#     if not note and not stored_paths and not stored_audio_paths:
+#         raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
+#     if not note:
+#         note = "Retour terrain envoye avec media sans texte."
+# 
+#     normalized_status = _normalize_community_case_status(body.get("status_after") or case.status)
+#     follow_up = CommunityCaseFollowUpDB(
+#         case_id=case_id,
+#         author_name=author_name,
+#         author_phone=author_phone,
+#         contributor_role="observer",
+#         note=note,
+#         status_after=normalized_status,
+#         outcome_label=(body.get("outcome_label") or "").strip()[:140] or None,
+#         photo_paths_json=json.dumps(stored_paths, ensure_ascii=False) if stored_paths else None,
+#         audio_paths_json=json.dumps(stored_audio_paths, ensure_ascii=False) if stored_audio_paths else None,
+#     )
+#     db.add(follow_up)
+# 
+#     if stored_paths:
+#         existing_after = _load_json_list(case.after_photo_paths_json)
+#         case.after_photo_paths_json = json.dumps(existing_after + stored_paths, ensure_ascii=False)
+#     if stored_audio_paths:
+#         existing_after_audio = _load_json_list(case.after_audio_paths_json)
+#         case.after_audio_paths_json = json.dumps(existing_after_audio + stored_audio_paths, ensure_ascii=False)
+#     case.status = normalized_status
+#     case.last_follow_up_at = datetime.utcnow()
+#     case.updated_at = datetime.utcnow()
+#     if normalized_status == "resolved":
+#         case.resolved_at = datetime.utcnow()
+# 
+#     db.commit()
+#     db.refresh(case)
+#     if normalized_status == "resolved":
+#         _promote_community_case_to_offline(db, case)
+# 
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.patch("/api/community/follow-ups/{follow_up_id}")
+# async def update_community_case_follow_up(follow_up_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     follow_up = db.query(CommunityCaseFollowUpDB).filter(CommunityCaseFollowUpDB.id == follow_up_id).first()
+#     if not follow_up:
+#         raise HTTPException(status_code=404, detail="Suivi terrain introuvable")
+# 
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == follow_up.case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+# 
+#     author_name = (body.get("author_name") or follow_up.author_name or "Acteur terrain").strip()[:80]
+#     author_phone = (body.get("author_phone") or body.get("phone_number") or follow_up.author_phone or "").strip()[:40] or None
+#     note = (body.get("note") or follow_up.note or "").strip()
+# 
+#     normalized_status = _normalize_community_case_status(body.get("status_after") or follow_up.status_after or case.status)
+#     photo_payloads = _collect_photo_payloads(body.get("photo_base64"), body.get("photo_base64_list"))
+#     photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads[:4] if payload]
+#     audio_payloads = _collect_audio_payloads(body.get("audio_base64"), body.get("audio_base64_list"))
+#     owner_id = case.id * 1000 + follow_up_id
+#     stored_paths = _store_photo_payloads(owner_id, photo_data_list, prefix="community_followup") if photo_data_list else []
+#     stored_audio_paths = _store_audio_payloads(owner_id, audio_payloads, prefix="community_followup_audio") if audio_payloads else []
+# 
+#     if not note and not stored_paths and not stored_audio_paths:
+#         raise HTTPException(status_code=422, detail="Ajoutez un texte, une photo ou un vocal pour ce suivi")
+#     if not note:
+#         note = "Retour terrain envoye avec media sans texte."
+# 
+#     existing_follow_up_paths = _load_json_list(follow_up.photo_paths_json)
+#     merged_follow_up_paths = existing_follow_up_paths + stored_paths if stored_paths else existing_follow_up_paths
+#     existing_follow_up_audio_paths = _load_json_list(follow_up.audio_paths_json)
+#     merged_follow_up_audio_paths = existing_follow_up_audio_paths + stored_audio_paths if stored_audio_paths else existing_follow_up_audio_paths
+# 
+#     follow_up.author_name = author_name
+#     follow_up.author_phone = author_phone
+#     follow_up.note = note
+#     follow_up.status_after = normalized_status
+#     follow_up.outcome_label = (body.get("outcome_label") or "").strip()[:140] or None
+#     follow_up.photo_paths_json = json.dumps(merged_follow_up_paths, ensure_ascii=False) if merged_follow_up_paths else None
+#     follow_up.audio_paths_json = json.dumps(merged_follow_up_audio_paths, ensure_ascii=False) if merged_follow_up_audio_paths else None
+# 
+#     if stored_paths:
+#         case_after_paths = _load_json_list(case.after_photo_paths_json)
+#         case.after_photo_paths_json = json.dumps(case_after_paths + stored_paths, ensure_ascii=False)
+#     if stored_audio_paths:
+#         case_after_audio_paths = _load_json_list(case.after_audio_paths_json)
+#         case.after_audio_paths_json = json.dumps(case_after_audio_paths + stored_audio_paths, ensure_ascii=False)
+# 
+#     case.status = normalized_status
+#     case.last_follow_up_at = datetime.utcnow()
+#     case.updated_at = datetime.utcnow()
+#     if normalized_status == "resolved":
+#         case.resolved_at = case.resolved_at or datetime.utcnow()
+# 
+#     db.commit()
+#     db.refresh(case)
+#     if normalized_status == "resolved":
+#         _promote_community_case_to_offline(db, case)
+# 
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.patch("/api/community/field-cases/{case_id}/status")
+# async def update_community_field_case_status(case_id: int, body: Dict[str, Any], db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+# 
+#     normalized_status = _normalize_community_case_status(body.get("status"))
+#     case.status = normalized_status
+#     case.updated_at = datetime.utcnow()
+#     if normalized_status == "resolved":
+#         case.resolved_at = datetime.utcnow()
+#     db.commit()
+#     db.refresh(case)
+#     if normalized_status == "resolved":
+#         _promote_community_case_to_offline(db, case)
+# 
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.post("/api/community/field-cases/{case_id}/promote-offline")
+# async def promote_community_field_case_offline(case_id: int, db: Session = Depends(get_db)):
+#     case = db.query(CommunityFieldCaseDB).filter(CommunityFieldCaseDB.id == case_id).first()
+#     if not case:
+#         raise HTTPException(status_code=404, detail="Cas terrain introuvable")
+#     if _normalize_community_case_status(case.status) != "resolved":
+#         raise HTTPException(status_code=422, detail="Seuls les cas resolus peuvent alimenter la base hors ligne")
+# 
+#     _promote_community_case_to_offline(db, case)
+#     db.refresh(case)
+#     return {
+#         "success": True,
+#         "case": _serialize_community_field_case_detail(db, case),
+#     }
+# 
+# 
+# @app.get("/api/community/trends")
+# async def get_community_trends(
+#     room: Optional[str] = None,
+#     limit: int = Query(default=5, le=20),
+#     db: Session = Depends(get_db),
+# ):
+#     query = db.query(CommunityFieldCaseDB)
+#     if room is not None:
+#         query = query.filter(CommunityFieldCaseDB.room == _normalize_community_room(room))
+#     cases = query.order_by(CommunityFieldCaseDB.updated_at.desc()).limit(300).all()
+# 
+#     status_counts: Dict[str, int] = {}
+#     category_counts: Dict[str, int] = {}
+#     location_counts: Dict[str, int] = {}
+#     signal_counts: Dict[str, int] = {}
+#     active_contributors = set()
+# 
+#     for case in cases:
+#         status_key = _normalize_community_case_status(case.status)
+#         status_counts[status_key] = status_counts.get(status_key, 0) + 1
+#         category_counts[case.category or "agriculture"] = category_counts.get(case.category or "agriculture", 0) + 1
+#         if case.location_label:
+#             location_counts[case.location_label] = location_counts.get(case.location_label, 0) + 1
+#         trend_key = (case.crop_or_livestock or case.title or case.category or "terrain").strip()
+#         signal_counts[trend_key] = signal_counts.get(trend_key, 0) + 1
+#         active_contributors.add(case.reporter_phone or case.reporter_name)
+# 
+#     return {
+#         "overview": {
+#             "total_cases": len(cases),
+#             "active_contributors": len([item for item in active_contributors if item]),
+#             "resolved_cases": status_counts.get("resolved", 0),
+#             "watch_cases": status_counts.get("watch", 0),
+#         },
+#         "statuses": [
+#             {
+#                 "key": key,
+#                 "label": COMMUNITY_CASE_STATUS_LABELS.get(key, key),
+#                 "count": count,
+#             }
+#             for key, count in sorted(status_counts.items(), key=lambda item: item[1], reverse=True)
+#         ],
+#         "categories": [
+#             {"key": key, "count": count}
+#             for key, count in sorted(category_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+#         ],
+#         "hotspots": [
+#             {"label": key, "count": count}
+#             for key, count in sorted(location_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+#         ],
+#         "signals": [
+#             {"label": key, "count": count}
+#             for key, count in sorted(signal_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+#         ],
+#     }
+# 
 class OfflineSyncData(BaseModel):
     tickets: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
@@ -8907,6 +9153,18 @@ async def v2_scanner_analyze(
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
+    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            from burkina_translator import translate_query_to_french
+            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
+            print(f"[TRANSLATOR] Traduction requête locale scanner ({target_lang} -> fr): '{text}' -> '{translated_text}'")
+            text = translated_text
+        except Exception as e_trans:
+            print(f"[TRANSLATOR] Erreur traduction requête locale scanner: {e_trans}")
+
+
     if not images_b64:
         raise HTTPException(status_code=400, detail="Le scanner nécessite au moins une photo.")
 
@@ -8961,6 +9219,17 @@ async def v2_assistant_query(
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
+    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    target_lang = (data.target_lang or "").strip().lower() or None
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+        try:
+            from burkina_translator import translate_query_to_french
+            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
+            print(f"[TRANSLATOR] Traduction requête locale assistant ({target_lang} -> fr): '{text}' -> '{translated_text}'")
+            text = translated_text
+        except Exception as e_trans:
+            print(f"[TRANSLATOR] Erreur traduction requête locale assistant: {e_trans}")
+
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
 
@@ -9004,158 +9273,177 @@ async def v2_assistant_query(
     }
 
 
-@app.post("/api/v2/entreprendre")
-async def v2_entreprendre(
-    data: V2EntreprendreRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Analyse entrepreneuriale d'un terrain → propositions business"""
-    import time as _time
-    start_time = _time.time()
-    try:
-        text = data.text or data.content or ""
-        category = _normalize_category(data.category)
-        generate_media = data.generate_media is not False
-        images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
-
-        # Analyse entrepreneuriale via Gemini
-        cache_hit = False
-        entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
-            text=text, images_b64=images_b64, category=category
-        )
-
-        # Génération image/vidéo du plan de découpage
-        image_result = None
-        video_result = None
-
-        if generate_media:
-            import asyncio
-
-            async def _run_media_task(label: str, coro, timeout_seconds: int):
-                try:
-                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
-                    return label, result
-                except Exception as e:
-                    print(f"[ENTREPRENDRE] Erreur {label}: {e}")
-                    return label, None
-
-            tasks = []
-            cat_label = "d'élevage" if category == "elevage" else "agricole"
-
-            if entrepreneurship.get("besoin_image") and not (image_result and image_result.get("success")):
-                img_prompt = (
-                    f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
-                    f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
-                    f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
-                    "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
-                )
-                tasks.append(
-                    _run_media_task(
-                        "image",
-                        v2_services.generate_image(img_prompt, style="schema", category=category),
-                        12,
-                    )
-                )
-
-            if entrepreneurship.get("besoin_video") and not (video_result and (video_result.get("success") or video_result.get("fallback"))):
-                propositions = ". ".join(
-                    p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
-                )
-                calendrier = ". ".join(
-                    f"{item.get('mois', '')}: {item.get('activite', '')}"
-                    for item in entrepreneurship.get("calendrier_cultural", [])[:3]
-                )
-                video_prompt = (
-                    f"Vidéo pédagogique courte montrant un plan d'aménagement de terrain {cat_label} au Burkina Faso. "
-                    f"Montrer l'organisation de l'espace selon ce découpage : {entrepreneurship.get('decoupage_terrain', '')}. "
-                    f"Montrer aussi les projets proposés : {propositions}. "
-                    f"Calendrier de mise en oeuvre : {calendrier}. "
-                    "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
-                )
-                tasks.append(
-                    _run_media_task(
-                        "video",
-                        v2_services.generate_video(
-                            video_prompt,
-                            gemini_api_key=GEMINI_API_KEY,
-                            duration_sec=8,
-                            is_urgency=False,
-                            category=category,
-                        ),
-                        18,
-                    )
-                )
-
-            if tasks:
-                results = await asyncio.gather(*tasks)
-                for label, res in results:
-                    if label == "image":
-                        image_result = res
-                    elif label == "video":
-                        video_result = res
-
-        # Support multilingue pour Entreprendre
-        localizations = {}
-        try:
-            trans_prompt = _build_entreprendre_translation_prompt(entrepreneurship)
-            trans_response = await v2_services._openai_llm_answer(
-                "Tu es un traducteur expert en langues burkinabè.", 
-                trans_prompt,
-                json_mode=True
-            )
-            if trans_response:
-                localizations = v2_services._parse_gemini_json(trans_response)
-        except Exception as e:
-            print(f"[ENTREPRENDRE] Erreur traduction: {e}")
-
-        duration = int((_time.time() - start_time) * 1000)
-
-        offline_payload = {
-            **entrepreneurship,
-            "localizations": localizations,
-            "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
-            "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
-            "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
-            "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
-            "image_description": image_result.get("fallback_description") if image_result else None,
-            "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
-        }
-        try:
-            _persist_offline_knowledge_entry(
-                db=db,
-                user_id=current_user.id,
-                source_kind="entreprendre",
-                category=category,
-                question_text=text or "Analyse terrain Songra",
-                response_payload=offline_payload,
-            )
-        except Exception as e:
-            print(f"[OFFLINE-CORPUS] Erreur persistance v2/entreprendre: {e}")
-
-        return {
-            "status": "success",
-            **entrepreneurship,
-            "localizations": localizations,
-            "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
-            "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
-            "image_description": image_result.get("fallback_description") if image_result else None,
-            "video_base64": video_result.get("video_base64") if video_result and video_result.get("success") else None,
-            "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
-            "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
-            "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
-            "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
-            "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
-            "_meta": {
-                "duration_ms": duration,
-                "model": "gemini-1.5-flash",
-                "shared_cache_hit": cache_hit,
-                "shared_source": None,
-            },
-        }
-    except Exception as e:
-        print(f"[ENTREPRENDRE] Erreur globale: {e}")
-        return {"status": "error", "message": f"Erreur serveur: {str(e)}"}
+# @app.post("/api/v2/entreprendre")
+# async def v2_entreprendre(
+#     data: V2EntreprendreRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db),
+# ):
+#     """Analyse entrepreneuriale d'un terrain → propositions business"""
+#     import time as _time
+#     start_time = _time.time()
+#     try:
+#         text = data.text or data.content or ""
+#         category = _normalize_category(data.category)
+#         generate_media = data.generate_media is not False
+#         images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
+# 
+#         # Analyse entrepreneuriale via Gemini
+#         cache_hit = False
+#         entrepreneurship = await v2_services.gemini_analyze_entrepreneurship(
+#             text=text, images_b64=images_b64, category=category
+#         )
+# 
+#         # Génération image/vidéo du plan de découpage
+#         image_result = None
+#         video_result = None
+# 
+#         if generate_media:
+#             import asyncio
+# 
+#             async def _run_media_task(label: str, coro, timeout_seconds: int):
+#                 try:
+#                     result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+#                     return label, result
+#                 except Exception as e:
+#                     print(f"[ENTREPRENDRE] Erreur {label}: {e}")
+#                     return label, None
+# 
+#             tasks = []
+#             cat_label = "d'élevage" if category == "elevage" else "agricole"
+# 
+#             if entrepreneurship.get("besoin_image") and not (image_result and image_result.get("success")):
+#                 img_prompt = (
+#                     f"Plan d'aménagement de terrain {cat_label} au Burkina Faso vu du dessus. "
+#                     f"Montrer le découpage en zones : {entrepreneurship.get('decoupage_terrain', '')}. "
+#                     f"Propositions : {', '.join(p.get('titre', '') for p in entrepreneurship.get('propositions', []))}. "
+#                     "Style plan/carte colorée, simple, avec des icônes pour chaque zone. Pas de texte."
+#                 )
+#                 tasks.append(
+#                     _run_media_task(
+#                         "image",
+#                         v2_services.generate_image(img_prompt, style="schema", category=category),
+#                         12,
+#                     )
+#                 )
+# 
+#             if entrepreneurship.get("besoin_video") and not (video_result and (video_result.get("success") or video_result.get("fallback"))):
+#                 propositions = ". ".join(
+#                     p.get("titre", "") for p in entrepreneurship.get("propositions", [])[:3] if p.get("titre")
+#                 )
+#                 calendrier = ". ".join(
+#                     f"{item.get('mois', '')}: {item.get('activite', '')}"
+#                     for item in entrepreneurship.get("calendrier_cultural", [])[:3]
+#                 )
+#                 video_prompt = (
+#                     f"Vidéo pédagogique courte montrant un plan d'aménagement de terrain {cat_label} au Burkina Faso. "
+#                     f"Montrer l'organisation de l'espace selon ce découpage : {entrepreneurship.get('decoupage_terrain', '')}. "
+#                     f"Montrer aussi les projets proposés : {propositions}. "
+#                     f"Calendrier de mise en oeuvre : {calendrier}. "
+#                     "Style clair, vue du dessus puis gestes simples sur le terrain, sans texte à l'écran."
+#                 )
+#                 tasks.append(
+#                     _run_media_task(
+#                         "video",
+#                         v2_services.generate_video(
+#                             video_prompt,
+#                             gemini_api_key=GEMINI_API_KEY,
+#                             duration_sec=8,
+#                             is_urgency=False,
+#                             category=category,
+#                         ),
+#                         18,
+#                     )
+#                 )
+# 
+#             if tasks:
+#                 results = await asyncio.gather(*tasks)
+#                 for label, res in results:
+#                     if label == "image":
+#                         image_result = res
+#                     elif label == "video":
+#                         video_result = res
+# 
+#         # Support multilingue pour Entreprendre
+#         localizations = {}
+#         try:
+#             trans_prompt = _build_entreprendre_translation_prompt(entrepreneurship)
+#             # Priorité absolue à Gemini pour la qualité des langues burkinabè et éviter les boucles de répétition
+#             if GEMINI_API_KEY:
+#                 try:
+#                     import asyncio
+#                     model = genai.GenerativeModel("gemini-2.5-flash")
+#                     response = await asyncio.to_thread(
+#                         model.generate_content,
+#                         trans_prompt,
+#                         generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+#                     )
+#                     trans_response = response.text
+#                 except Exception as gemini_exc:
+#                     print(f"[WARN] Gemini echec traduction entreprendre: {gemini_exc}, fallback OpenAI")
+#                     trans_response = await v2_services._openai_llm_answer(
+#                         "Tu es un traducteur expert en langues burkinabè.", 
+#                         trans_prompt,
+#                         json_mode=True
+#                     )
+#             else:
+#                 trans_response = await v2_services._openai_llm_answer(
+#                     "Tu es un traducteur expert en langues burkinabè.", 
+#                     trans_prompt,
+#                     json_mode=True
+#                 )
+#             if trans_response:
+#                 localizations = v2_services._parse_gemini_json(trans_response)
+#         except Exception as e:
+#             print(f"[ENTREPRENDRE] Erreur traduction: {e}")
+# 
+#         duration = int((_time.time() - start_time) * 1000)
+# 
+#         offline_payload = {
+#             **entrepreneurship,
+#             "localizations": localizations,
+#             "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+#             "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+#             "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+#             "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+#             "image_description": image_result.get("fallback_description") if image_result else None,
+#             "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+#         }
+#         try:
+#             _persist_offline_knowledge_entry(
+#                 db=db,
+#                 user_id=current_user.id,
+#                 source_kind="entreprendre",
+#                 category=category,
+#                 question_text=text or "Analyse terrain Songra",
+#                 response_payload=offline_payload,
+#             )
+#         except Exception as e:
+#             print(f"[OFFLINE-CORPUS] Erreur persistance v2/entreprendre: {e}")
+# 
+#         return {
+#             "status": "success",
+#             **entrepreneurship,
+#             "localizations": localizations,
+#             "image_base64": image_result["image_base64"] if image_result and image_result.get("success") else None,
+#             "image_mime_type": image_result.get("mime_type") if image_result and image_result.get("success") else None,
+#             "image_description": image_result.get("fallback_description") if image_result else None,
+#             "video_base64": video_result.get("video_base64") if video_result and video_result.get("success") else None,
+#             "video_url": video_result.get("video_url") if video_result and video_result.get("success") else None,
+#             "video_mime_type": video_result.get("mime_type") if video_result and video_result.get("success") else None,
+#             "video_duration": video_result.get("duration_sec") if video_result and video_result.get("success") else None,
+#             "video_description": video_result.get("video_description") if video_result and video_result.get("fallback") else None,
+#             "video_steps": video_result.get("steps_visuelles") if video_result and video_result.get("fallback") else None,
+#             "_meta": {
+#                 "duration_ms": duration,
+#                 "model": "gemini-1.5-flash",
+#                 "shared_cache_hit": cache_hit,
+#                 "shared_source": None,
+#             },
+#         }
+#     except Exception as e:
+#         print(f"[ENTREPRENDRE] Erreur globale: {e}")
+#         return {"status": "error", "message": f"Erreur serveur: {str(e)}"}
 @app.get("/api/v2/health")
 async def v2_health():
     """Health check v2"""
@@ -9167,274 +9455,274 @@ async def v2_health():
     }
 
 
-@app.post("/api/v2/generate-video-illustration")
-async def v2_generate_video_illustration(
-    data: V2VideoIllustrationRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Génération on-demand d'une vidéo illustrée"""
-    import time as _time
-    start_time = _time.time()
-
-    diagnostic = data.diagnostic
-    steps_list = (data.steps or [])[:5]
-    cat = _normalize_category(data.category)
-    cache_question = _build_media_cache_question(diagnostic, steps_list)
-    reusable_entry = _find_reusable_offline_entry(
-        db,
-        domain=_normalize_offline_domain(cat),
-        source_kinds=["generated_video_illustration"],
-        question_text=cache_question,
-    )
-    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-    if reusable_payload:
-        return {
-            "status": "success",
-            "type": "video" if reusable_payload.get("video_url") or reusable_payload.get("video_base64") else ("image_steps" if reusable_payload.get("steps") else "text_steps"),
-            "video_base64": reusable_payload.get("video_base64"),
-            "video_url": reusable_payload.get("video_url"),
-            "video_mime_type": reusable_payload.get("video_mime_type"),
-            "duration_sec": reusable_payload.get("video_duration"),
-            "steps": reusable_payload.get("steps") or ([{"description": step} for step in (reusable_payload.get("video_steps") or [])]),
-            "_meta": {
-                "duration_ms": int((_time.time() - start_time) * 1000),
-                "shared_cache_hit": True,
-                "shared_source": reusable_entry.source_kind,
-            },
-        }
-
-    # Tentative 1 : Veo (vraie vidéo)
-    video_result = None
-    try:
-        if cat == "agriculture":
-            video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les gestes techniques pour traiter : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : champ en Afrique sahélienne."
-        elif cat == "elevage":
-            video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les soins pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : élevage rural Burkina Faso."
-        else:
-            video_prompt = f"Vidéo courte (5-8 secondes) montrant les gestes d'urgence pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : village africain."
-
-        video_result = await v2_services.generate_video(
-            video_prompt,
-            gemini_api_key=GEMINI_API_KEY,
-            duration_sec=5 if cat == "urgence" else 8,
-            is_urgency=cat == "urgence",
-            category=cat,
-        )
-    except Exception as e:
-        print(f"[VIDEO-ILLUS] Veo échoué: {e}")
-
-    # Si Veo a réussi
-    if video_result and video_result.get("success"):
-        try:
-            _persist_offline_knowledge_entry(
-                db=db,
-                user_id=current_user.id,
-                source_kind="generated_video_illustration",
-                category=cat,
-                question_text=cache_question,
-                response_payload=_build_media_offline_payload(
-                    diagnostic=diagnostic,
-                    steps=steps_list,
-                    video_result=video_result,
-                ),
-            )
-        except Exception as e:
-            print(f"[OFFLINE-CORPUS] Erreur persistance video illustration: {e}")
-        return {
-            "status": "success",
-            "type": "video",
-            "video_base64": video_result.get("video_base64"),
-            "video_url": video_result.get("video_url"),
-            "video_mime_type": video_result.get("mime_type", "video/mp4"),
-            "duration_sec": video_result.get("duration_sec"),
-        }
-
-    # Fallback : image infographique étape par étape
-    steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
-
-    if cat == "agriculture":
-        infographic_prompt = f"Infographie pédagogique agricole en 3-4 vignettes montrant les étapes pour traiter : {diagnostic}. {steps_text}. Style bande-dessinée simple, personnages africains. Pas de texte."
-    elif cat == "elevage":
-        infographic_prompt = f"Infographie pédagogique vétérinaire en 3-4 vignettes montrant les soins pour : {diagnostic}. {steps_text}. Style illustration simple. Pas de texte."
-    else:
-        infographic_prompt = f"Infographie premiers secours en 3-4 vignettes montrant les gestes pour : {diagnostic}. {steps_text}. Style schématique clair. Pas de texte."
-
-    try:
-        img_result = await v2_services.generate_image(infographic_prompt, style="schema", category=cat)
-        if img_result and img_result.get("success"):
-            steps_payload = [{"image_base64": img_result["image_base64"], "mime_type": img_result.get("mime_type", "image/png"), "description": diagnostic}]
-            try:
-                _persist_offline_knowledge_entry(
-                    db=db,
-                    user_id=current_user.id,
-                    source_kind="generated_video_illustration",
-                    category=cat,
-                    question_text=cache_question,
-                    response_payload=_build_media_offline_payload(
-                        diagnostic=diagnostic,
-                        steps=steps_list,
-                        image_result={
-                            "image_base64": img_result.get("image_base64"),
-                            "image_mime_type": img_result.get("mime_type", "image/png"),
-                            "image_description": diagnostic,
-                        },
-                        video_result={
-                            "type": "image_steps",
-                            "steps": steps_payload,
-                            "video_steps": steps_list,
-                            "video_description": diagnostic,
-                        },
-                    ),
-                )
-            except Exception as e:
-                print(f"[OFFLINE-CORPUS] Erreur persistance fallback illustration video: {e}")
-            return {
-                "status": "success",
-                "type": "image_steps",
-                "steps": steps_payload,
-            }
-    except Exception as e:
-        print(f"[VIDEO-ILLUS] Image fallback échoué: {e}")
-
-    # Fallback ultime : texte
-    text_fallback = {
-        "status": "success",
-        "type": "text_steps",
-        "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
-    }
-    try:
-        _persist_offline_knowledge_entry(
-            db=db,
-            user_id=current_user.id,
-            source_kind="generated_video_illustration",
-            category=cat,
-            question_text=cache_question,
-            response_payload=_build_media_offline_payload(
-                diagnostic=diagnostic,
-                steps=steps_list,
-                video_result={
-                    "type": "text_steps",
-                    "video_steps": steps_list,
-                    "video_description": diagnostic,
-                },
-            ),
-        )
-    except Exception as e:
-        print(f"[OFFLINE-CORPUS] Erreur persistance text steps video: {e}")
-    return text_fallback
-
-
-@app.post("/api/v2/generate-image-illustration")
-async def v2_generate_image_illustration(
-    data: V2ImageIllustrationRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Génération on-demand d'une illustration pédagogique"""
-    import time as _time
-    start_time = _time.time()
-
-    diagnostic = data.diagnostic
-    steps_list = (data.steps or [])[:5]
-    cat = _normalize_category(data.category)
-    cache_question = _build_media_cache_question(diagnostic, steps_list)
-    reusable_entry = _find_reusable_offline_entry(
-        db,
-        domain=_normalize_offline_domain(cat),
-        source_kinds=["generated_image_illustration"],
-        question_text=cache_question,
-    )
-    reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
-    # Réutiliser uniquement si 80% des mots-clés correspondent (dans les deux sens)
-    def _cache_similarity(t1: str, t2: str) -> float:
-        s1 = set(_tokenize(t1))
-        s2 = set(_tokenize(t2))
-        if not s1 or not s2:
-            return 0.0
-        overlap = len(s1 & s2)
-        return min(overlap / len(s1), overlap / len(s2))
-
-    good_cache_match = (
-        reusable_entry is not None
-        and _cache_similarity(cache_question, reusable_entry.question or "") >= 0.8
-    )
-    if good_cache_match and reusable_payload.get("image_base64"):
-        return {
-            "status": "success",
-            "type": "image",
-            "image_base64": reusable_payload.get("image_base64"),
-            "image_mime_type": reusable_payload.get("image_mime_type"),
-            "image_description": reusable_payload.get("image_description") or diagnostic,
-            "_meta": {
-                "duration_ms": int((_time.time() - start_time) * 1000),
-                "shared_cache_hit": True,
-                "shared_source": reusable_entry.source_kind,
-            },
-        }
-    steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
-
-    if cat == "agriculture":
-        image_prompt = (
-            f"Illustration pédagogique agricole montrant : {diagnostic}. "
-            f"Montrer aussi les gestes recommandés : {steps_text}. "
-            "Contexte : champ, outils et personnes du Burkina Faso. Pas de texte."
-        )
-        style = "illustration"
-    elif cat == "elevage":
-        image_prompt = (
-            f"Illustration vétérinaire simple montrant : {diagnostic}. "
-            f"Montrer les soins ou vérifications utiles : {steps_text}. "
-            "Contexte : élevage rural au Burkina Faso. Pas de texte."
-        )
-        style = "illustration"
-    else:
-        image_prompt = (
-            f"Illustration schématique claire montrant les gestes pour : {diagnostic}. "
-            f"Étapes : {steps_text}. Contexte local Burkina Faso, style premiers secours non choquant. Pas de texte."
-        )
-        style = "schema"
-
-    image_result = await v2_services.generate_image(image_prompt, style=style, category=cat)
-
-    if image_result and image_result.get("success"):
-        try:
-            _persist_offline_knowledge_entry(
-                db=db,
-                user_id=current_user.id,
-                source_kind="generated_image_illustration",
-                category=cat,
-                question_text=cache_question,
-                response_payload=_build_media_offline_payload(
-                    diagnostic=diagnostic,
-                    steps=steps_list,
-                    image_result=image_result,
-                ),
-            )
-        except Exception as e:
-            print(f"[OFFLINE-CORPUS] Erreur persistance image illustration: {e}")
-        return {
-            "status": "success",
-            "type": "image",
-            "image_base64": image_result.get("image_base64"),
-            "image_mime_type": image_result.get("mime_type", "image/png"),
-            "image_description": diagnostic,
-            "_meta": {
-                "duration_ms": int((_time.time() - start_time) * 1000),
-            },
-        }
-
-    return {
-        "status": "success",
-        "type": "image_fallback",
-        "image_description": image_result.get("fallback_description") if image_result else diagnostic,
-        "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
-        "_meta": {
-            "duration_ms": int((_time.time() - start_time) * 1000),
-        },
-    }
-
-
+# @app.post("/api/v2/generate-video-illustration")
+# async def v2_generate_video_illustration(
+#     data: V2VideoIllustrationRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db),
+# ):
+#     """Génération on-demand d'une vidéo illustrée"""
+#     import time as _time
+#     start_time = _time.time()
+# 
+#     diagnostic = data.diagnostic
+#     steps_list = (data.steps or [])[:5]
+#     cat = _normalize_category(data.category)
+#     cache_question = _build_media_cache_question(diagnostic, steps_list)
+#     reusable_entry = _find_reusable_offline_entry(
+#         db,
+#         domain=_normalize_offline_domain(cat),
+#         source_kinds=["generated_video_illustration"],
+#         question_text=cache_question,
+#     )
+#     reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+#     if reusable_payload:
+#         return {
+#             "status": "success",
+#             "type": "video" if reusable_payload.get("video_url") or reusable_payload.get("video_base64") else ("image_steps" if reusable_payload.get("steps") else "text_steps"),
+#             "video_base64": reusable_payload.get("video_base64"),
+#             "video_url": reusable_payload.get("video_url"),
+#             "video_mime_type": reusable_payload.get("video_mime_type"),
+#             "duration_sec": reusable_payload.get("video_duration"),
+#             "steps": reusable_payload.get("steps") or ([{"description": step} for step in (reusable_payload.get("video_steps") or [])]),
+#             "_meta": {
+#                 "duration_ms": int((_time.time() - start_time) * 1000),
+#                 "shared_cache_hit": True,
+#                 "shared_source": reusable_entry.source_kind,
+#             },
+#         }
+# 
+#     # Tentative 1 : Veo (vraie vidéo)
+#     video_result = None
+#     try:
+#         if cat == "agriculture":
+#             video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les gestes techniques pour traiter : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : champ en Afrique sahélienne."
+#         elif cat == "elevage":
+#             video_prompt = f"Vidéo pédagogique courte (5-10 secondes) montrant les soins pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : élevage rural Burkina Faso."
+#         else:
+#             video_prompt = f"Vidéo courte (5-8 secondes) montrant les gestes d'urgence pour : {diagnostic}. Étapes : {'. '.join(steps_list)}. Contexte : village africain."
+# 
+#         video_result = await v2_services.generate_video(
+#             video_prompt,
+#             gemini_api_key=GEMINI_API_KEY,
+#             duration_sec=5 if cat == "urgence" else 8,
+#             is_urgency=cat == "urgence",
+#             category=cat,
+#         )
+#     except Exception as e:
+#         print(f"[VIDEO-ILLUS] Veo échoué: {e}")
+# 
+#     # Si Veo a réussi
+#     if video_result and video_result.get("success"):
+#         try:
+#             _persist_offline_knowledge_entry(
+#                 db=db,
+#                 user_id=current_user.id,
+#                 source_kind="generated_video_illustration",
+#                 category=cat,
+#                 question_text=cache_question,
+#                 response_payload=_build_media_offline_payload(
+#                     diagnostic=diagnostic,
+#                     steps=steps_list,
+#                     video_result=video_result,
+#                 ),
+#             )
+#         except Exception as e:
+#             print(f"[OFFLINE-CORPUS] Erreur persistance video illustration: {e}")
+#         return {
+#             "status": "success",
+#             "type": "video",
+#             "video_base64": video_result.get("video_base64"),
+#             "video_url": video_result.get("video_url"),
+#             "video_mime_type": video_result.get("mime_type", "video/mp4"),
+#             "duration_sec": video_result.get("duration_sec"),
+#         }
+# 
+#     # Fallback : image infographique étape par étape
+#     steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
+# 
+#     if cat == "agriculture":
+#         infographic_prompt = f"Infographie pédagogique agricole en 3-4 vignettes montrant les étapes pour traiter : {diagnostic}. {steps_text}. Style bande-dessinée simple, personnages africains. Pas de texte."
+#     elif cat == "elevage":
+#         infographic_prompt = f"Infographie pédagogique vétérinaire en 3-4 vignettes montrant les soins pour : {diagnostic}. {steps_text}. Style illustration simple. Pas de texte."
+#     else:
+#         infographic_prompt = f"Infographie premiers secours en 3-4 vignettes montrant les gestes pour : {diagnostic}. {steps_text}. Style schématique clair. Pas de texte."
+# 
+#     try:
+#         img_result = await v2_services.generate_image(infographic_prompt, style="schema", category=cat)
+#         if img_result and img_result.get("success"):
+#             steps_payload = [{"image_base64": img_result["image_base64"], "mime_type": img_result.get("mime_type", "image/png"), "description": diagnostic}]
+#             try:
+#                 _persist_offline_knowledge_entry(
+#                     db=db,
+#                     user_id=current_user.id,
+#                     source_kind="generated_video_illustration",
+#                     category=cat,
+#                     question_text=cache_question,
+#                     response_payload=_build_media_offline_payload(
+#                         diagnostic=diagnostic,
+#                         steps=steps_list,
+#                         image_result={
+#                             "image_base64": img_result.get("image_base64"),
+#                             "image_mime_type": img_result.get("mime_type", "image/png"),
+#                             "image_description": diagnostic,
+#                         },
+#                         video_result={
+#                             "type": "image_steps",
+#                             "steps": steps_payload,
+#                             "video_steps": steps_list,
+#                             "video_description": diagnostic,
+#                         },
+#                     ),
+#                 )
+#             except Exception as e:
+#                 print(f"[OFFLINE-CORPUS] Erreur persistance fallback illustration video: {e}")
+#             return {
+#                 "status": "success",
+#                 "type": "image_steps",
+#                 "steps": steps_payload,
+#             }
+#     except Exception as e:
+#         print(f"[VIDEO-ILLUS] Image fallback échoué: {e}")
+# 
+#     # Fallback ultime : texte
+#     text_fallback = {
+#         "status": "success",
+#         "type": "text_steps",
+#         "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
+#     }
+#     try:
+#         _persist_offline_knowledge_entry(
+#             db=db,
+#             user_id=current_user.id,
+#             source_kind="generated_video_illustration",
+#             category=cat,
+#             question_text=cache_question,
+#             response_payload=_build_media_offline_payload(
+#                 diagnostic=diagnostic,
+#                 steps=steps_list,
+#                 video_result={
+#                     "type": "text_steps",
+#                     "video_steps": steps_list,
+#                     "video_description": diagnostic,
+#                 },
+#             ),
+#         )
+#     except Exception as e:
+#         print(f"[OFFLINE-CORPUS] Erreur persistance text steps video: {e}")
+#     return text_fallback
+# 
+# 
+# @app.post("/api/v2/generate-image-illustration")
+# async def v2_generate_image_illustration(
+#     data: V2ImageIllustrationRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db),
+# ):
+#     """Génération on-demand d'une illustration pédagogique"""
+#     import time as _time
+#     start_time = _time.time()
+# 
+#     diagnostic = data.diagnostic
+#     steps_list = (data.steps or [])[:5]
+#     cat = _normalize_category(data.category)
+#     cache_question = _build_media_cache_question(diagnostic, steps_list)
+#     reusable_entry = _find_reusable_offline_entry(
+#         db,
+#         domain=_normalize_offline_domain(cat),
+#         source_kinds=["generated_image_illustration"],
+#         question_text=cache_question,
+#     )
+#     reusable_payload = _parse_offline_response_json(reusable_entry) if reusable_entry else {}
+#     # Réutiliser uniquement si 80% des mots-clés correspondent (dans les deux sens)
+#     def _cache_similarity(t1: str, t2: str) -> float:
+#         s1 = set(_tokenize(t1))
+#         s2 = set(_tokenize(t2))
+#         if not s1 or not s2:
+#             return 0.0
+#         overlap = len(s1 & s2)
+#         return min(overlap / len(s1), overlap / len(s2))
+# 
+#     good_cache_match = (
+#         reusable_entry is not None
+#         and _cache_similarity(cache_question, reusable_entry.question or "") >= 0.8
+#     )
+#     if good_cache_match and reusable_payload.get("image_base64"):
+#         return {
+#             "status": "success",
+#             "type": "image",
+#             "image_base64": reusable_payload.get("image_base64"),
+#             "image_mime_type": reusable_payload.get("image_mime_type"),
+#             "image_description": reusable_payload.get("image_description") or diagnostic,
+#             "_meta": {
+#                 "duration_ms": int((_time.time() - start_time) * 1000),
+#                 "shared_cache_hit": True,
+#                 "shared_source": reusable_entry.source_kind,
+#             },
+#         }
+#     steps_text = ". ".join(f"Étape {i+1}: {s}" for i, s in enumerate(steps_list)) if steps_list else diagnostic
+# 
+#     if cat == "agriculture":
+#         image_prompt = (
+#             f"Illustration pédagogique agricole montrant : {diagnostic}. "
+#             f"Montrer aussi les gestes recommandés : {steps_text}. "
+#             "Contexte : champ, outils et personnes du Burkina Faso. Pas de texte."
+#         )
+#         style = "illustration"
+#     elif cat == "elevage":
+#         image_prompt = (
+#             f"Illustration vétérinaire simple montrant : {diagnostic}. "
+#             f"Montrer les soins ou vérifications utiles : {steps_text}. "
+#             "Contexte : élevage rural au Burkina Faso. Pas de texte."
+#         )
+#         style = "illustration"
+#     else:
+#         image_prompt = (
+#             f"Illustration schématique claire montrant les gestes pour : {diagnostic}. "
+#             f"Étapes : {steps_text}. Contexte local Burkina Faso, style premiers secours non choquant. Pas de texte."
+#         )
+#         style = "schema"
+# 
+#     image_result = await v2_services.generate_image(image_prompt, style=style, category=cat)
+# 
+#     if image_result and image_result.get("success"):
+#         try:
+#             _persist_offline_knowledge_entry(
+#                 db=db,
+#                 user_id=current_user.id,
+#                 source_kind="generated_image_illustration",
+#                 category=cat,
+#                 question_text=cache_question,
+#                 response_payload=_build_media_offline_payload(
+#                     diagnostic=diagnostic,
+#                     steps=steps_list,
+#                     image_result=image_result,
+#                 ),
+#             )
+#         except Exception as e:
+#             print(f"[OFFLINE-CORPUS] Erreur persistance image illustration: {e}")
+#         return {
+#             "status": "success",
+#             "type": "image",
+#             "image_base64": image_result.get("image_base64"),
+#             "image_mime_type": image_result.get("mime_type", "image/png"),
+#             "image_description": diagnostic,
+#             "_meta": {
+#                 "duration_ms": int((_time.time() - start_time) * 1000),
+#             },
+#         }
+# 
+#     return {
+#         "status": "success",
+#         "type": "image_fallback",
+#         "image_description": image_result.get("fallback_description") if image_result else diagnostic,
+#         "steps": [{"description": s} for s in steps_list] if steps_list else [{"description": diagnostic}],
+#         "_meta": {
+#             "duration_ms": int((_time.time() - start_time) * 1000),
+#         },
+#     }
+# 
+# 
 @app.post("/api/contacts/sync")
 async def sync_rural_contacts(payload: RuralSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
     # 1. Update/Insert incoming contacts
@@ -9497,173 +9785,362 @@ async def sync_rural_contacts(payload: RuralSyncPayload, current_user: User = De
         ]
     }
 
-@app.post("/api/entreprendre/sync")
-async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
-    for r in payload.records:
-        existing = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.id == r.id).first()
-        try:
-            updated_at_dt = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
-        except:
-            updated_at_dt = datetime.utcnow()
-        
-        if not existing:
-            new_record = EntreprendreHistoryDB(
-                id=r.id,
-                user_id=current_user.id,
-                category=r.category,
-                user_query=r.user_query,
-                response_json=r.response_json,
-                photo_path=r.photo_path,
-                plot_id=r.plot_id,
-                translations_json=r.translations_json,
-                updated_at=updated_at_dt
-            )
-            db.add(new_record)
-        else:
-            if updated_at_dt > existing.updated_at:
-                existing.category = r.category
-                existing.user_query = r.user_query
-                existing.response_json = r.response_json
-                existing.photo_path = r.photo_path
-                existing.plot_id = r.plot_id
-                existing.translations_json = r.translations_json
-                existing.updated_at = updated_at_dt
-    
-    db.commit()
-    
-    my_records = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.user_id == current_user.id).all()
-    return {
-        "status": "success",
-        "records": [
-            {
-                "id": rec.id,
-                "category": rec.category,
-                "user_query": rec.user_query,
-                "response_json": rec.response_json,
-                "photo_path": rec.photo_path,
-                "plot_id": rec.plot_id,
-                "translations_json": rec.translations_json,
-                "updated_at": rec.updated_at.isoformat()
-            } for rec in my_records
-        ]
-    }
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str
+    category: Optional[str] = None
 
 
+@app.post("/api/translate")
+async def translate_text_endpoint(payload: TranslateRequest):
+    """Traduit un texte du Français vers une langue locale (Mooré, Dioula, etc.)"""
+    try:
+        from burkina_translator import translate_text
+        res = translate_text(
+            text=payload.text,
+            target_lang=payload.target_language.strip().lower(),
+            gemini_api_key=GEMINI_API_KEY,
+            category=payload.category
+        )
+        return {
+            "status": "success",
+            "translated_text": res.get("translation", payload.text),
+            "speech_text": res.get("speech_text", res.get("translation", payload.text)),
+            "confidence": res.get("confidence", 0.0),
+            "source": res.get("source", "unknown")
+        }
+    except Exception as e:
+        print(f"[TRANSLATOR] Erreur /api/translate: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "translated_text": payload.text,
+            "speech_text": payload.text
+        }
+
+# @app.post("/api/entreprendre/sync")
+# async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
+#     for r in payload.records:
+#         existing = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.id == r.id).first()
+#         try:
+#             updated_at_dt = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
+#         except:
+#             updated_at_dt = datetime.utcnow()
+#         
+#         if not existing:
+#             new_record = EntreprendreHistoryDB(
+#                 id=r.id,
+#                 user_id=current_user.id,
+#                 category=r.category,
+#                 user_query=r.user_query,
+#                 response_json=r.response_json,
+#                 photo_path=r.photo_path,
+#                 plot_id=r.plot_id,
+#                 translations_json=r.translations_json,
+#                 updated_at=updated_at_dt
+#             )
+#             db.add(new_record)
+#         else:
+#             if updated_at_dt > existing.updated_at:
+#                 existing.category = r.category
+#                 existing.user_query = r.user_query
+#                 existing.response_json = r.response_json
+#                 existing.photo_path = r.photo_path
+#                 existing.plot_id = r.plot_id
+#                 existing.translations_json = r.translations_json
+#                 existing.updated_at = updated_at_dt
+#     
+#     db.commit()
+#     
+#     my_records = db.query(EntreprendreHistoryDB).filter(EntreprendreHistoryDB.user_id == current_user.id).all()
+#     return {
+#         "status": "success",
+#         "records": [
+#             {
+#                 "id": rec.id,
+#                 "category": rec.category,
+#                 "user_query": rec.user_query,
+#                 "response_json": rec.response_json,
+#                 "photo_path": rec.photo_path,
+#                 "plot_id": rec.plot_id,
+#                 "translations_json": rec.translations_json,
+#                 "updated_at": rec.updated_at.isoformat()
+#             } for rec in my_records
+#         ]
+#     }
+# 
+# 
 class LocalTranslateIn(BaseModel):
     text: str
     target_lang: str
 
 
-@app.post("/api/translate/local")
-async def local_dictionary_translate(payload: LocalTranslateIn):
-    # Traduction avec LLM (priorité Gemini, fallback OpenAI) pour garantir une traduction naturelle et fluide,
-    # sans calque littéral mot-à-mot ni jargon incompréhensible, en attendant la complétude de Burkina Dict.
-    target_lang_label = payload.target_lang.strip().lower()
-    
-    # Résoudre les étiquettes de langue
-    lang_names = {
-        "moore": "Mooré",
-        "dioula": "Dioula",
-        "fulfulde": "Fulfuldé",
-        "gourounsi": "Gourounsi",
-        "bissa": "Bissa"
-    }
-    target_lang_name = lang_names.get(target_lang_label, target_lang_label.capitalize())
+# @app.post("/api/translate/local")
+# async def local_dictionary_translate(payload: LocalTranslateIn):
+#     # Traduction avec LLM (priorité Gemini, fallback OpenAI) pour garantir une traduction naturelle et fluide,
+#     # sans calque littéral mot-à-mot ni jargon incompréhensible, en attendant la complétude de Burkina Dict.
+#     target_lang_label = payload.target_lang.strip().lower()
+#     
+#     # Résoudre les étiquettes de langue
+#     lang_names = {
+#         "moore": "Mooré",
+#         "dioula": "Dioula",
+#         "fulfulde": "Fulfuldé",
+#         "gourounsi": "Gourounsi",
+#         "bissa": "Bissa"
+#     }
+#     target_lang_name = lang_names.get(target_lang_label, target_lang_label.capitalize())
+# 
+#     prompt = (
+#         f"Tu es un traducteur expert natif en langue {target_lang_name} (Burkina Faso).\n"
+#         f"Traduis le texte français suivant en {target_lang_name}.\n"
+#         f"CRITÈRES DE HAUTE QUALITÉ :\n"
+#         f"1. Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
+#         f"2. Si un mot spécifique (technique ou moderne) n'a pas d'équivalent direct, utilise des synonymes ou des paraphrases naturelles en langue locale plutôt que de le traduire littéralement.\n"
+#         f"3. Le ton doit être oral, clair et adapté à des producteurs ruraux.\n"
+#         f"4. Retourne UNIQUEMENT la traduction finale brute en {target_lang_name}. N'écris pas d'introduction, d'explication, ni de bloc de code markdown.\n\n"
+#         f"Texte français à traduire : {payload.text}"
+#     )
+# 
+#     try:
+#         # Priorité absolue à Gemini pour la qualité et fluidité des langues africaines
+#         if GEMINI_API_KEY:
+#             model = genai.GenerativeModel("gemini-2.5-flash")
+#             result = model.generate_content(prompt)
+#             translation = result.text.strip()
+#             # Nettoyer les éventuels restes de format markdown de bloc de code
+#             translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
+#             translation = re.sub(r"\n```$", "", translation)
+#             translation = translation.strip()
+#             if translation:
+#                 print(f"[INFO] Traduction locale /api/translate/local generee via Gemini pour {target_lang_name}")
+#                 return {"translation": translation}
+#         
+#         # Fallback OpenAI
+#         if openai_client and OPENAI_API_KEY:
+#             response = openai_client.chat.completions.create(
+#                 model="gpt-4o",
+#                 messages=[{"role": "user", "content": prompt}],
+#                 temperature=0.2,
+#                 max_tokens=2500,
+#             )
+#             content = response.choices[0].message.content if response.choices else ""
+#             translation = (content or "").strip()
+#             # Nettoyer markdown
+#             translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
+#             translation = re.sub(r"\n```$", "", translation)
+#             translation = translation.strip()
+#             if translation:
+#                 print(f"[INFO] Traduction locale /api/translate/local generee via OpenAI (fallback) pour {target_lang_name}")
+#                 return {"translation": translation}
+# 
+#     except Exception as exc:
+#         print(f"[WARN] Echec de traduction locale LLM /api/translate/local: {exc}")
+# 
+#     # Fallback ultime sur le texte brut
+#     return {"translation": payload.text}
+# 
+# 
+# # ==========================================
+# # LANCEMENT
+# # ==========================================
+# 
+# if __name__ == "__main__":
+#     import uvicorn
+#     port = int(os.getenv("PORT", "3000"))
+#     
+#     provider_name = os.getenv("AI_PROVIDER", "openai").upper()
+#     print("=" * 50)
+#     print(f"SONGRA - Backend unifié v2 ({provider_name})")
+#     print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
+#     print("=" * 50)
+#     print(f"Serveur démarré sur http://localhost:{port}")
+#     print("API v2: /api/v2/analyze, /api/v2/entreprendre, /api/v2/scanner/analyze")
+#     print("Test expert: test@resolvehub.bf / test123")
+#     print("=" * 50)
+#     
+#     # Créer l'expert test au démarrage
+#     try:
+#         db = SessionLocal()
+#         existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
+#         if not existing:
+#             expert = Expert(
+#                 email="test@resolvehub.bf",
+#                 password_hash=hash_password("test123"),
+#                 full_name="Expert Test IA",
+#                 specialization="agriculture",
+#                 is_active=True
+#             )
+#             db.add(expert)
+#             db.commit()
+#             print("[OK] Expert test créé: test@resolvehub.bf / test123")
+#         # Charger la base de connaissances locale depuis le JSON
+#         try:
+#             load_knowledge_from_json(db)
+#             total_items = db.query(KnowledgeItem).count()
+#             print(f"[OK] Base de connaissances chargée ({total_items} fiches)")
+#         except Exception as e_load:
+#             print(f"[ERROR] Chargement base de connaissances: {e_load}")
+#         db.close()
+#     except Exception as e:
+#         print(f"[ERROR] Création expert: {e}")
+#     
+#     # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
+#     # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
+#     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+# ── CAREMA PORTAL ADMIN ENDPOINTS ──────────────────────────────────────
 
-    prompt = (
-        f"Tu es un traducteur expert natif en langue {target_lang_name} (Burkina Faso).\n"
-        f"Traduis le texte français suivant en {target_lang_name}.\n"
-        f"CRITÈRES DE HAUTE QUALITÉ :\n"
-        f"1. Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
-        f"2. Si un mot spécifique (technique ou moderne) n'a pas d'équivalent direct, utilise des synonymes ou des paraphrases naturelles en langue locale plutôt que de le traduire littéralement.\n"
-        f"3. Le ton doit être oral, clair et adapté à des producteurs ruraux.\n"
-        f"4. Retourne UNIQUEMENT la traduction finale brute en {target_lang_name}. N'écris pas d'introduction, d'explication, ni de bloc de code markdown.\n\n"
-        f"Texte français à traduire : {payload.text}"
-    )
+@app.get("/api/admin/users")
+async def get_admin_users(db: Session = Depends(get_db)):
+    """Lister les utilisateurs pour CAREMA avec leur historique"""
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        ticket_count = db.query(Ticket).filter(Ticket.user_id == u.id).count()
+        result.append({
+            "id": u.id,
+            "phone_number": u.phone_number,
+            "name": u.name,
+            "location": u.location,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "is_active": getattr(u, "is_active", True),
+            "role": getattr(u, "role", "utilisateur"),
+            "ticket_count": ticket_count
+        })
+    return result
 
-    try:
-        # Priorité absolue à Gemini pour la qualité et fluidité des langues africaines
-        if GEMINI_API_KEY:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            result = model.generate_content(prompt)
-            translation = result.text.strip()
-            # Nettoyer les éventuels restes de format markdown de bloc de code
-            translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
-            translation = re.sub(r"\n```$", "", translation)
-            translation = translation.strip()
-            if translation:
-                print(f"[INFO] Traduction locale /api/translate/local generee via Gemini pour {target_lang_name}")
-                return {"translation": translation}
+@app.put("/api/admin/users/{user_id}/status")
+async def update_user_status(user_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Activer/désactiver ou changer le rôle d'un utilisateur"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if "is_active" in payload:
+        user.is_active = payload["is_active"]
+    if "role" in payload:
+        user.role = payload["role"]
+    db.commit()
+    return {"status": "success", "user": {
+        "id": user.id,
+        "is_active": getattr(user, "is_active", True),
+        "role": getattr(user, "role", "utilisateur")
+    }}
+
+@app.get("/api/admin/experts")
+async def get_admin_experts(db: Session = Depends(get_db)):
+    """Lister le réseau d'experts"""
+    experts = db.query(Expert).all()
+    result = []
+    for e in experts:
+        result.append({
+            "id": e.id,
+            "email": e.email,
+            "full_name": e.full_name,
+            "specialization": e.specialization,
+            "is_active": e.is_active,
+            "zone": getattr(e, "zone", ""),
+            "project": getattr(e, "project", ""),
+            "language": getattr(e, "language", ""),
+            "institution": getattr(e, "institution", "")
+        })
+    return result
+
+@app.post("/api/admin/experts")
+async def create_admin_expert(payload: dict, db: Session = Depends(get_db)):
+    """Créer ou modifier un expert dans le réseau"""
+    email = payload.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
         
-        # Fallback OpenAI
-        if openai_client and OPENAI_API_KEY:
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=2500,
-            )
-            content = response.choices[0].message.content if response.choices else ""
-            translation = (content or "").strip()
-            # Nettoyer markdown
-            translation = re.sub(r"^```[a-zA-Z]*\n", "", translation)
-            translation = re.sub(r"\n```$", "", translation)
-            translation = translation.strip()
-            if translation:
-                print(f"[INFO] Traduction locale /api/translate/local generee via OpenAI (fallback) pour {target_lang_name}")
-                return {"translation": translation}
+    expert = db.query(Expert).filter(Expert.email == email).first()
+    if not expert:
+        # Create new (meme schema de hash que /api/auth/login : hash_password/verify_password)
+        password_hash = hash_password(payload.get("password", "expert123"))
+        expert = Expert(
+            email=email,
+            password_hash=password_hash,
+            full_name=payload.get("full_name", ""),
+            specialization=payload.get("specialization", ""),
+            is_active=payload.get("is_active", True),
+            zone=payload.get("zone", ""),
+            project=payload.get("project", ""),
+            language=payload.get("language", ""),
+            institution=payload.get("institution", "")
+        )
+        db.add(expert)
+    else:
+        # Update existing
+        expert.full_name = payload.get("full_name", expert.full_name)
+        expert.specialization = payload.get("specialization", expert.specialization)
+        expert.is_active = payload.get("is_active", expert.is_active)
+        expert.zone = payload.get("zone", expert.zone)
+        expert.project = payload.get("project", expert.project)
+        expert.language = payload.get("language", expert.language)
+        expert.institution = payload.get("institution", expert.institution)
+        
+    db.commit()
+    return {"status": "success", "expert_id": expert.id}
 
-    except Exception as exc:
-        print(f"[WARN] Echec de traduction locale LLM /api/translate/local: {exc}")
+@app.post("/api/tickets/{ticket_id}/reply-voice")
+async def reply_ticket_voice(
+    ticket_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Associer une réponse audio locale (traduction) à un ticket"""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+        
+    os.makedirs("uploads/replies", exist_ok=True)
+    filename = f"reply_{ticket_id}_{int(time.time())}_{file.filename}"
+    filepath = f"uploads/replies/{filename}"
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    # Ajouter un message vocal au ticket
+    new_msg = Message(
+        ticket_id=ticket_id,
+        sender_type="expert",
+        sender_id=ticket.expert_id or 1,
+        content="[Message Vocal Traduit en Langue Locale]",
+        channel="web",
+        audio_url=f"/uploads/replies/{filename}"
+    )
+    db.add(new_msg)
+    
+    # Mettre à jour le ticket
+    ticket.status = "resolved"
+    db.commit()
+    
+    return {"status": "success", "audio_url": f"/uploads/replies/{filename}"}
 
-    # Fallback ultime sur le texte brut
-    return {"translation": payload.text}
+class TicketStatusUpdate(BaseModel):
+    status: str
 
+@app.put("/api/tickets/{ticket_id}/status")
+async def update_ticket_status(
+    ticket_id: int,
+    payload: TicketStatusUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour le statut d'un ticket (Workflow CAREMA)"""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    
+    ticket.status = payload.status
+    if payload.status == "resolved":
+        ticket.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"status": "success", "new_status": ticket.status}
 
-# ==========================================
-# LANCEMENT
-# ==========================================
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "3000"))
-    
-    provider_name = os.getenv("AI_PROVIDER", "openai").upper()
-    print("=" * 50)
-    print(f"SONGRA - Backend unifié v2 ({provider_name})")
-    print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
-    print("=" * 50)
-    print(f"Serveur démarré sur http://localhost:{port}")
-    print("API v2: /api/v2/analyze, /api/v2/entreprendre, /api/v2/scanner/analyze")
-    print("Test expert: test@resolvehub.bf / test123")
-    print("=" * 50)
-    
-    # Créer l'expert test au démarrage
-    try:
-        db = SessionLocal()
-        existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
-        if not existing:
-            expert = Expert(
-                email="test@resolvehub.bf",
-                password_hash=hash_password("test123"),
-                full_name="Expert Test IA",
-                specialization="agriculture",
-                is_active=True
-            )
-            db.add(expert)
-            db.commit()
-            print("[OK] Expert test créé: test@resolvehub.bf / test123")
-        # Charger la base de connaissances locale depuis le JSON
-        try:
-            load_knowledge_from_json(db)
-            total_items = db.query(KnowledgeItem).count()
-            print(f"[OK] Base de connaissances chargée ({total_items} fiches)")
-        except Exception as e_load:
-            print(f"[ERROR] Chargement base de connaissances: {e_load}")
-        db.close()
-    except Exception as e:
-        print(f"[ERROR] Création expert: {e}")
-    
-    # Le mode reload est plutôt à utiliser avec la commande uvicorn en ligne
-    # de commande (ex: `uvicorn main:app --reload`). Ici on garde un run simple.
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+    import os
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+

@@ -9,6 +9,8 @@ import sys
 import json
 import base64
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()  # Charge le fichier .env
 import google.generativeai as genai
 from PIL import Image
 import io

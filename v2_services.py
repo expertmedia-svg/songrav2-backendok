@@ -173,21 +173,32 @@ TÂCHE : Analyser le problème décrit (texte et/ou image) et retourner un diagn
 Si une image est fournie, commence par décrire CE QUE TU VOIS avant de diagnostiquer.
 Si du texte est fourni, utilise-le comme contexte supplémentaire.
 
+CONSIGNE DE CONCISION ET BREVETÉ ABSOLUE (Important pour la traduction en langues locales) :
+- "description_visuelle" : maximum 1 courte phrase simple.
+- "diagnostic" : maximum 1 courte phrase simple et percutante (max 12 mots).
+- "causes_probables" : maximum 2 causes très brèves (chacune 3 à 6 mots).
+- "actions_immediates" : maximum 2 actions ultra-brèves (chacune max 8 mots).
+- "actions_detaillees" : maximum 2 étapes simples (chacune max 8 mots).
+- "actions_preventives" : maximum 2 conseils simples (chacune max 8 mots).
+- "message_expert" : maximum 1 courte phrase (max 10 mots).
+Ne fais JAMAIS de longues phrases explicatives ni de listes à rallonge. Va droit au but.
+
 RETOURNE UNIQUEMENT un objet JSON valide avec cette structure EXACTE :
 {
   "type_probleme": "agriculture | elevage | urgence",
-  "description_visuelle": "ce que tu observes sur l'image (vide si pas d'image)",
-  "diagnostic": "explication claire et simple du problème identifié",
+  "description_visuelle": "description visuelle ultra-brève (max 1 phrase)",
+  "diagnostic": "diagnostic ultra-bref (max 1 phrase de 12 mots)",
   "gravite": "faible | moyenne | critique",
   "confiance": 0.0 à 1.0,
   "causes_probables": ["cause 1", "cause 2"],
-  "actions_immediates": ["action urgente 1", "action urgente 2"],
-  "actions_detaillees": ["étape détaillée 1 avec dosages si applicable", "étape 2"],
-  "actions_preventives": ["prévention 1", "prévention 2"],
-  "besoin_image": true ou false (true si une image explicative aiderait),
-  "besoin_video": true ou false (true si une vidéo pédagogique aiderait),
+  "actions_immediates": ["action 1", "action 2"],
+  "actions_detaillees": ["action 1", "action 2"],
+  "actions_preventives": ["action 1", "action 2"],
+  "besoin_image": true ou false,
+  "besoin_video": true ou false,
   "consulter_expert": true ou false,
-  "message_expert": "quand et pourquoi consulter un expert (vide si pas nécessaire)"
+  "message_expert": "message expert ultra-bref (max 10 mots)",
+  "icone_pedagogique": "arrosage | traitement | insecte | engrais | maladie | veterinaire | secourisme | isolement | bruler"
 }
 
 IMPORTANT :
@@ -337,12 +348,50 @@ def _normalize_video_duration(duration_sec: int) -> int:
     return 8
 
 
+def _extract_json_object(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    cleaned = re.sub(r"```json\s*", "", text)
+    cleaned = re.sub(r"```\s*", "", cleaned)
+    cleaned = cleaned.strip()
+
+    start = cleaned.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index in range(start, len(cleaned)):
+        char = cleaned[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                return cleaned[start:index + 1]
+
+    return None
+
+
 def _parse_gemini_json(response_text: str) -> dict:
     """Parse robuste du JSON retourné par Gemini ou OpenAI"""
     if not response_text:
         raise ValueError("Réponse vide du LLM")
-        
-    # Nettoyage basique des blocs Markdown
+
     cleaned = re.sub(r"```json\s*", "", response_text)
     cleaned = re.sub(r"```\s*", "", cleaned)
     cleaned = cleaned.strip()
@@ -353,22 +402,19 @@ def _parse_gemini_json(response_text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Tentative 2: Recherche du premier bloc {...}
-    json_match = re.search(r"(\{[\s\S]*\})", cleaned)
-    if json_match:
-        candidate = json_match.group(1)
+    candidate = _extract_json_object(cleaned)
+    if candidate:
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
-            # Tentative 3: Nettoyage agressif du bloc trouvé
             sanitized = re.sub(r"[\r\n]+", " ", candidate)
-            sanitized = re.sub(r",\s*}", "}", sanitized)
+            sanitized = re.sub(r",\s*}\s*\]", "}", sanitized)
             sanitized = re.sub(r",\s*]", "]", sanitized)
             try:
                 return json.loads(sanitized)
             except json.JSONDecodeError as e:
                 print(f"[JSON-PARSER] Erreur ultime sur: {candidate[:100]}... -> {e}")
-                
+
     raise ValueError(f"Impossible de parser la réponse LLM en JSON (longueur: {len(response_text)})")
 
 
@@ -560,7 +606,9 @@ async def _openai_generate_image(prompt: str, style: str = "illustration", categ
         image_b64 = response.data[0].b64_json
         return {"success": True, "image_base64": image_b64, "mime_type": "image/png"}
     except Exception as e:
+        import traceback
         print(f"[openai_generate_image] Erreur: {e}")
+        traceback.print_exc()
         return {"success": False, "error": str(e), "fallback_description": prompt}
 
 
@@ -627,6 +675,7 @@ def _build_analysis_fallback(text: str, category: str, has_image: bool, error: E
             "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
             "from_fallback": True,
             "fallback_reason": str(error),
+            "icone_pedagogique": "secourisme",
         }
 
     if type_probleme == "elevage":
@@ -660,6 +709,7 @@ def _build_analysis_fallback(text: str, category: str, has_image: bool, error: E
             "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
             "from_fallback": True,
             "fallback_reason": str(error),
+            "icone_pedagogique": "veterinaire",
         }
 
     causes = [
@@ -707,6 +757,7 @@ def _build_analysis_fallback(text: str, category: str, has_image: bool, error: E
         "message_expert": "Réponse de secours utilisée car le service IA avancé est momentanément indisponible.",
         "from_fallback": True,
         "fallback_reason": str(error),
+        "icone_pedagogique": "arrosage" if any(k in normalized_text for k in ["arros", "eau", "sec", "sech"]) else "maladie",
     }
 
 
@@ -851,10 +902,14 @@ async def gemini_analyze(
         raw_json = _parse_gemini_json(response_text)
         analysis = _validate_analysis(raw_json)
     except Exception as error:
-        if not _should_use_resilient_fallback(error):
-            raise
-        print(f"[gemini_analyze] Fallback local active: {error}")
-        analysis = _build_analysis_fallback(text=text, category=category, has_image=has_image, error=error)
+        print(f"[gemini_analyze] Erreur Gemini ({error}). Bascule automatique sur OpenAI...")
+        try:
+            analysis = await _openai_analyze(text, images_b64, category)
+        except Exception as openai_error:
+            print(f"[gemini_analyze] Échec de la bascule sur OpenAI ({openai_error}). Fallback local active.")
+            if not _should_use_resilient_fallback(error):
+                raise
+            analysis = _build_analysis_fallback(text=text, category=category, has_image=has_image, error=error)
 
     if category in ("urgence", "sos_accident"):
         analysis["type_probleme"] = "urgence"
@@ -912,10 +967,14 @@ async def gemini_analyze_entrepreneurship(
         raw_json = _parse_gemini_json(response_text)
         return _validate_entrepreneurship(raw_json)
     except Exception as error:
-        if not _should_use_resilient_fallback(error):
-            raise
-        print(f"[gemini_analyze_entrepreneurship] Fallback local active: {error}")
-        return _build_entrepreneurship_fallback(category=category, has_image=has_image, error=error)
+        print(f"[gemini_analyze_entrepreneurship] Erreur Gemini ({error}). Bascule automatique sur OpenAI...")
+        try:
+            return await _openai_analyze_entrepreneurship(text, images_b64, category)
+        except Exception as openai_error:
+            print(f"[gemini_analyze_entrepreneurship] Échec de la bascule sur OpenAI ({openai_error}). Fallback local active.")
+            if not _should_use_resilient_fallback(error):
+                raise
+            return _build_entrepreneurship_fallback(category=category, has_image=has_image, error=error)
 
 
 # ══════════════════════════════════════════════════════
@@ -1023,22 +1082,6 @@ async def generate_image(prompt: str, style: str = "illustration", category: str
     if not prompt or not prompt.strip():
         return {"success": False, "error": "Prompt image requis"}
 
-    # ── Routing provider ──────────────────────────────
-    if AI_PROVIDER == "openai":
-        is_urgency = style == "schema"
-        visual_prompt = _sanitize_visual_prompt(prompt, is_urgency=is_urgency)
-        style_instructions = {
-            "schema": "Style dessin au trait, très simple, fond blanc, traits noirs épais, couleurs vives. Comme une notice de montage sans texte. Compréhensible par tous.",
-            "illustration": "Style illustration pédagogique claire, couleurs du Sahel, personnages burkinabè, environnement rural local.",
-            "photo_realiste": "Style photo réaliste, lumière naturelle du Burkina Faso, détails authentiques de la vie rurale.",
-        }
-        enriched = (
-            f"{visual_prompt}. {style_instructions.get(style, '')}. "
-            f"{_visual_context_block(category, is_urgency=is_urgency)}. "
-            "RAPPEL : STRICTEMENT AUCUN TEXTE DANS L'IMAGE."
-        )
-        return await _openai_generate_image(enriched, style, category)
-
     style_instructions = {
         "schema": "Style dessin simple, traits épais, couleurs de base. Compréhensible sans savoir lire. Pas de texte.",
         "illustration": "Style illustration pédagogique burkinabè, claire, simple et éducative.",
@@ -1079,11 +1122,7 @@ async def generate_image(prompt: str, style: str = "illustration", category: str
                 break
 
         if not image_base64:
-            return {
-                "success": False,
-                "error": "Aucune image générée par le modèle",
-                "fallback_description": prompt,
-            }
+            raise ValueError("Aucune image générée par le modèle")
 
         return {
             "success": True,
@@ -1091,12 +1130,26 @@ async def generate_image(prompt: str, style: str = "illustration", category: str
             "mime_type": mime_type,
         }
     except Exception as e:
-        print(f"[imageGenerator] Erreur: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "fallback_description": prompt,
-        }
+        print(f"[imageGenerator] Erreur Gemini Imagen ({e}). Bascule automatique sur OpenAI DALL-E...")
+        try:
+            style_instructions_openai = {
+                "schema": "Style dessin au trait, très simple, fond blanc, traits noirs épais, couleurs vives. Comme une notice de montage sans texte. Compréhensible par tous.",
+                "illustration": "Style illustration pédagogique claire, couleurs du Sahel, personnages burkinabè, environnement rural local.",
+                "photo_realiste": "Style photo réaliste, lumière naturelle du Burkina Faso, détails authentiques de la vie rurale.",
+            }
+            enriched_openai = (
+                f"{visual_prompt}. {style_instructions_openai.get(style, '')}. "
+                f"{_visual_context_block(category, is_urgency=is_urgency)}. "
+                "RAPPEL : STRICTEMENT AUCUN TEXTE DANS L'IMAGE."
+            )
+            return await _openai_generate_image(enriched_openai, style, category)
+        except Exception as openai_error:
+            print(f"[imageGenerator] Échec de la bascule sur OpenAI ({openai_error}). Retour de l'erreur d'origine.")
+            return {
+                "success": False,
+                "error": str(e),
+                "fallback_description": prompt,
+            }
 
 
 # ══════════════════════════════════════════════════════
@@ -1219,6 +1272,7 @@ def build_response(
             "confiance": analysis["confiance"],
             "causes": analysis["causes_probables"],
             "description_visuelle": analysis.get("description_visuelle") or None,
+            "icone_pedagogique": analysis.get("icone_pedagogique") or "maladie",
         },
         "actions": actions,
         "image_url": None,
@@ -1478,14 +1532,14 @@ async def gemini_llm_general_knowledge(
         user_prompt = (
             f"Domaine: {domain}. Langue: {language or 'fr'}.\n\n"
             f"{photo_section}\n"
-            "Commence par 'D'après l'analyse de ta photo :'. Max 15 phrases.\n"
+            "Commence par 'D'après l'analyse de ta photo :'. Sois extrêmement bref et concis. Maximum 4 à 5 courtes phrases simples au total (pas de longues phrases).\n"
             f"{conversation_text}"
         )
     else:
         user_prompt = (
             f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
             f"Question : {question}\n{conversation_text}\n"
-            "Aide cette personne. Conseils concrets numérotés. Max 15 phrases."
+            "Aide cette personne de façon très brève. Donne maximum 3 conseils concrets ultra-courts (chaque conseil max 8 mots). Maximum 4 à 5 courtes phrases au total pour faciliter la traduction."
         )
 
     # ── Routing provider ──────────────────────────────
