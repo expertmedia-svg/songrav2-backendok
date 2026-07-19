@@ -383,16 +383,67 @@ def translate_module_response(
     return result
 
 
+_SYLLABLE_VOWELS = "aeiouyàâäéèêëïîôöùûüɛɔ"
+
+
+def _syllabify(word: str) -> List[str]:
+    """Découpe approximative d'un mot en syllabes (groupes consonnes+voyelle).
+
+    Sert de repli grossier mais utile : un moteur de reconnaissance vocale
+    francophone transcrit une langue locale de façon phonétique et découpe
+    souvent les mots au mauvais endroit. Chercher des correspondances au
+    niveau syllabe (plutôt qu'au niveau mot entier issu du STT) retrouve des
+    correspondances dans le dictionnaire local même quand le mot transcrit
+    est faux.
+    """
+    word = word.lower().strip()
+    if len(word) <= 2:
+        return [word] if word else []
+
+    syllables: List[str] = []
+    current = ""
+    for char in word:
+        current += char
+        if char in _SYLLABLE_VOWELS:
+            syllables.append(current)
+            current = ""
+    if current:
+        if syllables:
+            syllables[-1] += current
+        else:
+            syllables.append(current)
+    return syllables or [word]
+
+
+def _syllable_fragments(text: str) -> List[str]:
+    """Fragments syllabiques d'un texte : syllabes seules + paires de syllabes adjacentes."""
+    words = re.sub(r"[.,!?;:()'\"\\/@]", " ", text.lower()).split()
+    fragments: List[str] = []
+    for word in words:
+        syllables = _syllabify(word)
+        fragments.extend(s for s in syllables if len(s) >= 2)
+        for i in range(len(syllables) - 1):
+            pair = syllables[i] + syllables[i + 1]
+            if len(pair) >= 3:
+                fragments.append(pair)
+    return fragments
+
+
 def translate_query_to_french(
     query: str,
     source_lang: str,
     gemini_api_key: Optional[str] = None,
 ) -> str:
     """Traduit une requête écrite ou vocale de l'utilisateur (en langue locale) vers le Français.
-    
-    1. Découpe en mots/syllabes et cherche des correspondances dans le dictionnaire local inversé.
-    2. Utilise Gemini AI si disponible pour reconstituer une phrase cohérente en Français
-       à partir des correspondances locales et du contexte global.
+
+    1. Découpe en mots ET en syllabes, cherche des correspondances dans le dictionnaire
+       local inversé à chaque niveau (mot entier, sous-chaîne, syllabe) — nécessaire car
+       le moteur de reconnaissance vocale (francophone) transcrit la langue locale de façon
+       phonétique et découpe souvent les mots au mauvais endroit.
+    2. Passe TOUJOURS par Gemini (si la clé est disponible) en lui fournissant les
+       correspondances locales trouvées ET un extrait plus large du dictionnaire local,
+       pour qu'il reconstruise intelligemment le sens réel de la phrase plutôt que de
+       deviner une traduction mot-à-mot en français.
     """
     query = (query or "").strip()
     if not query or source_lang not in VALID_LANGS:
@@ -407,41 +458,76 @@ def translate_query_to_french(
         if local_val and fr_word:
             inverted_dict[local_val] = fr_word
 
-    # 1. Extraction par mot/syllabe local
-    words_in_query = re.sub(r"[.,!?;:()'\"\\/@]", " ", query.lower()).split()
-    matched_french_words = []
-    
-    # Recherche exacte de mots entiers ou de groupes de mots inversés
-    for local_phrase, fr_word in inverted_dict.items():
-        if local_phrase in query.lower():
+    query_lower = query.lower()
+    matched_french_words: List[str] = []
+
+    def _add_match(fr_word: str) -> None:
+        if fr_word and fr_word not in matched_french_words:
             matched_french_words.append(fr_word)
-            
-    # Recherche mot par mot ou par syllabe
+
+    # 1. Correspondance exacte de groupes de mots inversés dans la requête
+    for local_phrase, fr_word in inverted_dict.items():
+        if local_phrase in query_lower:
+            _add_match(fr_word)
+
+    # 2. Correspondance mot à mot / sous-chaîne (tolère les frontières de mots
+    #    mal placées par le STT)
+    words_in_query = re.sub(r"[.,!?;:()'\"\\/@]", " ", query_lower).split()
     for word in words_in_query:
         if len(word) < 2:
             continue
         for local_phrase, fr_word in inverted_dict.items():
             if word in local_phrase or local_phrase in word:
-                if fr_word not in matched_french_words:
-                    matched_french_words.append(fr_word)
+                _add_match(fr_word)
 
-    # 2. Utilisation de Gemini pour affiner la traduction de la requête
+    # 3. Correspondance syllabique : retrouve des correspondances même quand
+    #    le "mot" transcrit par le STT ne matche jamais tel quel. Seuil de
+    #    longueur minimal indispensable : une syllabe de 2-3 lettres apparaît
+    #    comme sous-chaîne dans une grande partie du dictionnaire et noierait
+    #    le signal utile sous des centaines de faux positifs.
+    for fragment in _syllable_fragments(query):
+        if len(fragment) < 4:
+            continue
+        for local_phrase, fr_word in inverted_dict.items():
+            if len(local_phrase) >= 3 and (fragment in local_phrase or local_phrase in fragment):
+                _add_match(fr_word)
+        if len(matched_french_words) >= 20:
+            break
+
+    # 4. Reconstruction intelligente : TOUJOURS passer par Gemini (jamais une
+    #    simple substitution mot-à-mot), en combinant les correspondances
+    #    locales détectées avec un extrait plus large du dictionnaire local.
     lang_name = LANG_NAMES[source_lang]
     if gemini_api_key:
         dict_context_str = ""
         if matched_french_words:
             dict_context_str = (
-                "\nMots clés détectés localement et leurs correspondances :\n"
-                + ", ".join([f"{w} -> {inverted_dict.get(w, '') or w}" for w in matched_french_words[:15]])
+                "\nMots-clés locaux détectés (mot entier + syllabes) et leurs correspondances "
+                "en français :\n"
+                + ", ".join(matched_french_words[:20])
                 + "\n"
             )
-        
+
+        broader_context = _build_dict_context(query, source_lang, max_entries=15)
+        broader_context_str = ""
+        if broader_context:
+            broader_context_str = (
+                "\nAutre extrait du dictionnaire local pouvant être pertinent (français -> "
+                f"{lang_name}) :\n"
+                + json.dumps(broader_context, ensure_ascii=False)
+                + "\n"
+            )
+
         prompt = (
             f"Tu es un traducteur et linguiste expert de la langue {lang_name} (Burkina Faso) vers le Français.\n"
-            f"L'utilisateur rural a posé une question en {lang_name}.\n"
-            f"Traduis cette question en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les maladies agricoles/d'élevage/urgences.\n\n"
-            f"Requête utilisateur en {lang_name} : \"{query}\"\n"
-            f"{dict_context_str}\n"
+            f"L'utilisateur rural a posé une question en {lang_name}, transcrite PHONÉTIQUEMENT par un moteur "
+            f"de reconnaissance vocale francophone (donc potentiellement déformée ou mal découpée en mots).\n"
+            f"Reconstitue le sens réel de la question à partir des sons/syllabes et des correspondances "
+            f"locales ci-dessous (ne traduis jamais mot-à-mot une transcription déformée), puis traduis-la "
+            f"en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les "
+            f"maladies agricoles/d'élevage/urgences.\n\n"
+            f"Requête utilisateur (transcription phonétique {lang_name}) : \"{query}\"\n"
+            f"{dict_context_str}{broader_context_str}\n"
             f"Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
         )
         
