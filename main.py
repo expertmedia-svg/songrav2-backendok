@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
 import os
 import jwt
@@ -36,7 +36,12 @@ from gemini_vision import GeminiVisionEngine
 import v2_services
 import agri_services
 import yingr_ai_api
-from burkina_translator import translate_module_response, VALID_LANGS as _TRANSLATOR_VALID_LANGS, LANG_NAMES as _TRANSLATOR_LANG_NAMES
+from burkina_translator import (
+    translate_fields_and_voice_summary,
+    SONGRA_TEXT_FIELDS as _TRANSLATOR_TEXT_FIELDS,
+    VALID_LANGS as _TRANSLATOR_VALID_LANGS,
+    LANG_NAMES as _TRANSLATOR_LANG_NAMES,
+)
 
 
 os.makedirs("uploads", exist_ok=True)
@@ -2208,29 +2213,24 @@ def _attach_local_translation_audio(
     return translations
 
 
-def _build_voice_reply_audio(
-    text: str,
+def _synthesize_voice_audio(
+    voice_summary: Optional[Dict[str, Any]],
     target_lang: str,
-    category: Optional[str] = None,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Resume + traduit une reponse francaise en langue locale et synthetise l'audio.
+    """Synthetise l'audio a partir d'un resume vocal DEJA traduit.
 
-    Destine a la VOIX de l'assistant (pas au texte affiche a l'ecran) : lire mot a
-    mot une reponse LLM complete en langue locale est long et fatigant a l'oral,
-    donc Gemini produit d'abord un resume oral court, puis sa transcription
-    phonetique syllabique (speech_text) est lue par la voix TTS francaise pour un
-    rendu sonore realiste (cf. burkina_translator._TRANSCRIPTION_RULES).
+    La traduction + le resume oral court doivent avoir ete produits en amont par
+    burkina_translator.translate_fields_and_voice_summary() (UNE SEULE requete
+    LLM couvrant a la fois le texte affiche et le resume vocal) : ne jamais
+    refaire un appel de traduction ici, ca doublerait le nombre d'appels
+    Gemini/OpenAI par reponse et ferait tomber plus vite sur le quota gratuit
+    Gemini (429 Too Many Requests).
     """
-    cleaned_text = str(text or "").strip()
-    if not cleaned_text or target_lang not in _TRANSLATOR_VALID_LANGS:
+    if not voice_summary or target_lang not in _TRANSLATOR_VALID_LANGS:
         return None
 
-    from burkina_translator import translate_and_summarize_for_speech
-    result = translate_and_summarize_for_speech(
-        cleaned_text, target_lang, GEMINI_API_KEY, category
-    )
-    speech_text = (result.get("speech_text") or result.get("summary") or "").strip()
+    speech_text = (voice_summary.get("speech_text") or voice_summary.get("summary") or "").strip()
     if not speech_text:
         return None
 
@@ -2239,12 +2239,45 @@ def _build_voice_reply_audio(
         return None
 
     return {
-        "voice_summary": result.get("summary"),
+        "voice_summary": voice_summary.get("summary"),
         "speech_text": speech_text,
         "audio_url": audio_meta.get("audio_url"),
         "audio_mime_type": audio_meta.get("audio_mime_type"),
-        "confidence": result.get("confidence"),
+        "confidence": voice_summary.get("confidence"),
     }
+
+
+def _translate_v2_response_with_voice(
+    final_response: Dict[str, Any],
+    target_lang: str,
+    category: Optional[str],
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Traduit un final_response v2 (module Songra) ET produit l'audio vocal,
+    en UNE SEULE requete LLM (cf. translate_fields_and_voice_summary)."""
+    to_translate: Dict[str, str] = {}
+    for field in _TRANSLATOR_TEXT_FIELDS:
+        val = final_response.get(field)
+        if isinstance(val, str) and val.strip():
+            to_translate[field] = val.strip()
+        elif isinstance(val, list):
+            joined = " | ".join(str(v) for v in val if v)
+            if joined:
+                to_translate[field] = joined
+
+    if not to_translate:
+        return final_response, None
+
+    combined = translate_fields_and_voice_summary(
+        to_translate, target_lang, GEMINI_API_KEY, category, voice_source_field="message",
+    )
+    final_response = dict(final_response)
+    final_response["local_translation"] = {
+        "target_lang": target_lang,
+        "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang),
+        "fields": combined.get("translations", {}),
+    }
+    voice_payload = _synthesize_voice_audio(combined.get("voice_summary"), target_lang)
+    return final_response, voice_payload
 
 
 def _normalize_expert_local_audio(raw: Any) -> Dict[str, Dict[str, Any]]:
@@ -5894,12 +5927,11 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     # remplacant leur valeur francaise par la traduction (le francais original
     # reste disponible dans conversation_context / ai_analysis).
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        # Texte source (francais) a utiliser pour la synthese vocale, capture
-        # AVANT que les champs ci-dessous ne soient ecrases par leur traduction.
-        source_text_for_voice = response.get("llm_answer") or response.get("rag_fallback_answer") or ""
-
+        # Traduction du texte affiche ET resume vocal + phonetique en UNE SEULE
+        # requete LLM (translate_fields_and_voice_summary), pour eviter de
+        # doubler les appels Gemini/OpenAI et tomber plus vite sur un quota
+        # (429 Too Many Requests) qui faisait echouer la traduction en silence.
         try:
-            from burkina_translator import translate_fields
             fields_to_translate: Dict[str, str] = {}
             if response.get("llm_answer"):
                 fields_to_translate["llm_answer"] = response["llm_answer"]
@@ -5907,34 +5939,27 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
                 fields_to_translate["rag_fallback_answer"] = response["rag_fallback_answer"]
 
             if fields_to_translate:
-                translated_fields = translate_fields(
-                    fields_to_translate, target_lang, GEMINI_API_KEY, chosen_category
+                voice_source_field = "llm_answer" if response.get("llm_answer") else "rag_fallback_answer"
+                combined = translate_fields_and_voice_summary(
+                    fields_to_translate, target_lang, GEMINI_API_KEY, chosen_category,
+                    voice_source_field=voice_source_field,
                 )
-                for field_name, result in translated_fields.items():
+                for field_name, result in combined.get("translations", {}).items():
                     translated_value = (result or {}).get("translation")
                     if translated_value:
                         response[field_name] = translated_value
+
+                voice_payload = _synthesize_voice_audio(combined.get("voice_summary"), target_lang)
+                if voice_payload:
+                    response["voice_summary"] = voice_payload.get("voice_summary")
+                    response["audio_url"] = voice_payload.get("audio_url")
+                    response["audio_mime_type"] = voice_payload.get("audio_mime_type")
 
             response["translated"] = bool(fields_to_translate)
             response["target_lang"] = target_lang
             response["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
         except Exception as e_resp_trans:
             print(f"[TRANSLATOR] Erreur traduction reponse assistant legacy: {e_resp_trans}")
-
-        # Synthese vocale reelle : un resume court est traduit puis transcrit
-        # phonetiquement (syllabe par syllabe) pour etre lu par la voix TTS
-        # francaise de facon realiste, au lieu de laisser l'app lire le texte
-        # francais brut avec un moteur TTS local qui ne connait pas la langue.
-        try:
-            voice_payload = _build_voice_reply_audio(
-                source_text_for_voice, target_lang, chosen_category
-            )
-            if voice_payload:
-                response["voice_summary"] = voice_payload.get("voice_summary")
-                response["audio_url"] = voice_payload.get("audio_url")
-                response["audio_mime_type"] = voice_payload.get("audio_mime_type")
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale assistant legacy: {e_voice}")
 
     return response
 
@@ -9281,17 +9306,12 @@ async def v2_analyze(
     target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
-            final_response = translate_module_response(
-                final_response, target_lang, GEMINI_API_KEY, category
+            final_response, voice_payload = _translate_v2_response_with_voice(
+                final_response, target_lang, category
             )
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/analyze: {_te}")
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/analyze: {e_voice}")
 
     return {
         "status": "success",
@@ -9362,17 +9382,12 @@ async def v2_scanner_analyze(
     target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
-            final_response = translate_module_response(
-                final_response, target_lang, GEMINI_API_KEY, category
+            final_response, voice_payload = _translate_v2_response_with_voice(
+                final_response, target_lang, category
             )
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/scanner: {_te}")
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/scanner: {e_voice}")
 
     return {
         "status": "success",
@@ -9436,21 +9451,12 @@ async def v2_assistant_query(
     target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        source_message = final_response.get("message") or ""
         try:
-            final_response = translate_module_response(
-                final_response, target_lang, GEMINI_API_KEY, category
+            final_response, voice_payload = _translate_v2_response_with_voice(
+                final_response, target_lang, category
             )
         except Exception as _te:
             print(f"[TRANSLATOR] Erreur traduction v2/assistant: {_te}")
-
-        # Synthese vocale reelle (resume + transcription phonetique syllabique
-        # lue par la voix TTS francaise), au lieu de laisser l'app lire le
-        # texte francais/local brut avec un moteur TTS qui ne connait pas la langue.
-        try:
-            voice_payload = _build_voice_reply_audio(source_message, target_lang, category)
-        except Exception as e_voice:
-            print(f"[TRANSLATOR] Erreur synthese vocale v2/assistant: {e_voice}")
 
     return {
         "status": "success",

@@ -387,7 +387,7 @@ def translate_and_summarize_for_speech(
     return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
 
 
-_SONGRA_TEXT_FIELDS = [
+SONGRA_TEXT_FIELDS = [
     "what_i_see", "disease_detected", "analysis", "detailed_analysis",
     "treatment", "treatment_local", "treatment_chemical", "prevention",
     "urgency_message", "recommendations", "consultation_type",
@@ -397,6 +397,7 @@ _SONGRA_TEXT_FIELDS = [
     "description_terrain", "decoupage_terrain", "gestion_eau",
     "title", "text", "body",
 ]
+_SONGRA_TEXT_FIELDS = SONGRA_TEXT_FIELDS  # alias retro-compatible (usage interne)
 
 
 def translate_fields(
@@ -466,6 +467,111 @@ def translate_fields(
             results[field] = {"translation": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
 
     return results
+
+
+def translate_fields_and_voice_summary(
+    fields: Dict[str, str],
+    target_lang: str,
+    gemini_api_key: Optional[str] = None,
+    category: Optional[str] = None,
+    voice_source_field: Optional[str] = None,
+    max_sentences: int = 3,
+) -> Dict[str, Any]:
+    """Traduit des champs ET produit un resume vocal en UNE SEULE requete LLM.
+
+    translate_fields() (traduction complete pour l'affichage) et
+    translate_and_summarize_for_speech() (resume court pour la voix) faisaient
+    chacune leur propre appel Gemini/OpenAI, donc CHAQUE reponse vocale
+    declenchait 2 appels — ce qui doublait le risque de tomber sur le quota
+    gratuit Gemini (429 Too Many Requests) et faisait echouer la traduction en
+    silence. On fusionne les deux besoins dans un seul prompt/une seule reponse
+    JSON pour diviser par deux le nombre d'appels.
+
+    Retourne {"translations": {champ: {...}}, "voice_summary": {...} | None}.
+    """
+    if not fields or target_lang not in VALID_LANGS:
+        return {"translations": {}, "voice_summary": None}
+
+    clean_fields = {
+        field: text.strip()
+        for field, text in fields.items()
+        if isinstance(text, str) and text.strip()
+    }
+    if not clean_fields:
+        return {"translations": {}, "voice_summary": None}
+
+    voice_source_text = (
+        clean_fields.get(voice_source_field) if voice_source_field else None
+    ) or next(iter(clean_fields.values()))
+
+    lang_name = LANG_NAMES[target_lang]
+    dict_context = _build_dict_context(" ".join(clean_fields.values()), target_lang)
+    dict_str = ""
+    if dict_context:
+        dict_str = (
+            "\nExtrait du dictionnaire local (a respecter en priorite) :\n"
+            + json.dumps(dict_context, ensure_ascii=False, indent=2) + "\n"
+        )
+    cat_ctx = f"Contexte : {category}. " if category else ""
+    fields_json = json.dumps(clean_fields, ensure_ascii=False, indent=2)
+
+    prompt = (
+        f"Tu es un linguiste expert natif en {lang_name} (Burkina Faso).\n\n"
+        f"{cat_ctx}Tu dois faire DEUX taches EN UNE SEULE reponse JSON :\n"
+        f"1) Traduire integralement chacun des champs ci-dessous du Francais vers le {lang_name} "
+        f"(pour l'affichage texte).\n"
+        f"2) Resumer le message principal en {max_sentences} phrases ORALES courtes MAXIMUM, "
+        f"traduites en {lang_name}, adaptees a une lecture a voix haute (ton chaleureux, direct, actionnable).\n\n"
+        f"{_TRANSCRIPTION_RULES}\n\n{_TRANSLATION_PRINCIPLES}\n{dict_str}\n"
+        f"CHAMPS A TRADUIRE INTEGRALEMENT :\n{fields_json}\n\n"
+        f"MESSAGE PRINCIPAL A RESUMER POUR LA VOIX :\n\"\"\"{voice_source_text}\"\"\"\n\n"
+        "REPONSE JSON STRICTE (un seul objet, rien d'autre) :\n"
+        "{\n"
+        '  "translations": {\n'
+        f'    "<nom_champ>": {{"translation": "<texte en {lang_name}>", "speech_text": "<phonetique TTS>", "confidence": 0.0}}\n'
+        "  },\n"
+        '  "voice_summary": {\n'
+        f'    "summary": "<resume {max_sentences} phrases max, traduit en {lang_name}>",\n'
+        '    "speech_text": "<version phonetique francisee et syllabique du resume, pour lecture TTS>",\n'
+        "    \"confidence\": 0.0\n"
+        "  }\n"
+        "}"
+    )
+
+    ai_result = _call_translation_llm(prompt, gemini_api_key)
+
+    translations: Dict[str, Any] = {}
+    if ai_result:
+        for field, res in (ai_result.get("translations") or {}).items():
+            if isinstance(res, dict) and res.get("translation"):
+                translations[field] = {
+                    "translation": res.get("translation", clean_fields.get(field, "")),
+                    "speech_text": res.get("speech_text", res.get("translation", "")),
+                    "confidence": float(res.get("confidence", 0.75)),
+                    "source": "combined_ai",
+                }
+    for field, text in clean_fields.items():
+        if field not in translations:
+            translations[field] = {"translation": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
+
+    voice_summary: Optional[Dict[str, Any]] = None
+    raw_voice = ai_result.get("voice_summary") if ai_result else None
+    if isinstance(raw_voice, dict) and raw_voice.get("summary"):
+        voice_summary = {
+            "summary": raw_voice.get("summary"),
+            "speech_text": raw_voice.get("speech_text", raw_voice.get("summary")),
+            "confidence": float(raw_voice.get("confidence", 0.75)),
+            "source": "combined_ai",
+        }
+    else:
+        voice_summary = {
+            "summary": voice_source_text,
+            "speech_text": voice_source_text,
+            "confidence": 0.0,
+            "source": "fallback_original",
+        }
+
+    return {"translations": translations, "voice_summary": voice_summary}
 
 
 def translate_module_response(
