@@ -207,6 +207,70 @@ def _call_gemini_translation(prompt: str, gemini_api_key: str) -> Optional[Dict[
         return None
 
 
+def _call_openai_translation(prompt: str) -> Optional[Dict[str, Any]]:
+    """Repli OpenAI quand Gemini est indisponible (ex: probleme de billing/quota
+    Gemini, deja rencontre sur ce projet — cf. AI_PROVIDER dans v2_services.py,
+    qui bascule tout le reste de l'app sur OpenAI par defaut pour cette raison).
+    Sans ce repli, la traduction echouait silencieusement et gardait le texte
+    francais original des que Gemini etait en panne.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt + "\n\nReponds UNIQUEMENT avec un objet JSON valide, sans markdown ni explication.",
+                }
+            ],
+            temperature=0.2,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return json.loads(content) if content else None
+    except Exception as e:
+        print(f"[TRANSLATOR] OpenAI (repli) echec: {e}")
+        return None
+
+
+def _call_openai_plain_text(prompt: str) -> Optional[str]:
+    """Repli OpenAI pour un prompt attendant une reponse texte brut (pas de JSON)."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=500,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return content.strip() if content else None
+    except Exception as e:
+        print(f"[TRANSLATOR] OpenAI (repli texte) echec: {e}")
+        return None
+
+
+def _call_translation_llm(prompt: str, gemini_api_key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Traduit via Gemini en priorite (meilleure qualite pour les langues locales
+    du Burkina Faso), puis bascule automatiquement sur OpenAI si Gemini echoue."""
+    if gemini_api_key:
+        result = _call_gemini_translation(prompt, gemini_api_key)
+        if result:
+            return result
+        print("[TRANSLATOR] Gemini indisponible pour la traduction, repli OpenAI")
+    return _call_openai_translation(prompt)
+
+
 def translate_text(
     text: str,
     target_lang: str,
@@ -231,35 +295,34 @@ def translate_text(
         if s:
             return {"translation": s, "speech_text": s, "confidence": 0.85, "source": "local_synonym"}
 
-    if gemini_api_key:
-        dict_context = _build_dict_context(text, target_lang)
-        dict_str = ""
-        if dict_context:
-            dict_str = (
-                "\nExtrait du dictionnaire local (a respecter en priorite) :\n"
-                + json.dumps(dict_context, ensure_ascii=False, indent=2) + "\n"
-            )
-        cat_ctx = f"Contexte : {category}. " if category else ""
-        prompt = (
-            f"Tu es un linguiste expert natif en {lang_name} (Burkina Faso).\n\n"
-            f"{cat_ctx}Traduis le texte suivant du Francais vers le {lang_name} (code: {target_lang}).\n\n"
-            f"{_TRANSCRIPTION_RULES}\n\n{_TRANSLATION_PRINCIPLES}\n{dict_str}\n"
-            f"TEXTE A TRADUIRE :\n\"\"\"{text}\"\"\"\n\n"
-            f"REPONSE JSON STRICTE :\n"
-            "{{\n"
-            f'  "translation": "<traduction naturelle en {lang_name}>",\n'
-            '  "speech_text": "<version phonetique francisee pour TTS>",\n'
-            '  "confidence": <0.0-1.0>\n'
-            "}}"
+    dict_context = _build_dict_context(text, target_lang)
+    dict_str = ""
+    if dict_context:
+        dict_str = (
+            "\nExtrait du dictionnaire local (a respecter en priorite) :\n"
+            + json.dumps(dict_context, ensure_ascii=False, indent=2) + "\n"
         )
-        ai = _call_gemini_translation(prompt, gemini_api_key)
-        if ai and ai.get("translation"):
-            return {
-                "translation": ai.get("translation", text),
-                "speech_text": ai.get("speech_text", ai.get("translation", text)),
-                "confidence": float(ai.get("confidence", 0.75)),
-                "source": "gemini_ai",
-            }
+    cat_ctx = f"Contexte : {category}. " if category else ""
+    prompt = (
+        f"Tu es un linguiste expert natif en {lang_name} (Burkina Faso).\n\n"
+        f"{cat_ctx}Traduis le texte suivant du Francais vers le {lang_name} (code: {target_lang}).\n\n"
+        f"{_TRANSCRIPTION_RULES}\n\n{_TRANSLATION_PRINCIPLES}\n{dict_str}\n"
+        f"TEXTE A TRADUIRE :\n\"\"\"{text}\"\"\"\n\n"
+        f"REPONSE JSON STRICTE :\n"
+        "{{\n"
+        f'  "translation": "<traduction naturelle en {lang_name}>",\n'
+        '  "speech_text": "<version phonetique francisee pour TTS>",\n'
+        '  "confidence": <0.0-1.0>\n'
+        "}}"
+    )
+    ai = _call_translation_llm(prompt, gemini_api_key)
+    if ai and ai.get("translation"):
+        return {
+            "translation": ai.get("translation", text),
+            "speech_text": ai.get("speech_text", ai.get("translation", text)),
+            "confidence": float(ai.get("confidence", 0.75)),
+            "source": "gemini_ai",
+        }
 
     return {"translation": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
 
@@ -286,8 +349,6 @@ def translate_and_summarize_for_speech(
         return {"summary": "", "speech_text": "", "confidence": 1.0, "source": "empty"}
     if target_lang not in VALID_LANGS:
         return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "invalid_lang"}
-    if not gemini_api_key:
-        return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "no_gemini_key"}
 
     lang_name = LANG_NAMES[target_lang]
     dict_context = _build_dict_context(text, target_lang)
@@ -314,7 +375,7 @@ def translate_and_summarize_for_speech(
         '  "confidence": <0.0-1.0>\n'
         "}"
     )
-    ai = _call_gemini_translation(prompt, gemini_api_key)
+    ai = _call_translation_llm(prompt, gemini_api_key)
     if ai and ai.get("summary"):
         return {
             "summary": ai.get("summary", text),
@@ -365,7 +426,7 @@ def translate_fields(
                 continue
         needs_ai[field] = text.strip()
 
-    if needs_ai and gemini_api_key:
+    if needs_ai:
         dict_context = _build_dict_context(" ".join(needs_ai.values()), target_lang)
         dict_str = ""
         if dict_context:
@@ -388,7 +449,7 @@ def translate_fields(
             "  }\n"
             "}"
         )
-        ai_result = _call_gemini_translation(prompt, gemini_api_key)
+        ai_result = _call_translation_llm(prompt, gemini_api_key)
         if ai_result and "translations" in ai_result:
             for field, res in ai_result["translations"].items():
                 if isinstance(res, dict) and res.get("translation"):
@@ -560,39 +621,42 @@ def translate_query_to_french(
     #    simple substitution mot-à-mot), en combinant les correspondances
     #    locales détectées avec un extrait plus large du dictionnaire local.
     lang_name = LANG_NAMES[source_lang]
-    if gemini_api_key:
-        dict_context_str = ""
-        if matched_french_words:
-            dict_context_str = (
-                "\nMots-clés locaux détectés (mot entier + syllabes) et leurs correspondances "
-                "en français :\n"
-                + ", ".join(matched_french_words[:20])
-                + "\n"
-            )
-
-        broader_context = _build_dict_context(query, source_lang, max_entries=15)
-        broader_context_str = ""
-        if broader_context:
-            broader_context_str = (
-                "\nAutre extrait du dictionnaire local pouvant être pertinent (français -> "
-                f"{lang_name}) :\n"
-                + json.dumps(broader_context, ensure_ascii=False)
-                + "\n"
-            )
-
-        prompt = (
-            f"Tu es un traducteur et linguiste expert de la langue {lang_name} (Burkina Faso) vers le Français.\n"
-            f"L'utilisateur rural a posé une question en {lang_name}, transcrite PHONÉTIQUEMENT par un moteur "
-            f"de reconnaissance vocale francophone (donc potentiellement déformée ou mal découpée en mots).\n"
-            f"Reconstitue le sens réel de la question à partir des sons/syllabes et des correspondances "
-            f"locales ci-dessous (ne traduis jamais mot-à-mot une transcription déformée), puis traduis-la "
-            f"en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les "
-            f"maladies agricoles/d'élevage/urgences.\n\n"
-            f"Requête utilisateur (transcription phonétique {lang_name}) : \"{query}\"\n"
-            f"{dict_context_str}{broader_context_str}\n"
-            f"Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
+    dict_context_str = ""
+    if matched_french_words:
+        dict_context_str = (
+            "\nMots-clés locaux détectés (mot entier + syllabes) et leurs correspondances "
+            "en français :\n"
+            + ", ".join(matched_french_words[:20])
+            + "\n"
         )
-        
+
+    broader_context = _build_dict_context(query, source_lang, max_entries=15)
+    broader_context_str = ""
+    if broader_context:
+        broader_context_str = (
+            "\nAutre extrait du dictionnaire local pouvant être pertinent (français -> "
+            f"{lang_name}) :\n"
+            + json.dumps(broader_context, ensure_ascii=False)
+            + "\n"
+        )
+
+    prompt = (
+        f"Tu es un traducteur et linguiste expert de la langue {lang_name} (Burkina Faso) vers le Français.\n"
+        f"L'utilisateur rural a posé une question en {lang_name}, transcrite PHONÉTIQUEMENT par un moteur "
+        f"de reconnaissance vocale francophone (donc potentiellement déformée ou mal découpée en mots).\n"
+        f"Reconstitue le sens réel de la question à partir des sons/syllabes et des correspondances "
+        f"locales ci-dessous (ne traduis jamais mot-à-mot une transcription déformée), puis traduis-la "
+        f"en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les "
+        f"maladies agricoles/d'élevage/urgences.\n\n"
+        f"Requête utilisateur (transcription phonétique {lang_name}) : \"{query}\"\n"
+        f"{dict_context_str}{broader_context_str}\n"
+        f"Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
+    )
+
+    # Gemini en priorite, puis repli OpenAI si Gemini est indisponible (meme
+    # logique de resilience que pour la traduction de reponses, cf. _call_translation_llm).
+    translated_text = None
+    if gemini_api_key:
         try:
             import urllib.request
             url = (
@@ -610,11 +674,16 @@ def translate_query_to_french(
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 translated_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                if translated_text:
-                    translated_text = re.sub(r'^["\']|["\']$', '', translated_text).strip()
-                    return translated_text
         except Exception as e:
             print(f"[TRANSLATOR] Échec traduction requête Gemini: {e}")
+
+    if not translated_text:
+        translated_text = _call_openai_plain_text(prompt)
+
+    if translated_text:
+        translated_text = re.sub(r'^["\']|["\']$', '', translated_text).strip()
+        if translated_text:
+            return translated_text
 
     # Fallback local
     if matched_french_words:
