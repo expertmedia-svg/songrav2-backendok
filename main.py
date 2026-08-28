@@ -7066,7 +7066,9 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     reconstructed_query_local = original_query
     query_interpretation_confidence = 1.0
     target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+    # Une photo sans transcription n'a rien à traduire. La catégorie et le
+    # résultat Vision servent directement à retrouver la fiche Studio.
+    if original_query and target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
         try:
             from burkina_translator import translate_query_to_french
             interpretation = translate_query_to_french(
@@ -7291,6 +7293,42 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     cache_answer_fr = _clean_assistant_text(
         response.get("llm_answer") or response.get("rag_fallback_answer")
     )
+
+    # Le endpoint historique renvoie aussi le contrat V2 afin que les sessions
+    # phone-only ouvrent exactement la même fiche résultat que les comptes JWT.
+    if studio_match_info:
+        photo_requires_expert = bool(
+            isinstance(photo_analysis, dict)
+            and photo_analysis.get("requires_expert")
+        )
+        v2_payload = {
+            "message": cache_answer_fr or studio_match_info.get("resolution_fr") or "",
+            "diagnostic": {
+                "type": chosen_category,
+                "description": studio_match_info.get("title") or "Fiche SONGRA",
+                "gravite": (
+                    str((photo_analysis or {}).get("severity") or "moyenne")
+                    if isinstance(photo_analysis, dict) else "moyenne"
+                ),
+                "confiance": (
+                    (photo_analysis or {}).get("confidence", 0.8)
+                    if isinstance(photo_analysis, dict) else 0.8
+                ),
+                "causes": [],
+            },
+            "actions": [],
+            "urgence": bool(
+                isinstance(photo_analysis, dict)
+                and (photo_analysis.get("urgency") == "high")
+            ),
+            "priorite": 1 if photo_requires_expert else 3,
+            "consulter_expert": photo_requires_expert,
+        }
+        response.update(
+            _apply_studio_match_to_v2_response(
+                v2_payload, studio_match_info, target_lang
+            )
+        )
 
     # ── AUDIO HUMAIN DE LA BASE LOCALE ───────────────────────────────────────
     # Le diagnostic et la recherche restent en français. Pour une langue locale,

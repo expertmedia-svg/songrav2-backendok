@@ -364,8 +364,7 @@ def _call_openai_plain_text(prompt: str) -> Optional[str]:
     """Repli OpenAI pour un prompt attendant une reponse texte brut (pas de JSON)."""
     if os.getenv("AI_PROVIDER", "openai").lower() == "groq":
         groq_result = _call_groq_translation(prompt, json_mode=False)
-        if groq_result:
-            return str(groq_result)
+        return str(groq_result) if groq_result else None
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -389,9 +388,9 @@ def _call_translation_llm(prompt: str, gemini_api_key: Optional[str]) -> Optiona
     """Traduit via Gemini en priorite (meilleure qualite pour les langues locales
     du Burkina Faso), puis bascule automatiquement sur OpenAI si Gemini echoue."""
     if os.getenv("AI_PROVIDER", "openai").lower() == "groq":
-        result = _call_groq_translation(prompt)
-        if result:
-            return result
+        # Groq est le fournisseur exclusif quand AI_PROVIDER=groq. Une erreur
+        # Groq remonte en réponse indisponible sans consommer Gemini/OpenAI.
+        return _call_groq_translation(prompt)
     if gemini_api_key:
         result = _call_gemini_translation(prompt, gemini_api_key)
         if result:
