@@ -2086,8 +2086,18 @@ def _build_upload_url(path: Optional[str]) -> Optional[str]:
 
 def _normalize_expert_local_language(language: Optional[str]) -> str:
     normalized = str(language or "fr").strip().lower()
-    if normalized in {"moore", "mooree"}:
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFD", normalized)
+        if unicodedata.category(character) != "Mn"
+    )
+    normalized = re.sub(r"[^a-z]", "", normalized)
+    if normalized in {"moore", "mooree", "more", "mossi"}:
         return "moore"
+    if normalized in {"jula", "dyula"}:
+        return "dioula"
+    if normalized in {"fula", "fulani", "peul", "peulh"}:
+        return "fulfulde"
     if normalized not in {"fr", "moore", "dioula", "fulfulde"}:
         return "fr"
     return normalized
@@ -2509,7 +2519,9 @@ def _serialize_expert_local_knowledge_item(item: ExpertLocalKnowledgeDB) -> Dict
         "status": item.status,
         "origin": item.origin,
         "translations": _load_json_dict(item.translations_json),
-        "audio": _load_json_dict(item.audio_json),
+        # Les anciennes fiches peuvent contenir des clés comme "Mooré".
+        # Le scanner consomme toujours les codes canoniques moore/dioula/fulfulde.
+        "audio": _normalize_expert_local_audio(_load_json_dict(item.audio_json)),
         "expert_id": getattr(item, "expert_id", None),
         "reviewer_id": getattr(item, "reviewer_id", None),
         "review_notes": getattr(item, "review_notes", None),
@@ -2882,7 +2894,7 @@ def _apply_studio_match_to_v2_response(
     result["knowledge_mode"] = "studio_knowledge"
     result["knowledge_card"] = studio_match
 
-    audio_map = studio_match.get("audio") or {}
+    audio_map = _normalize_expert_local_audio(studio_match.get("audio") or {})
     translations = studio_match.get("translations") or {}
     localizations: Dict[str, Any] = dict(result.get("localizations") or {})
     french_audio = audio_map.get("fr") if isinstance(audio_map.get("fr"), dict) else {}
@@ -2920,6 +2932,16 @@ def _apply_studio_match_to_v2_response(
         result["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
         result["audio_url"] = local_audio.get("url") if has_local_audio else None
         result["audio_mime_type"] = local_audio.get("mime_type") if has_local_audio else None
+        available_audio_languages = sorted(
+            language
+            for language, audio_data in audio_map.items()
+            if isinstance(audio_data, dict) and str(audio_data.get("url") or "").strip()
+        )
+        print(
+            f"[STUDIO-AUDIO] fiche=#{studio_match.get('id')} langue_demandee={target_lang} "
+            f"langues_disponibles={available_audio_languages} voix_trouvee={has_local_audio} "
+            f"url={str(local_audio.get('url') or '')[:180]}"
+        )
     result["localizations"] = localizations
     return result
 
@@ -9111,12 +9133,31 @@ async def update_expert_local_knowledge_item(
     if not is_admin and item.expert_id != current_expert.id:
         raise HTTPException(status_code=403, detail="Cette fiche appartient à un autre expert")
 
-    item.title = payload.title.strip() or payload.question_fr[:120]
-    item.category = _normalize_expert_local_category(payload.category)
-    item.question_fr = payload.question_fr.strip()
-    item.resolution_fr = payload.resolution_fr.strip()
-    item.tags_json = json.dumps(payload.tags or [], ensure_ascii=False)
-    item.status = _normalize_expert_local_status(payload.status) if is_admin else "pending_review"
+    next_title = payload.title.strip() or payload.question_fr[:120]
+    next_category = _normalize_expert_local_category(payload.category)
+    next_question = payload.question_fr.strip()
+    next_resolution = payload.resolution_fr.strip()
+    next_tags = [str(tag).strip() for tag in (payload.tags or []) if str(tag).strip()]
+    content_changed = any((
+        next_title != (item.title or ""),
+        next_category != (item.category or ""),
+        next_question != (item.question_fr or ""),
+        next_resolution != (item.resolution_fr or ""),
+        next_tags != [str(tag).strip() for tag in _load_json_list(item.tags_json)],
+    ))
+    previous_status = item.status
+    item.title = next_title
+    item.category = next_category
+    item.question_fr = next_question
+    item.resolution_fr = next_resolution
+    item.tags_json = json.dumps(next_tags, ensure_ascii=False)
+    if is_admin:
+        requested_status = _normalize_expert_local_status(payload.status)
+        # Le formulaire envoie historiquement pending_review même lorsqu'un admin
+        # ajoute seulement une voix à une fiche déjà publiée.
+        item.status = previous_status if previous_status in {"validated", "resolved", "expert_verified"} and requested_status == "pending_review" else requested_status
+    else:
+        item.status = previous_status if not content_changed and previous_status in {"validated", "resolved", "expert_verified"} else "pending_review"
     item.expert_id = item.expert_id or current_expert.id
     item.origin = str(payload.origin or item.origin or "expert_manual")
     item.translations_json = json.dumps(
@@ -9187,10 +9228,13 @@ async def upload_expert_local_knowledge_audio(
     relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, file_name).replace("\\", "/")
     absolute_path = os.path.abspath(relative_path)
     content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Le fichier audio envoyé est vide")
+    _ensure_parent_dir(absolute_path)
     with open(absolute_path, "wb") as handle:
         handle.write(content)
 
-    next_audio = _load_json_dict(item.audio_json)
+    next_audio = _normalize_expert_local_audio(_load_json_dict(item.audio_json))
     next_audio[normalized_language] = {
         "url": _build_upload_url(relative_path),
         "mime_type": audio.content_type or "audio/webm",
@@ -9199,6 +9243,10 @@ async def upload_expert_local_knowledge_audio(
     item.audio_json = json.dumps(next_audio, ensure_ascii=False)
     db.commit()
     db.refresh(item)
+    print(
+        f"[STUDIO-AUDIO-UPLOAD] fiche=#{item.id} langue={normalized_language} "
+        f"octets={len(content)} url={next_audio[normalized_language]['url']}"
+    )
     return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
 
 
