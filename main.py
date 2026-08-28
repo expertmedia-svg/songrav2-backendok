@@ -3779,8 +3779,21 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
                 })
             
             print(f"📤 Envoi à {self.provider_name}/{self.model}: {len(content)} éléments (1 texte + {len(images_base64)} images)")
-            
-            # Appeler GPT-4o avec vision
+
+            # Appeler le modèle avec vision.
+            # NOTE: certains modèles Groq (ex: qwen/qwen3.6-27b) sont des
+            # modèles "thinking" qui émettent un bloc <think>...</think> de
+            # raisonnement AVANT la réponse finale. Avec un max_tokens trop
+            # bas, ce raisonnement consommait tout le budget et la réponse
+            # JSON n'était jamais générée (réponse tronquée en plein <think>).
+            # reasoning_format="hidden" demande à Groq de ne renvoyer que la
+            # réponse finale (sans le raisonnement) dans le contenu du
+            # message, et on augmente max_tokens pour laisser la place au
+            # raisonnement interne + au JSON complet.
+            extra_kwargs: Dict[str, Any] = {}
+            if self.provider_name == "Groq":
+                extra_kwargs["extra_body"] = {"reasoning_format": "hidden"}
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -3789,14 +3802,20 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
                         "content": content
                     }
                 ],
-                max_tokens=1024,
-                temperature=0.7
+                max_tokens=3000,
+                temperature=0.7,
+                **extra_kwargs,
             )
-            
+
             print(f"✅ Réponse {self.provider_name} Vision reçue")
-            
+
             # Parser la réponse
-            response_text = response.choices[0].message.content
+            response_text = response.choices[0].message.content or ""
+            # Filet de sécurité : si le modèle a quand même renvoyé un bloc
+            # <think>...</think> malgré reasoning_format="hidden" (ou pour
+            # d'autres providers), on l'ignore pour ne parser que la partie
+            # utile de la réponse.
+            response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
             print(f"📝 Réponse brute {self.provider_name}: {response_text[:300]}...")
             
             # Extraire le JSON de la réponse
