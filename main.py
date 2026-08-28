@@ -6833,7 +6833,14 @@ Appelez les secours pendant que vous effectuez ces gestes
         
         for idx, item in enumerate(rag_items, start=1):
             print(f"  - FICHE {idx}: {item.get('title')} (domaine: {item.get('domain')})")
-        
+
+        studio_match_debug = knowledge_result.get("studio_match")
+        if studio_match_debug:
+            print(
+                f"[FICHE] Reponse basee sur la fiche Studio #{studio_match_debug.get('id')} "
+                f"'{studio_match_debug.get('title')}' (score={studio_match_debug.get('match_score')})"
+            )
+
         if llm_answer:
             if knowledge_mode == "llm_general_knowledge":
                 print("[LLM-GENERAL] Réponse générée avec connaissances générales (début):", llm_answer[:250].replace("\n", " "))
@@ -6910,6 +6917,13 @@ Appelez les secours pendant que vous effectuez ces gestes
     if rag_items:
         response["rag_items"] = rag_items
 
+    # Identifier explicitement la fiche du Studio utilisée (si une fiche a
+    # été retenue), pour permettre à l'app/aux logs de savoir précisément
+    # quelle fiche a servi de base à la réponse.
+    studio_match_info = knowledge_result.get("studio_match")
+    response["knowledge_fiche_id"] = studio_match_info.get("id") if studio_match_info else None
+    response["knowledge_fiche_title"] = studio_match_info.get("title") if studio_match_info else None
+
     # Ajouter la réponse principale générée par le LLM si disponible
     if llm_answer:
         response["llm_answer"] = llm_answer
@@ -6918,7 +6932,7 @@ Appelez les secours pendant que vous effectuez ces gestes
         # pour que l'utilisateur ait au moins la réponse validée locale,
         # même si la clé OpenAI n'est pas configurée.
         response["rag_fallback_answer"] = knowledge_result["rag_fallback_answer"]
-    
+
     return response
 
 
@@ -7177,10 +7191,18 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
             print(f"[INFO] [ASSISTANT] LLM-GENERAL | Connaissances générales sans RAG")
         elif knowledge_mode == "no_match":
             print(f"[ERROR] [ASSISTANT] NO-MATCH | Aucune source disponible")
+
+        studio_match_debug = knowledge_result.get("studio_match")
+        if studio_match_debug:
+            print(
+                f"[FICHE] [ASSISTANT] Reponse basee sur la fiche Studio #{studio_match_debug.get('id')} "
+                f"'{studio_match_debug.get('title')}' (score={studio_match_debug.get('match_score')})"
+            )
     except Exception as e:
         print(f"[ASSISTANT] Log error: {e}")
 
     # 6. Construction de la réponse (sans ticket)
+    studio_match_info = knowledge_result.get("studio_match")
     response: Dict[str, Any] = {
         "status": "success",
         "ai_analysis": ai_result,
@@ -7191,6 +7213,11 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         "normalized_query_fr": search_query_fr,
         "reconstructed_query_local": reconstructed_query_local,
         "query_interpretation_confidence": query_interpretation_confidence,
+        # Identifie explicitement la fiche du Studio utilisée pour répondre
+        # (null si aucune fiche ne correspondait et que la réponse vient du
+        # LLM général ou du RAG élargi).
+        "knowledge_fiche_id": studio_match_info.get("id") if studio_match_info else None,
+        "knowledge_fiche_title": studio_match_info.get("title") if studio_match_info else None,
     }
 
     if photo_analysis is not None:
@@ -7534,6 +7561,7 @@ async def get_ticket_ai_summary(ticket_id: int, db: Session = Depends(get_db)):
     )
     rag_items = knowledge_result["rag_items"]
     llm_answer = knowledge_result["llm_answer"] or knowledge_result["rag_fallback_answer"]
+    studio_match_info = knowledge_result.get("studio_match")
 
     return {
         "status": "success",
@@ -7542,6 +7570,8 @@ async def get_ticket_ai_summary(ticket_id: int, db: Session = Depends(get_db)):
         "rag_items": rag_items,
         "knowledge_mode": knowledge_result["knowledge_mode"],
         "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
+        "knowledge_fiche_id": studio_match_info.get("id") if studio_match_info else None,
+        "knowledge_fiche_title": studio_match_info.get("title") if studio_match_info else None,
     }
 
 

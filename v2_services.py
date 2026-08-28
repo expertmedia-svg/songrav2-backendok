@@ -712,6 +712,15 @@ async def _openai_llm_answer(system_prompt: str, user_prompt: str, json_mode: bo
         return None
 
 
+async def _groq_llm_answer(system_prompt: str, user_prompt: str, json_mode: bool = False) -> Optional[str]:
+    """Réponse LLM texte via Groq (utilise le même modèle/réglages que _groq_analyze)."""
+    try:
+        return await _groq_chat(system_prompt, user_prompt, json_mode=json_mode)
+    except Exception as e:
+        print(f"[groq_llm_answer] Erreur: {e}")
+        return None
+
+
 def _should_use_resilient_fallback(error: Exception) -> bool:
     if isinstance(error, (ResourceExhausted, GoogleAPICallError, TimeoutError)):
         return True
@@ -1565,6 +1574,8 @@ async def gemini_llm_answer(
     # ── Routing provider ──────────────────────────────
     if AI_PROVIDER == "openai":
         return await _openai_llm_answer(system_prompt, user_prompt)
+    if AI_PROVIDER == "groq":
+        return await _groq_llm_answer(system_prompt, user_prompt)
 
     # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     model = _get_model()
@@ -1640,6 +1651,8 @@ async def gemini_llm_general_knowledge(
     # ── Routing provider ──────────────────────────────
     if AI_PROVIDER == "openai":
         return await _openai_llm_answer(system_prompt, user_prompt)
+    if AI_PROVIDER == "groq":
+        return await _groq_llm_answer(system_prompt, user_prompt)
 
     # ── Gemini (réactiver via AI_PROVIDER=gemini) ─────
     model = _get_model()
