@@ -2873,7 +2873,12 @@ def _apply_studio_match_to_v2_response(
     diagnostic = dict(result.get("diagnostic") or {})
     diagnostic["description"] = studio_match["title"]
     diagnostic["type"] = studio_match["category"]
+    # Une fois la fiche validée choisie, ne plus mélanger ses informations
+    # avec les causes/actions générées auparavant par le modèle Vision.
+    diagnostic["causes"] = []
+    diagnostic["description_visuelle"] = None
     result["diagnostic"] = diagnostic
+    result["actions"] = []
     result["knowledge_mode"] = "studio_knowledge"
     result["knowledge_card"] = studio_match
 
@@ -6311,6 +6316,59 @@ async def create_mobile_question(
     return await incoming_sms(message_data, db)
 
 
+@app.post("/api/expert-escalations")
+async def create_fast_expert_escalation(
+    data: MessageCreate,
+    db: Session = Depends(get_db),
+):
+    """Crée immédiatement un ticket depuis une fiche déjà analysée.
+
+    Aucun second passage Vision/RAG n'est nécessaire : le résumé de la fiche
+    est transmis tel quel à l'expert, ce qui rend l'envoi quasi immédiat.
+    """
+    user = db.query(User).filter(User.phone_number == data.phone_number).first()
+    if not user:
+        user = User(phone_number=data.phone_number)
+        db.add(user)
+        db.flush()
+
+    photo_path = None
+    photo_paths: List[str] = []
+    photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
+    if photo_payloads:
+        photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
+        photo_paths = _store_photo_payloads(user.id, photo_data_list, prefix="expert")
+        photo_path = photo_paths[0] if photo_paths else None
+
+    ticket = Ticket(
+        user_id=user.id,
+        category=_normalize_category(data.category),
+        urgency="medium",
+        status="open",
+        preferred_language=_normalize_expert_local_language(data.target_lang),
+        photo_path=photo_path,
+        photo_paths_json=json.dumps(photo_paths, ensure_ascii=False),
+        internal_notes=json.dumps({"source": "studio_result_escalation"}),
+    )
+    db.add(ticket)
+    db.flush()
+    db.add(Message(
+        ticket_id=ticket.id,
+        sender_type="user",
+        sender_id=user.id,
+        content=data.content,
+        channel="app",
+    ))
+    db.commit()
+    db.refresh(ticket)
+    return {
+        "status": "success",
+        "ticket_id": ticket.id,
+        "category": ticket.category,
+        "photo_analysis": None,
+    }
+
+
 @app.get("/api/questions/{question_id}")
 async def get_mobile_question_detail(
     question_id: int,
@@ -7843,6 +7901,24 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         })
     
     return result
+
+
+@app.get("/api/user-tickets/{ticket_id}")
+async def get_user_ticket_detail(
+    ticket_id: int,
+    phone: str,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.phone_number == phone).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    ticket = db.query(Ticket).filter(
+        Ticket.id == ticket_id,
+        Ticket.user_id == user.id,
+    ).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Demande introuvable")
+    return await get_ticket_detail(ticket_id, current_expert=None, db=db)
 
 
 @app.get("/api/user-history")
