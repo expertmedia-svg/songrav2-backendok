@@ -4591,19 +4591,28 @@ def _send_orange_sms(phone_number: str, message: str, retry: bool = True) -> Non
         raise HTTPException(status_code=503, detail="Impossible de joindre le service SMS Orange") from exc
 
 
+def _otp_dev_mode_enabled() -> bool:
+    return os.getenv("OTP_DEV_MODE", "false").strip().lower() == "true"
+
+
 def _send_auth_otp_sms(phone_number: str, code: str) -> None:
     """Envoie réellement l'OTP avec Orange SMS Burkina Faso.
 
-    En production aucun code n'est renvoyé au client et aucun faux succès n'est
-    accepté. Le mode développement doit être activé explicitement.
+    Si OTP_DEV_MODE=true (ex: crédits Orange épuisés/pas encore rechargés),
+    on n'envoie AUCUN vrai SMS et on se contente de logger le code côté
+    serveur : /api/auth/phone/start renvoie alors le code directement dans
+    sa réponse JSON (champ debug_otp) pour que l'app puisse l'afficher, vu
+    que l'utilisateur final n'a pas accès aux logs backend. Il suffit de
+    repasser OTP_DEV_MODE=false une fois les crédits Orange rechargés pour
+    réactiver l'envoi réel par SMS, sans autre changement de code.
     """
+    if _otp_dev_mode_enabled():
+        print(f"[OTP-DEV] {phone_number}: {code}")
+        return
     provider = os.getenv("SMS_PROVIDER", "orange").strip().lower()
     message = f"SONGRA : votre code de vérification est {code}. Il expire dans 5 minutes. Ne le partagez avec personne."
     if provider == "orange":
         return _send_orange_sms(phone_number, message)
-    if os.getenv("OTP_DEV_MODE", "false").strip().lower() == "true":
-        print(f"[OTP-DEV] {phone_number}: {code}")
-        return
     raise HTTPException(
         status_code=503,
         detail="Service SMS non configuré. Utilisez SMS_PROVIDER=orange et configurez les identifiants Orange.",
@@ -5973,7 +5982,7 @@ async def start_phone_auth(data: PhoneAuthStartIn, db: Session = Depends(get_db)
         db.commit()
         raise
 
-    return {
+    response_payload: Dict[str, Any] = {
         "sent": True,
         "phone_number": phone,
         "account_exists": bool(user),
@@ -5981,6 +5990,20 @@ async def start_phone_auth(data: PhoneAuthStartIn, db: Session = Depends(get_db)
         "expires_in_seconds": 300,
         "message": "Un code secret à 6 chiffres vient d'être envoyé par SMS.",
     }
+
+    # Mode temporaire tant que les crédits SMS Orange ne sont pas rechargés :
+    # aucun SMS n'est réellement envoyé (cf _send_auth_otp_sms), donc on
+    # renvoie le code directement à l'app pour ne pas bloquer l'inscription
+    # (l'utilisateur final n'a pas accès aux logs backend). Repasser
+    # OTP_DEV_MODE=false (ou le retirer) dès que les crédits sont rechargés
+    # pour réactiver l'envoi réel par SMS et arrêter d'exposer ce champ.
+    if _otp_dev_mode_enabled():
+        response_payload["debug_otp"] = code
+        response_payload["message"] = (
+            f"Mode test (SMS temporairement désactivé) : votre code est {code}."
+        )
+
+    return response_payload
 
 
 @app.post("/api/auth/phone/verify")
