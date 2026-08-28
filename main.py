@@ -11298,8 +11298,25 @@ async def v2_analyze(
         photo_analysis=analysis,
     )
     if studio_match:
+        print(
+            f"[STUDIO] [V2-ANALYZE] Fiche #{studio_match.get('id')} "
+            f"'{studio_match.get('title')}' utilisee "
+            f"(score={studio_match.get('match_score')}, langue={target_lang or 'fr'})"
+        )
         final_response = _apply_studio_match_to_v2_response(
             final_response, studio_match, target_lang
+        )
+        selected_audio = ((studio_match.get("audio") or {}).get(target_lang) or {}) if target_lang else {}
+        if target_lang and not str(selected_audio.get("url") or "").strip():
+            print(
+                f"[STUDIO] [V2-ANALYZE] Voix {target_lang} indisponible; "
+                "le mobile doit proposer la lecture francaise"
+            )
+    else:
+        print(
+            f"[STUDIO] [V2-ANALYZE] Aucune fiche validee correspondante "
+            f"(categorie={category}, langue={target_lang or 'fr'}); "
+            "le mobile doit proposer la lecture francaise"
         )
 
     offline_payload = {
@@ -11376,8 +11393,25 @@ async def v2_scanner_analyze(
         photo_analysis=analysis,
     )
     if studio_match:
+        print(
+            f"[STUDIO] [V2-SCANNER] Fiche #{studio_match.get('id')} "
+            f"'{studio_match.get('title')}' utilisee "
+            f"(score={studio_match.get('match_score')}, langue={target_lang or 'fr'})"
+        )
         final_response = _apply_studio_match_to_v2_response(
             final_response, studio_match, target_lang
+        )
+        selected_audio = ((studio_match.get("audio") or {}).get(target_lang) or {}) if target_lang else {}
+        if target_lang and not str(selected_audio.get("url") or "").strip():
+            print(
+                f"[STUDIO] [V2-SCANNER] Voix {target_lang} indisponible; "
+                "proposition de lecture francaise envoyee au mobile"
+            )
+    else:
+        print(
+            f"[STUDIO] [V2-SCANNER] Aucune fiche validee correspondante "
+            f"(categorie={category}, langue={target_lang or 'fr'}); "
+            "proposition de lecture francaise envoyee au mobile"
         )
 
     offline_payload = {
