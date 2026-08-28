@@ -2798,6 +2798,12 @@ def _find_studio_knowledge_match(
         str(analysis.get("problem_label") or ""),
         str(analysis.get("disease_detected") or ""),
         str(analysis.get("diagnosis") or ""),
+        # Contrat du pipeline V2 (v2_services._validate_analysis).
+        str(analysis.get("diagnostic") or ""),
+        str(analysis.get("description_visuelle") or ""),
+        " ".join(str(item) for item in (analysis.get("causes_probables") or [])),
+        " ".join(str(item) for item in (analysis.get("actions_immediates") or [])),
+        " ".join(str(item) for item in (analysis.get("actions_detaillees") or [])),
         str(analysis.get("situation_type") or ""),
         str(analysis.get("threat_type") or ""),
         str(analysis.get("analysis") or ""),
@@ -2843,6 +2849,11 @@ def _find_studio_knowledge_match(
         if best is None or score > best[0]:
             best = (score, item)
 
+    if best is not None:
+        print(
+            f"[STUDIO-MATCH] diagnostic='{str(analysis.get('diagnostic') or analysis.get('disease_detected') or '')[:120]}' "
+            f"meilleure_fiche=#{best[1].id} '{best[1].title}' score={round(best[0], 2)}"
+        )
     if best is None or best[0] < 4.0:
         return None
     result = _serialize_expert_local_knowledge_item(best[1])
