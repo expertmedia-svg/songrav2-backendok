@@ -3912,7 +3912,24 @@ def _normalize_photo_analysis_status(
         elif diagnosis_type == "human_first_aid":
             image_category = "sos_accident"
         else:
-            image_category = "unclear"
+            # Les moteurs OpenAI/Groq (utilisés par défaut, cf AI_PROVIDER)
+            # ne renvoient pas les champs spécifiques à Gemini vérifiés
+            # ci-dessus (culture_detected, animal_species, ...) et oublient
+            # souvent le champ optionnel "image_category" demandé en fin de
+            # prompt. Sans ce filet, une photo correctement diagnostiquée
+            # (ex: feuille malade avec disease_detected/analysis renseignés)
+            # retombait à tort sur "unclear" simplement parce que ce champ
+            # de contrôle manquait — alors que l'analyse elle-même était
+            # bonne. On fait donc confiance à la catégorie demandée dès lors
+            # que le moteur a produit un vrai contenu de diagnostic.
+            has_diagnostic_content = bool(
+                str(result.get("disease_detected") or "").strip()
+                or result.get("symptoms")
+                or result.get("all_symptoms")
+                or result.get("visual_observations")
+                or str(result.get("analysis") or "").strip()
+            ) and not result.get("error")
+            image_category = requested if has_diagnostic_content else "unclear"
 
     image_usable = result.get("image_usable")
     if not isinstance(image_usable, bool):
