@@ -7730,8 +7730,16 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
     if not user:
         return []
     
+    # Une analyse V2 reste dans l'historique des consultations. Elle ne devient
+    # une "demande" que lorsque l'utilisateur appuie explicitement sur
+    # "Contacter un expert". Les anciens tickets créés par la synchronisation
+    # automatique sont donc exclus de cette liste.
+    automatic_v2_ticket_ids = db.query(Message.ticket_id).filter(
+        Message.channel == "v2_mobile"
+    )
     tickets = db.query(Ticket).filter(
-        Ticket.user_id == user.id
+        Ticket.user_id == user.id,
+        ~Ticket.id.in_(automatic_v2_ticket_ids),
     ).order_by(Ticket.created_at.desc()).all()
     
     result = []
