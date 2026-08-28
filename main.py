@@ -2802,7 +2802,24 @@ def _find_studio_knowledge_match(
         str(analysis.get("threat_type") or ""),
         str(analysis.get("analysis") or ""),
     ]
-    search_tokens = set(_tokenize(" ".join(part for part in search_parts if part)))
+    search_blob = " ".join(part for part in search_parts if part)
+    search_tokens = set(_tokenize(search_blob))
+    # Les modèles Vision peuvent employer les noms internationaux même quand
+    # la fiche Studio est rédigée en français. Ces équivalences ne traduisent
+    # pas la réponse : elles servent uniquement au rapprochement des fiches.
+    normalized_blob = _normalize_search_text(search_blob)
+    studio_match_aliases = {
+        "armyworm": "chenille legionnaire automne",
+        "fall armyworm": "chenille legionnaire automne",
+        "corn": "mais",
+        "maize": "mais",
+        "pest": "ravageur",
+        "pests": "ravageurs",
+        "caterpillar": "chenille",
+    }
+    for source_term, studio_terms in studio_match_aliases.items():
+        if source_term in normalized_blob:
+            search_tokens.update(_tokenize(studio_terms))
     if not search_tokens:
         return None
 
@@ -3792,7 +3809,11 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
             # raisonnement interne + au JSON complet.
             extra_kwargs: Dict[str, Any] = {}
             if self.provider_name == "Groq":
-                extra_kwargs["extra_body"] = {"reasoning_format": "hidden"}
+                extra_kwargs["extra_body"] = {
+                    "reasoning_effort": "none",
+                    "reasoning_format": "hidden",
+                }
+                extra_kwargs["response_format"] = {"type": "json_object"}
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -3802,15 +3823,16 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
                         "content": content
                     }
                 ],
-                max_tokens=3000,
-                temperature=0.7,
+                max_tokens=6000,
+                temperature=0.1,
                 **extra_kwargs,
             )
 
             print(f"✅ Réponse {self.provider_name} Vision reçue")
 
             # Parser la réponse
-            response_text = response.choices[0].message.content or ""
+            raw_response_text = response.choices[0].message.content or ""
+            response_text = raw_response_text
             # Filet de sécurité : si le modèle a quand même renvoyé un bloc
             # <think>...</think> malgré reasoning_format="hidden" (ou pour
             # d'autres providers), on l'ignore pour ne parser que la partie
@@ -3857,7 +3879,13 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
                 analysis_json = {
                     "disease_detected": detected,
                     "confidence": 0.4,
-                    "analysis": response_text[:300] if response_text else "Analyse incomplète",
+                    # Conserver le raisonnement visuel utile pour la recherche
+                    # Studio (culture, ravageur, symptômes). L'ancienne limite
+                    # de 300 caractères supprimait souvent "armyworm" ou
+                    # "chenille légionnaire" avant le matching des fiches.
+                    "analysis": (response_text or raw_response_text)[:6000]
+                    if (response_text or raw_response_text)
+                    else "Analyse incomplète",
                     "urgency": "medium",
                     "requires_expert": False
                 }
@@ -4038,10 +4066,6 @@ class ResilientVisionEngine:
         if provider == "groq":
             if self.groq_engine:
                 engines.append(("Groq Vision", self.groq_engine))
-            if self.gpt_engine:
-                engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
-            if self.gemini_engine:
-                engines.append(("Gemini", self.gemini_engine))
         elif provider == "openai":
             if self.gpt_engine:
                 engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
