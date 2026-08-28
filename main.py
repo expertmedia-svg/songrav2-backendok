@@ -7066,23 +7066,8 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     reconstructed_query_local = original_query
     query_interpretation_confidence = 1.0
     target_lang = (data.target_lang or "").strip().lower() or None
-    # Une photo sans transcription n'a rien à traduire. La catégorie et le
-    # résultat Vision servent directement à retrouver la fiche Studio.
-    if original_query and target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            interpretation = translate_query_to_french(
-                original_query, target_lang, GEMINI_API_KEY, return_details=True
-            )
-            if isinstance(interpretation, dict):
-                search_query_fr = interpretation.get("french_query") or original_query
-                reconstructed_query_local = interpretation.get("reconstructed_local") or original_query
-                query_interpretation_confidence = float(interpretation.get("confidence") or 0.0)
-            else:
-                search_query_fr = str(interpretation or original_query)
-            print(f"[TRANSLATOR] Interprétation requête locale ({target_lang} -> fr): '{original_query}' -> '{search_query_fr}'")
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale assistant legacy: {e_trans}")
+    # Aucune traduction : Groq analyse la photo/le texte, puis la langue cible
+    # sert seulement à sélectionner l'audio humain de la fiche Studio.
 
     # 1. Analyse IA texte
     ai_result = ai_engine.classify(search_query_fr)
@@ -11336,15 +11321,9 @@ async def v2_analyze(
 
     duration = int((_time.time() - start_time) * 1000)
 
-    # ── TRADUCTION LOCALE (silencieuse, mode tâche invisible) ──────────────
+    # La langue locale sélectionne uniquement une voix de fiche Studio.
+    # Aucune traduction ni synthèse vocale n'est générée à la volée.
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
-        try:
-            final_response, voice_payload = _translate_v2_response_with_voice(
-                final_response, target_lang, category
-            )
-        except Exception as _te:
-            print(f"[TRANSLATOR] Erreur traduction v2/analyze: {_te}")
 
     return {
         "status": "success",
@@ -11362,7 +11341,7 @@ async def v2_analyze(
             ),
             "from_cache": analysis.get("from_cache", False),
             "fallback_used": analysis.get("from_fallback", False),
-            "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+            "translated": False,
             "target_lang": target_lang,
             "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         },
@@ -11380,16 +11359,8 @@ async def v2_scanner_analyze(
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
-    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
     target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale scanner ({target_lang} -> fr): '{text}' -> '{translated_text}'")
-            text = translated_text
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale scanner: {e_trans}")
 
 
     if not images_b64:
@@ -11426,21 +11397,13 @@ async def v2_scanner_analyze(
     except Exception as e:
         print(f"[OFFLINE-CORPUS] Erreur persistance v2/scanner: {e}")
 
-    # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
+    # Pas de traduction : voix Studio si disponible, sinon proposition FR.
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
-        try:
-            final_response, voice_payload = _translate_v2_response_with_voice(
-                final_response, target_lang, category
-            )
-        except Exception as _te:
-            print(f"[TRANSLATOR] Erreur traduction v2/scanner: {_te}")
 
     return {
         "status": "success",
         **final_response,
-        "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+        "translated": False,
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
@@ -11460,16 +11423,8 @@ async def v2_assistant_query(
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
-    # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
     target_lang = (data.target_lang or "").strip().lower() or None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        try:
-            from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(text, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale assistant ({target_lang} -> fr): '{text}' -> '{translated_text}'")
-            text = translated_text
-        except Exception as e_trans:
-            print(f"[TRANSLATOR] Erreur traduction requête locale assistant: {e_trans}")
 
     if not text.strip() and not images_b64:
         raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
@@ -11505,21 +11460,13 @@ async def v2_assistant_query(
     except Exception as e:
         print(f"[OFFLINE-CORPUS] Erreur persistance v2/assistant: {e}")
 
-    # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
+    # Pas de traduction : voix Studio si disponible, sinon proposition FR.
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
-        try:
-            final_response, voice_payload = _translate_v2_response_with_voice(
-                final_response, target_lang, category
-            )
-        except Exception as _te:
-            print(f"[TRANSLATOR] Erreur traduction v2/assistant: {_te}")
 
     return {
         "status": "success",
         **final_response,
-        "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
+        "translated": False,
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
