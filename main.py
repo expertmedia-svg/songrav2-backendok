@@ -6348,7 +6348,22 @@ async def create_fast_expert_escalation(
         preferred_language=_normalize_expert_local_language(data.target_lang),
         photo_path=photo_path,
         photo_paths_json=json.dumps(photo_paths, ensure_ascii=False),
-        internal_notes=json.dumps({"source": "studio_result_escalation"}),
+        ai_photo_analysis=json.dumps({
+            "source": "studio_result_escalation",
+            "submitted_question_and_ai_response": data.content,
+            "photo_attached": bool(photo_paths),
+            "user": {
+                "name": user.name,
+                "phone_number": user.phone_number,
+                "location": user.location,
+            },
+        }, ensure_ascii=False),
+        internal_notes=json.dumps({
+            "source": "studio_result_escalation",
+            "user_name": user.name,
+            "user_phone": user.phone_number,
+            "user_location": user.location,
+        }, ensure_ascii=False),
     )
     db.add(ticket)
     db.flush()
