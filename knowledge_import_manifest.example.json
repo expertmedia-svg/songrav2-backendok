@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "title": "Rouille du maïs",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de mon maïs ont des taches orange. Que faire ?",
+      "resolution_fr": "Retirez les feuilles très atteintes, espacez les plants et demandez confirmation à un agent agricole avant tout traitement.",
+      "tags": ["maïs", "rouille", "taches orange"],
+      "status": "validated",
+      "translations": {
+        "moore": {
+          "question": "Question traduite en Mooré",
+          "text": "Conseil validé écrit en Mooré"
+        },
+        "dioula": {
+          "question": "Question traduite en Dioula",
+          "text": "Conseil validé écrit en Dioula"
+        },
+        "fulfulde": {
+          "question": "Question traduite en Fulfuldé",
+          "text": "Conseil validé écrit en Fulfuldé"
+        }
+      },
+      "audio": {
+        "moore": "audio/rouille-mais-moore.mp3",
+        "dioula": "audio/rouille-mais-dioula.mp3",
+        "fulfulde": "audio/rouille-mais-fulfulde.mp3"
+      }
+    }
+  ]
+}

@@ -291,7 +291,23 @@ FORMAT JSON:
 }"""
             
             # Construire le contenu du message
-            prompt_text = context_prompt + (f"\n\nContext supplémentaire: {text_description}" if text_description else "")
+            validation_prompt = f"""
+
+CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non précisée'}):
+- Ne suppose jamais que la photo appartient à la catégorie demandée.
+- Identifie d'abord le type réel de contenu de l'image.
+- Si l'image est hors catégorie, floue, vide ou inexploitable, ne fabrique aucun diagnostic.
+- Ajoute obligatoirement ces champs au JSON final:
+  "image_category": "agriculture|elevage|sos_accident|cybersecurity|other|unclear",
+  "category_match": true ou false,
+  "image_usable": true ou false,
+  "problem_identified": true ou false,
+  "problem_status": "identified|not_identified|uncertain|wrong_category|unusable",
+  "problem_label": "nom court du problème confirmé/probable, ou Aucun problème visible",
+  "validation_message": "explication simple et honnête du contrôle".
+"problem_identified" doit être false si aucun signe anormal n'est réellement visible.
+"""
+            prompt_text = context_prompt + validation_prompt + (f"\n\nContexte supplémentaire: {text_description}" if text_description else "")
             
             # Préparer les images pour Gemini
             content_parts = [prompt_text]

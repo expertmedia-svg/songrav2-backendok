@@ -1,0 +1,337 @@
+{
+  "items": [
+    {
+      "title": "Chenille légionnaire d'automne du maïs",
+      "category": "agriculture",
+      "question_fr": "Le cœur du maïs est perforé, contient des déjections sombres et des chenilles qui mangent les jeunes feuilles.",
+      "resolution_fr": "Inspecter tôt le matin le cœur des plants et les parcelles voisines. Détruire manuellement les chenilles et masses d'œufs lorsque la surface le permet. Préserver les auxiliaires, désherber sans supprimer toute biodiversité et éviter les traitements systématiques. Si l'attaque progresse, demander à un agent agricole de confirmer le seuil d'intervention et le produit homologué; respecter strictement l'étiquette, les protections et le délai avant récolte.",
+      "tags": ["maïs", "chenille légionnaire", "spodoptera", "feuilles perforées", "déjections", "ravageur", "cœur du plant", "lutte intégrée"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Rouille commune du maïs",
+      "category": "agriculture",
+      "question_fr": "Des pustules orange ou brunes, poudreuses au toucher, apparaissent sur les deux faces des feuilles de maïs.",
+      "resolution_fr": "Comparer plusieurs feuilles et vérifier si les pustules libèrent une poudre orangée. Retirer les résidus très infectés après récolte, pratiquer la rotation et privilégier une variété tolérante disponible localement. Éviter une fertilisation azotée excessive. Une attaque tardive peut seulement nécessiter une surveillance; pour une attaque précoce et rapide, faire confirmer le diagnostic avant tout fongicide homologué.",
+      "tags": ["maïs", "rouille", "pustules orange", "champignon", "feuille", "rotation", "variété résistante"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Helminthosporiose du maïs",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de maïs portent de longues taches grises ou brunes qui fusionnent et dessèchent le feuillage.",
+      "resolution_fr": "Observer la forme allongée des lésions sur plusieurs plants. Enlever ou enfouir correctement les résidus très malades, effectuer une rotation avec une culture non céréalière et utiliser des semences saines ou une variété tolérante. Améliorer l'espacement et éviter l'humidité prolongée du feuillage. Faire confirmer une attaque sévère avant traitement.",
+      "tags": ["maïs", "helminthosporiose", "brûlure foliaire", "taches allongées", "champignon", "résidus", "rotation"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Striure du maïs",
+      "category": "agriculture",
+      "question_fr": "Les jeunes feuilles de maïs montrent de fines stries jaunes parallèles et les plants restent petits.",
+      "resolution_fr": "Comparer les symptômes sur plusieurs rangs et distinguer les stries d'une carence uniforme. Arracher les plants très atteints au début du cycle si leur nombre est faible, contrôler les graminées adventices autour du champ et utiliser des variétés tolérantes et semences saines. Éviter de conserver comme semence des épis provenant de plants suspects.",
+      "tags": ["maïs", "striure", "virus", "stries jaunes", "cicadelle", "nanisme", "semences saines"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Charbon couvert du sorgho",
+      "category": "agriculture",
+      "question_fr": "Les grains de la panicule de sorgho sont remplacés par des sacs noirs remplis de poudre.",
+      "resolution_fr": "Retirer les panicules atteintes avant qu'elles ne s'ouvrent et les détruire loin du champ. Ne pas les battre avec les panicules saines. Utiliser des semences certifiées ou correctement traitées selon les recommandations locales, nettoyer le matériel de battage et pratiquer une rotation. Demander à un agent agricole le traitement de semences homologué adapté.",
+      "tags": ["sorgho", "charbon couvert", "panicule noire", "spores", "semences", "traitement semences", "rotation"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Anthracnose du sorgho",
+      "category": "agriculture",
+      "question_fr": "Des taches rouges ou brunes avec un centre clair apparaissent sur les feuilles et parfois les tiges du sorgho.",
+      "resolution_fr": "Vérifier si les taches se multiplient après des périodes humides. Utiliser une variété tolérante, espacer suffisamment les plants, éliminer les repousses malades et pratiquer une rotation de deux à trois campagnes avec une culture non hôte. Ne pas utiliser comme semence des grains issus de panicules fortement atteintes.",
+      "tags": ["sorgho", "anthracnose", "taches rouges", "champignon", "humidité", "rotation", "variété tolérante"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Mildiou du mil",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de mil jaunissent en bandes, deviennent parfois déchiquetées et la panicule se transforme en feuilles.",
+      "resolution_fr": "Arracher tôt les plants atteints et les sortir du champ avant la formation des spores. Utiliser des semences saines et une variété résistante recommandée dans la zone. Éviter de ressemer des grains provenant d'une parcelle fortement touchée et pratiquer la rotation. Surveiller particulièrement les zones où l'eau stagne.",
+      "tags": ["mil", "mildiou", "feuille déchiquetée", "panicule feuillue", "jaunissement", "semences saines", "rotation"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Striga sur céréales",
+      "category": "agriculture",
+      "question_fr": "De petites plantes parasites à fleurs violettes poussent au pied du maïs, mil ou sorgho et la céréale reste chétive.",
+      "resolution_fr": "Arracher le Striga avant floraison et graines, puis le sortir de la parcelle. Améliorer progressivement la fertilité avec compost mûr ou fumure bien gérée. Alterner avec des légumineuses ou cultures pièges recommandées localement et choisir une variété tolérante. Répéter la lutte plusieurs années car les graines persistent longtemps dans le sol.",
+      "tags": ["striga", "maïs", "mil", "sorgho", "plante parasite", "fleur violette", "sol pauvre", "rotation", "légumineuse"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Pyriculariose du riz",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de riz présentent des taches en forme de fuseau au centre gris et aux bords bruns; le cou de la panicule peut noircir.",
+      "resolution_fr": "Éviter les excès d'azote, maintenir une alimentation en eau aussi régulière que possible et utiliser des semences saines ainsi qu'une variété tolérante. Détruire les repousses très malades et respecter l'espacement recommandé. En cas d'attaque du cou de la panicule, faire confirmer rapidement le diagnostic par un agent rizicole.",
+      "tags": ["riz", "pyriculariose", "blast", "tache fuseau", "panicule", "champignon", "azote", "semences saines"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Bactériose du riz",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de riz jaunissent puis sèchent depuis leur extrémité, parfois avec une bordure ondulée.",
+      "resolution_fr": "Éviter de déplacer l'eau d'une parcelle malade vers une parcelle saine et désinfecter les outils utilisés. Employer des semences saines, une variété tolérante et éviter l'excès d'azote. Retirer les résidus fortement atteints après récolte et maîtriser les graminées hôtes autour de la rizière. Faire confirmer car sécheresse et carences peuvent donner des symptômes proches.",
+      "tags": ["riz", "bactériose", "feuille jaune", "dessèchement", "eau irrigation", "hygiène", "azote"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Mildiou de la tomate",
+      "category": "agriculture",
+      "question_fr": "Des taches brunes humides s'étendent rapidement sur les feuilles et les fruits de tomate par temps humide.",
+      "resolution_fr": "Retirer les feuilles et fruits fortement atteints sans les laisser au sol. Arroser au pied le matin, améliorer l'aération et éviter de travailler les plants lorsqu'ils sont mouillés. Alterner les parcelles avec une culture non solanacée et utiliser des plants sains. Si la progression est rapide, demander un diagnostic avant l'emploi d'un fongicide homologué.",
+      "tags": ["tomate", "mildiou", "taches brunes", "fruit pourri", "humidité", "arrosage au pied", "aération"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Flétrissement bactérien de la tomate",
+      "category": "agriculture",
+      "question_fr": "Un plant de tomate flétrit brutalement alors que le sol est humide, sans fort jaunissement initial.",
+      "resolution_fr": "Arracher le plant avec ses racines et l'éliminer loin de la parcelle. Ne pas déplacer de terre ou d'eau contaminée, nettoyer les outils et améliorer le drainage. Faire une longue rotation avec céréales ou autres cultures non hôtes et choisir des plants sains. Aucun produit ne guérit un plant déjà atteint; confirmer le diagnostic avant de replanter des solanacées.",
+      "tags": ["tomate", "flétrissement bactérien", "ralstonia", "plant flétri", "sol humide", "drainage", "rotation"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Alternariose de la tomate",
+      "category": "agriculture",
+      "question_fr": "Les feuilles basses de tomate portent des taches brunes rondes avec des anneaux concentriques.",
+      "resolution_fr": "Enlever progressivement les feuilles basses très atteintes, sans dénuder brutalement le plant. Arroser au pied, tuteurer et espacer pour améliorer l'aération. Éliminer les résidus malades après récolte et effectuer une rotation hors tomate, pomme de terre, aubergine et piment. Faire confirmer avant un éventuel traitement homologué.",
+      "tags": ["tomate", "alternariose", "taches concentriques", "feuilles basses", "champignon", "rotation", "aération"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Thrips de l'oignon",
+      "category": "agriculture",
+      "question_fr": "Les feuilles d'oignon deviennent argentées, se dessèchent par la pointe et portent de très petits insectes allongés.",
+      "resolution_fr": "Observer l'intérieur des feuilles tôt le matin. Maintenir une irrigation régulière sans excès, supprimer les mauvaises herbes hôtes et éviter une densité trop forte. Préserver les insectes auxiliaires et alterner les parcelles. Si les dégâts augmentent, demander à un agent agricole d'évaluer le seuil et de choisir seulement un produit homologué, en alternant les modes d'action.",
+      "tags": ["oignon", "thrips", "feuille argentée", "dessèchement", "petit insecte", "irrigation", "lutte intégrée"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Pourriture du collet et du bulbe de l'oignon",
+      "category": "agriculture",
+      "question_fr": "Le collet ou le bulbe d'oignon devient mou, dégage une mauvaise odeur ou présente une moisissure.",
+      "resolution_fr": "Retirer les bulbes pourris et corriger immédiatement les excès d'eau. Éviter de blesser les bulbes, améliorer le drainage et ne récolter que lorsque le collet est suffisamment sec. Sécher et trier les bulbes avant stockage, désinfecter les contenants et conserver dans un lieu ventilé. Ne jamais mélanger les bulbes malades aux bulbes sains.",
+      "tags": ["oignon", "pourriture bulbe", "collet", "mauvaise odeur", "drainage", "stockage", "tri"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Mosaïque du manioc",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de manioc ont une mosaïque jaune et verte, se déforment et le plant pousse mal.",
+      "resolution_fr": "Arracher les plants nettement atteints lorsqu'ils sont encore peu nombreux. Ne jamais prélever de boutures sur un plant suspect. Utiliser des boutures certifiées ou provenant d'un champ sain et une variété tolérante. Surveiller les aleurodes et éliminer les repousses malades autour de la parcelle.",
+      "tags": ["manioc", "mosaïque", "virus", "feuille déformée", "aleurode", "bouture saine", "variété tolérante"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Bactériose du manioc",
+      "category": "agriculture",
+      "question_fr": "Les feuilles de manioc montrent des taches anguleuses humides, puis se dessèchent; les tiges peuvent porter des lésions.",
+      "resolution_fr": "Retirer les plants très atteints, ne pas utiliser leurs tiges comme boutures et désinfecter les outils entre parcelles. Éviter de travailler dans la culture lorsqu'elle est mouillée. Employer des boutures saines et pratiquer la rotation. Surveiller la propagation après les pluies accompagnées de vent.",
+      "tags": ["manioc", "bactériose", "tache anguleuse", "dessèchement", "tige", "bouture", "désinfection outils"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Rosette de l'arachide",
+      "category": "agriculture",
+      "question_fr": "Les plants d'arachide restent très petits, avec des feuilles serrées en rosette, jaunes ou vert foncé.",
+      "resolution_fr": "Arracher rapidement les premiers plants atteints si leur nombre est faible. Semer à la période recommandée, utiliser une variété résistante et des semences saines. Contrôler les repousses et adventices hôtes et surveiller les pucerons vecteurs. Éviter les semis très espacés ou tardifs qui favorisent la circulation des pucerons.",
+      "tags": ["arachide", "rosette", "virus", "nanisme", "puceron", "semis précoce", "variété résistante"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Cercosporiose de l'arachide",
+      "category": "agriculture",
+      "question_fr": "De petites taches brunes ou noires apparaissent sur les folioles d'arachide et provoquent leur chute précoce.",
+      "resolution_fr": "Évaluer l'extension sur plusieurs zones du champ. Pratiquer la rotation, enfouir ou détruire correctement les résidus très infectés, respecter une densité permettant l'aération et utiliser des semences saines. Pour une attaque précoce importante, faire confirmer la maladie et le programme de protection homologué par un agent agricole.",
+      "tags": ["arachide", "cercosporiose", "taches foliaires", "chute feuilles", "champignon", "rotation", "résidus"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Pucerons du niébé",
+      "category": "agriculture",
+      "question_fr": "Des groupes de petits insectes noirs ou verts couvrent les jeunes pousses de niébé; les feuilles se recroquevillent.",
+      "resolution_fr": "Inspecter le dessous des feuilles et les jeunes pousses. Éliminer les foyers limités, maîtriser les adventices hôtes et éviter un excès d'azote. Préserver coccinelles et autres auxiliaires. Si l'infestation et les dégâts progressent, demander conseil sur un produit homologué sélectif et respecter les protections ainsi que le délai avant récolte.",
+      "tags": ["niébé", "puceron", "feuille recroquevillée", "miellat", "auxiliaires", "coccinelle", "lutte intégrée"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Maruca du niébé",
+      "category": "agriculture",
+      "question_fr": "Les fleurs et gousses de niébé sont collées par des fils, perforées et contiennent des chenilles ou déjections.",
+      "resolution_fr": "Surveiller dès la floraison, ouvrir quelques fleurs et gousses pour confirmer la présence de chenilles. Détruire les parties très infestées, récolter à temps et éliminer les résidus. Préserver les ennemis naturels. Pour une forte attaque, faire déterminer le seuil d'intervention et le traitement homologué adapté à la période de floraison, en protégeant les pollinisateurs.",
+      "tags": ["niébé", "maruca", "foreuse gousse", "chenille", "fleur", "gousse perforée", "pollinisateur"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Jassides du coton",
+      "category": "agriculture",
+      "question_fr": "Les bords des feuilles de coton jaunissent puis brunissent et se recourbent; de petits insectes sautent sous les feuilles.",
+      "resolution_fr": "Observer le dessous des jeunes feuilles et comparer plusieurs zones. Désherber les plantes hôtes autour du champ, conserver les auxiliaires et suivre le calendrier de surveillance du coton de la zone. Ne pas traiter sur le seul jaunissement: faire confirmer la présence et le seuil par un agent technique avant d'utiliser un produit homologué.",
+      "tags": ["coton", "jasside", "feuille recourbée", "bord jaune", "insecte piqueur", "surveillance", "lutte intégrée"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Flétrissement fusarien du coton",
+      "category": "agriculture",
+      "question_fr": "Des plants de coton jaunissent, flétrissent et montrent un brunissement interne des tiges sans manque d'eau évident.",
+      "resolution_fr": "Couper une tige suspecte pour observer le brunissement des vaisseaux et faire confirmer le diagnostic. Arracher les plants très atteints, nettoyer les outils, utiliser une variété tolérante et pratiquer une rotation prolongée. Améliorer la structure et le drainage du sol; aucun traitement foliaire ne guérit un plant dont les vaisseaux sont déjà colonisés.",
+      "tags": ["coton", "fusariose", "flétrissement", "vaisseaux bruns", "champignon du sol", "rotation", "drainage"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Fonte des semis",
+      "category": "agriculture",
+      "question_fr": "Les graines lèvent mal ou les jeunes plants pourrissent au niveau du collet et tombent peu après la levée.",
+      "resolution_fr": "Réduire l'excès d'arrosage, améliorer le drainage et éviter une densité trop forte. Utiliser un substrat, des contenants et des outils propres ainsi que des semences saines. Retirer les plantules malades avec un peu de terre autour. Ne pas réutiliser immédiatement un terreau contaminé; demander conseil avant tout traitement de semences.",
+      "tags": ["fonte des semis", "pépinière", "collet pourri", "plantule", "champignon du sol", "drainage", "semences"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Nématodes à galles",
+      "category": "agriculture",
+      "question_fr": "Les plantes poussent mal et flétrissent malgré l'eau; leurs racines portent des renflements ou galles.",
+      "resolution_fr": "Arracher un plant avec précaution pour vérifier les galles et distinguer celles-ci des nodules normaux des légumineuses. Utiliser des plants sains, pratiquer une rotation avec cultures moins sensibles, solariser une petite pépinière lorsque les conditions le permettent et incorporer du compost bien mûr. Nettoyer la terre collée aux outils avant de changer de parcelle.",
+      "tags": ["nématodes", "galles racinaires", "racines", "flétrissement", "sol", "rotation", "solarisation", "compost"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Carence en azote",
+      "category": "agriculture",
+      "question_fr": "Les feuilles les plus anciennes jaunissent d'abord et la croissance générale de la culture ralentit.",
+      "resolution_fr": "Vérifier que le problème commence bien sur les vieilles feuilles et qu'il n'est pas lié à l'eau stagnante ou aux racines abîmées. Apporter du compost mûr ou une fumure organique bien décomposée. Fractionner l'engrais azoté recommandé pour la culture et la zone, l'enfouir légèrement sur sol humide sans toucher la tige. Faire analyser le sol avant une correction importante.",
+      "tags": ["sol", "carence azote", "feuilles jaunes", "vieilles feuilles", "croissance lente", "compost", "fertilisation raisonnée"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Carence en phosphore",
+      "category": "agriculture",
+      "question_fr": "Les plants restent petits, mûrissent lentement et les feuilles anciennes deviennent vert foncé ou violacées.",
+      "resolution_fr": "Faire confirmer par une analyse du sol car le froid, la sécheresse ou un mauvais enracinement peuvent produire des signes proches. Incorporer du compost mûr et appliquer seulement la source phosphatée recommandée localement, placée dans le sol sans contact direct avec la semence. Corriger aussi l'acidité ou le compactage qui peut bloquer le phosphore.",
+      "tags": ["sol", "carence phosphore", "feuille violette", "nanisme", "racines", "analyse sol", "fertilisation"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Carence en potassium",
+      "category": "agriculture",
+      "question_fr": "Le bord des feuilles anciennes jaunit puis brunit comme brûlé et les plantes résistent mal à la sécheresse.",
+      "resolution_fr": "Vérifier l'humidité, la salinité et l'état des racines avant de conclure. Restituer les résidus sains, apporter du compost mûr et utiliser une source de potassium seulement selon l'analyse du sol et la recommandation de la culture. Éviter de concentrer l'engrais près des racines ou sur sol très sec.",
+      "tags": ["sol", "carence potassium", "bord brûlé", "vieilles feuilles", "sécheresse", "compost", "analyse sol"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Carence en fer",
+      "category": "agriculture",
+      "question_fr": "Les jeunes feuilles jaunissent entre les nervures tandis que les nervures restent vertes.",
+      "resolution_fr": "Vérifier si le sol est très calcaire, compacté ou constamment humide. Améliorer le drainage, apporter de la matière organique bien décomposée et éviter les apports excessifs de chaux. Une analyse du sol ou de la plante est recommandée avant l'emploi d'un correcteur de fer, car plusieurs carences se ressemblent.",
+      "tags": ["sol", "carence fer", "chlorose", "jeunes feuilles", "nervures vertes", "calcaire", "drainage"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Acidité excessive du sol",
+      "category": "agriculture",
+      "question_fr": "La parcelle produit peu malgré les apports; les racines se développent mal et plusieurs éléments nutritifs semblent manquer.",
+      "resolution_fr": "Mesurer le pH avec une analyse fiable avant toute correction. Apporter régulièrement du compost mûr et limiter le brûlage des résidus. Si l'acidité est confirmée, faire calculer par un technicien la quantité de chaux ou d'amendement selon le pH, la texture et la culture; une dose improvisée peut bloquer d'autres nutriments.",
+      "tags": ["sol acide", "pH", "chaulage", "faible rendement", "racines", "analyse sol", "amendement"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Salinité du sol",
+      "category": "agriculture",
+      "question_fr": "Une croûte blanche apparaît à la surface, la germination est mauvaise et les plantes semblent manquer d'eau malgré l'irrigation.",
+      "resolution_fr": "Faire analyser l'eau et le sol pour confirmer les sels. Améliorer le drainage, éviter l'évaporation excessive avec un paillage propre et irriguer de façon à ne pas concentrer davantage les sels. Ne pas augmenter l'engrais sur une zone saline. Choisir, avec un agent agricole, des cultures ou variétés plus tolérantes et un plan de lessivage compatible avec la qualité de l'eau.",
+      "tags": ["sol salin", "salinité", "croûte blanche", "germination", "irrigation", "drainage", "analyse eau"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Sol compacté",
+      "category": "agriculture",
+      "question_fr": "L'eau pénètre difficilement, les racines restent superficielles et une couche dure se trouve sous la surface.",
+      "resolution_fr": "Éviter le passage répété d'engins ou d'animaux lorsque le sol est humide. Casser la semelle de travail uniquement à la profondeur nécessaire et au bon niveau d'humidité, puis maintenir des racines vivantes avec rotation et plantes de couverture. Ajouter du compost, garder les résidus en paillage et limiter le travail intensif qui recrée la compaction.",
+      "tags": ["sol compacté", "semelle de labour", "infiltration", "racines superficielles", "travail du sol", "couverture végétale", "compost"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Érosion hydrique du sol",
+      "category": "agriculture",
+      "question_fr": "La pluie emporte la terre fine, forme des rigoles ou ravines et dépose du sable au bas de la parcelle.",
+      "resolution_fr": "Ne pas travailler dans le sens de la pente. Installer des cordons pierreux, bandes enherbées, demi-lunes ou zaï selon la pente et les pratiques locales, avec appui technique pour le tracé des courbes de niveau. Couvrir le sol avec résidus ou cultures de couverture et réparer les petites rigoles avant qu'elles ne deviennent des ravines.",
+      "tags": ["érosion", "ruissellement", "ravine", "cordon pierreux", "courbe de niveau", "zaï", "paillage", "sol"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Encroûtement et battance du sol",
+      "category": "agriculture",
+      "question_fr": "Après une forte pluie, une croûte dure se forme en surface et empêche les jeunes plants de sortir.",
+      "resolution_fr": "Casser très légèrement la croûte entre les lignes sans blesser les graines ou plantules. Protéger la surface avec un paillage fin et propre, apporter du compost mûr et réduire le travail qui pulvérise excessivement le sol. Les cordons pierreux et la couverture végétale ralentissent les gouttes et le ruissellement responsables de la battance.",
+      "tags": ["battance", "croûte du sol", "levée difficile", "pluie", "paillage", "compost", "infiltration"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Engorgement et asphyxie racinaire",
+      "category": "agriculture",
+      "question_fr": "Le sol reste saturé d'eau, les plantes jaunissent et les racines deviennent brunes ou dégagent une mauvaise odeur.",
+      "resolution_fr": "Ouvrir des voies d'évacuation sans envoyer l'eau contaminée vers une parcelle saine. Suspendre l'arrosage, dégager le collet et améliorer les planches ou billons pour les prochains semis. Retirer les plants pourris et éviter de travailler un sol détrempé. Identifier la cause du mauvais drainage avant de fertiliser davantage.",
+      "tags": ["sol engorgé", "asphyxie racinaire", "eau stagnante", "racines brunes", "drainage", "billons", "pourriture"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Faible matière organique du sol",
+      "category": "agriculture",
+      "question_fr": "Le sol est clair, se dessèche vite, forme peu d'agrégats et répond mal aux engrais.",
+      "resolution_fr": "Produire et apporter régulièrement du compost mûr ou du fumier bien décomposé, en priorité dans les poquets ou bandes cultivées si les quantités sont limitées. Garder des résidus sains en couverture, intégrer des légumineuses et réduire le brûlage. Protéger le sol contre l'érosion afin que la matière organique ajoutée ne soit pas emportée.",
+      "tags": ["matière organique", "sol pauvre", "compost", "fumier", "paillage", "légumineuse", "fertilité", "humidité"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    },
+    {
+      "title": "Termites sur jeunes plants",
+      "category": "agriculture",
+      "question_fr": "Les termites attaquent les semences, racines ou jeunes tiges, surtout dans les zones sèches ou riches en résidus non décomposés.",
+      "resolution_fr": "Confirmer que les termites sont responsables en examinant les racines et galeries. Utiliser du compost bien mûr plutôt que des résidus frais concentrés au contact des plants, maintenir une humidité suffisante sans engorger et retirer les souches très infestées. Éviter les produits non homologués dans les poquets; demander une solution locale validée si les pertes deviennent importantes.",
+      "tags": ["termites", "jeunes plants", "racines", "galeries", "sol sec", "compost mûr", "ravageur du sol"],
+      "status": "validated",
+      "origin": "catalogue_agriculture_burkina_v1"
+    }
+  ]
+}

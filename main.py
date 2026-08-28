@@ -3,9 +3,10 @@ SONGRA - Backend API avec Computer Vision LOCALE
 Version FINALE - Avec analyse IA complète
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -20,23 +21,43 @@ import json
 import re
 import base64
 import mimetypes
+import math
 from io import BytesIO
 from PIL import Image
 import numpy as np
 import time
 import shutil
+import zipfile
+import csv
+import secrets
+import bcrypt
+import urllib.parse
+import urllib.request
+import urllib.error
 from dotenv import load_dotenv
 
-# Charger les variables d'environnement immédiatement
+# Charger d'abord backend/.env, quel que soit le dossier depuis lequel Uvicorn
+# est lancé. Sans cela, un démarrage depuis la racine pouvait ignorer Groq.
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_MODULE_DIR, ".env"), override=False)
 load_dotenv(override=False)
 
 from openai import OpenAI
-import google.generativeai as genai
-from gemini_vision import GeminiVisionEngine
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
+try:
+    from gemini_vision import GeminiVisionEngine
+except ImportError:
+    GeminiVisionEngine = None
 import v2_services
 import agri_services
 import yingr_ai_api
 from burkina_translator import (
+    dictionary_stats,
+    import_dictionary_file,
+    translate_fields,
     translate_fields_and_voice_summary,
     SONGRA_TEXT_FIELDS as _TRANSLATOR_TEXT_FIELDS,
     VALID_LANGS as _TRANSLATOR_VALID_LANGS,
@@ -60,15 +81,26 @@ Base = declarative_base()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1",
+) if GROQ_API_KEY else None
+
 # Gemini API Key pour analyse photo
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
+if GEMINI_API_KEY and genai is not None:
     genai.configure(api_key=GEMINI_API_KEY)
     print(f"[OK] Gemini API configuree")
 else:
-    print(f"[WARN] GEMINI_API_KEY non definie - scanner photo avec OpenAI")
+    print("[WARN] Gemini indisponible - Songra utilisera Groq/OpenAI et les replis locaux")
 
-JWT_SECRET = os.getenv("JWT_SECRET", "songra-mobile-dev-secret")
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+if not JWT_SECRET:
+    if APP_ENV == "production":
+        raise RuntimeError("JWT_SECRET doit etre configure en production")
+    JWT_SECRET = "songra-mobile-dev-secret-change-me"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
 
@@ -385,12 +417,16 @@ class User(Base):
     password_hash = Column(String, nullable=True)
     name = Column(String, nullable=True)
     location = Column(String, nullable=True)
+    organization = Column(String, nullable=True, index=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_anonymized = Column(Boolean, default=False)
     is_premium = Column(Boolean, default=False)
     premium_expires_at = Column(DateTime, nullable=True)
     messages_used = Column(Integer, default=0)
     messages_limit = Column(Integer, default=1)  # 1 gratuit, 10 pour premium
+    failed_pin_attempts = Column(Integer, default=0)
+    pin_locked_until = Column(DateTime, nullable=True)
 
 class Expert(Base):
     __tablename__ = "experts"
@@ -399,11 +435,25 @@ class Expert(Base):
     password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=False)
     specialization = Column(String, nullable=True)
+    role = Column(String, default="expert")
     is_active = Column(Boolean, default=True)
     zone = Column(String, nullable=True)
     project = Column(String, nullable=True)
     language = Column(String, nullable=True)
     institution = Column(String, nullable=True)
+    organization_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Organization(Base):
+    __tablename__ = "organizations"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False, index=True)
+    code = Column(String, unique=True, nullable=True, index=True)
+    description = Column(Text, nullable=True)
+    region = Column(String, nullable=True)
+    phone_number = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Ticket(Base):
@@ -423,6 +473,8 @@ class Ticket(Base):
     resolution_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+    passed_expert_ids_json = Column(Text, nullable=True)
+    preferred_language = Column(String, nullable=True)
 
 class PhotoAnalysisHistoryDB(Base):
     __tablename__ = "photo_analysis_history"
@@ -448,6 +500,7 @@ class Message(Base):
     sent_at = Column(DateTime, default=datetime.utcnow)
     is_read = Column(Boolean, default=False)
     audio_url = Column(String, nullable=True)  # URL du fichier audio de réponse expert
+    language = Column(String, nullable=True)
 
 class KnowledgeItem(Base):
     __tablename__ = "knowledge_items"
@@ -476,6 +529,10 @@ class ExpertLocalKnowledgeDB(Base):
     origin = Column(String, nullable=False, default="expert_manual")
     translations_json = Column(Text, nullable=True)
     audio_json = Column(Text, nullable=True)
+    expert_id = Column(Integer, nullable=True, index=True)
+    reviewer_id = Column(Integer, nullable=True, index=True)
+    review_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -520,6 +577,18 @@ class RuralContactDB(Base):
     crop_labels_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PhoneOtpDB(Base):
+    __tablename__ = "phone_otps"
+    id = Column(Integer, primary_key=True, index=True)
+    phone_number = Column(String, nullable=False, index=True)
+    code_hash = Column(String, nullable=False)
+    purpose = Column(String, nullable=False, default="authentication")
+    attempts = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime, nullable=False)
+    consumed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 # class EntreprendreHistoryDB(Base):
 #     __tablename__ = "entreprendre_history"
@@ -590,6 +659,10 @@ def _ensure_user_auth_columns() -> None:
                 ("messages_limit", "INTEGER DEFAULT 1", "INTEGER DEFAULT 1"),
                 ("is_active", "BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT TRUE"),
                 ("role", "VARCHAR DEFAULT 'utilisateur'", "VARCHAR DEFAULT 'utilisateur'"),
+                ("organization", "TEXT", "TEXT"),
+                ("organization_id", "INTEGER", "INTEGER"),
+                ("failed_pin_attempts", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
+                ("pin_locked_until", "DATETIME", "TIMESTAMP"),
             ]
             for col, sqlite_ddl, postgres_ddl in migrations:
                 _add_column_if_missing(conn, "users", col, sqlite_ddl, postgres_ddl)
@@ -612,10 +685,12 @@ def _ensure_expert_profile_columns() -> None:
     try:
         with engine.connect() as conn:
             migrations = [
+                ("role", "VARCHAR DEFAULT 'expert'", "VARCHAR DEFAULT 'expert'"),
                 ("zone", "TEXT", "TEXT"),
                 ("project", "TEXT", "TEXT"),
                 ("language", "TEXT", "TEXT"),
                 ("institution", "TEXT", "TEXT"),
+                ("organization_id", "INTEGER", "INTEGER"),
             ]
             for col, sqlite_ddl, postgres_ddl in migrations:
                 _add_column_if_missing(conn, "experts", col, sqlite_ddl, postgres_ddl)
@@ -651,12 +726,35 @@ def _ensure_ticket_photo_columns() -> None:
         with engine.connect() as conn:
             _add_column_if_missing(conn, "tickets", "photo_paths_json", "TEXT", "TEXT")
             _add_column_if_missing(conn, "tickets", "internal_notes", "TEXT", "TEXT")
+            _add_column_if_missing(conn, "tickets", "passed_expert_ids_json", "TEXT", "TEXT")
+            _add_column_if_missing(conn, "tickets", "preferred_language", "TEXT", "TEXT")
+            _add_column_if_missing(conn, "messages", "language", "TEXT", "TEXT")
             conn.commit()
     except Exception as e:
         print(f"[WARN] Impossible d'ajouter des colonnes à tickets: {e}")
 
 
 _ensure_ticket_photo_columns()
+
+
+def _ensure_expert_local_knowledge_workflow_columns() -> None:
+    """Ajoute le suivi auteur/validation aux anciennes bases sans perte de données."""
+    try:
+        with engine.connect() as conn:
+            migrations = [
+                ("expert_id", "INTEGER", "INTEGER"),
+                ("reviewer_id", "INTEGER", "INTEGER"),
+                ("review_notes", "TEXT", "TEXT"),
+                ("reviewed_at", "DATETIME", "TIMESTAMP"),
+            ]
+            for col, sqlite_ddl, postgres_ddl in migrations:
+                _add_column_if_missing(conn, "expert_local_knowledge", col, sqlite_ddl, postgres_ddl)
+            conn.commit()
+    except Exception as exc:
+        print(f"[WARN] Migration workflow connaissances impossible: {exc}")
+
+
+_ensure_expert_local_knowledge_workflow_columns()
 
 # ==========================================
 # MODÈLES PYDANTIC
@@ -701,10 +799,11 @@ class MobileQuestionCreate(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     conversation_context: Optional[List[ConversationTurn]] = None
-    target_lang: Optional[str] = None  # Langue locale cible : "moore", "dioula", "fulfulde", "gourounsi", "bissa"
+    target_lang: Optional[str] = None  # Langue locale cible : "moore", "dioula", "fulfulde"
 
 class ReplyMessage(BaseModel):
     message: str
+    language: Optional[str] = None
 
 
 class PhotoAnalysisHistoryIn(BaseModel):
@@ -787,11 +886,34 @@ class ExpertLocalKnowledgeIn(BaseModel):
     origin: Optional[str] = None
 
 
+class ExpertLocalKnowledgeReviewIn(BaseModel):
+    status: str
+    review_notes: Optional[str] = None
+
+
 class EmergencyNumberIn(BaseModel):
     label: str
     number: str
     description: Optional[str] = None
     display_order: int = 0
+
+
+class PhoneAuthStartIn(BaseModel):
+    phone_number: str
+    force_otp: bool = False
+
+
+class PhoneOtpVerifyIn(BaseModel):
+    phone_number: str
+    code: str
+    pin: Optional[str] = None
+    name: Optional[str] = None
+    location: Optional[str] = None
+
+
+class PhonePinLoginIn(BaseModel):
+    phone_number: str
+    pin: str
 
 
 # ==========================================
@@ -1951,15 +2073,22 @@ def _load_json_dict(raw: Optional[str]) -> Dict[str, Any]:
 def _build_upload_url(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
-    public_base = os.getenv("PUBLIC_API_BASE_URL", "http://localhost:3000").rstrip("/")
-    return f"{public_base}/{path}"
+    normalized_path = str(path).replace("\\", "/").lstrip("/")
+    public_base = os.getenv(
+        "PUBLIC_API_BASE_URL", "https://songraback.yingr-ai.com"
+    ).strip().rstrip("/")
+    # Une ancienne configuration de VM contenait "http//localhost" sans ':'.
+    # Ne jamais propager cette URL invalide aux applications clientes.
+    if not re.match(r"^https?://", public_base, re.IGNORECASE):
+        public_base = "https://songraback.yingr-ai.com"
+    return f"{public_base}/{normalized_path}"
 
 
 def _normalize_expert_local_language(language: Optional[str]) -> str:
     normalized = str(language or "fr").strip().lower()
     if normalized in {"moore", "mooree"}:
         return "moore"
-    if normalized not in {"fr", "moore", "dioula", "fulfulde", "gourounsi", "bissa"}:
+    if normalized not in {"fr", "moore", "dioula", "fulfulde"}:
         return "fr"
     return normalized
 
@@ -2304,14 +2433,69 @@ def _normalize_expert_local_status(value: Optional[str]) -> str:
 
 def _normalize_expert_local_category(value: Optional[str]) -> str:
     normalized = str(value or "agriculture").strip().lower()
+    normalized_ascii = "".join(
+        char
+        for char in unicodedata.normalize("NFD", normalized)
+        if unicodedata.category(char) != "Mn"
+    ).replace("-", " ").replace("_", " ")
+    if "cyber" in normalized_ascii or (
+        "securite" in normalized_ascii
+        and any(term in normalized_ascii for term in ("numerique", "informatique", "internet"))
+    ):
+        return "cybersecurity"
     mapping = {
         "health": "urgence",
         "urgence": "urgence",
         "sos_accident": "urgence",
+        "premiers_secours": "urgence",
+        "premier_secours": "urgence",
+        "premiers soins": "urgence",
+        "premiers_soins": "urgence",
+        "cybersecurity": "cybersecurity",
+        "cybersecurite": "cybersecurity",
+        "cybersécurité": "cybersecurity",
+        "cyber securite": "cybersecurity",
+        "cyber sécurité": "cybersecurity",
+        "securite numerique": "cybersecurity",
+        "sécurité numérique": "cybersecurity",
+        "securite informatique": "cybersecurity",
+        "sécurité informatique": "cybersecurity",
         "elevage": "elevage",
         "agriculture": "agriculture",
     }
     return mapping.get(normalized, "agriculture")
+
+
+def _infer_expert_local_category(value: Optional[str], *content_values: Any) -> str:
+    """Déduit la catégorie depuis le contenu quand un import est mal étiqueté.
+
+    Les documents JSON structurés ne passent pas par le LLM. Cette détection
+    empêche donc une valeur absente, générique ou erronée ``agriculture`` de
+    ranger automatiquement les fiches de cybersécurité au mauvais endroit.
+    """
+    category = _normalize_expert_local_category(value)
+    content_parts: List[str] = []
+    for content in content_values:
+        if isinstance(content, (list, tuple, set)):
+            content_parts.extend(str(part) for part in content if part is not None)
+        elif content is not None:
+            content_parts.append(str(content))
+    normalized_content = "".join(
+        char
+        for char in unicodedata.normalize("NFD", " ".join(content_parts).lower())
+        if unicodedata.category(char) != "Mn"
+    )
+    cyber_markers = (
+        "cyber", "hameconnage", "phishing", "arnaque", "fraude", "pirat",
+        "mot de passe", "code otp", "code secret", "mobile money",
+        "orange money", "moov money", "sim swap", "carte sim", "whatsapp",
+        "facebook", "compte vole", "compte bloque", "lien suspect",
+        "sms suspect", "application suspecte", "malware", "rancongiciel",
+        "securite numerique", "securite informatique",
+    )
+    if any(marker in normalized_content for marker in cyber_markers):
+        return "cybersecurity"
+    return category
 
 
 def _serialize_expert_local_knowledge_item(item: ExpertLocalKnowledgeDB) -> Dict[str, Any]:
@@ -2326,6 +2510,10 @@ def _serialize_expert_local_knowledge_item(item: ExpertLocalKnowledgeDB) -> Dict
         "origin": item.origin,
         "translations": _load_json_dict(item.translations_json),
         "audio": _load_json_dict(item.audio_json),
+        "expert_id": getattr(item, "expert_id", None),
+        "reviewer_id": getattr(item, "reviewer_id", None),
+        "review_notes": getattr(item, "review_notes", None),
+        "reviewed_at": item.reviewed_at.isoformat() if getattr(item, "reviewed_at", None) else None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
@@ -2426,11 +2614,11 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         actions_str = "\nACTIONS À TRADUIRE:\n" + "\n".join([f"- {a}" for a in actions_fr])
 
     return (
-        "Tu es un traducteur expert et natif des langues nationales du Burkina Faso (Mooré, Dioula, Fulfuldé, Gourounsi, Bissa).\n"
+        "Tu es un traducteur expert et natif des trois langues nationales prises en charge par Songra (Mooré, Dioula et Fulfuldé).\n"
         "Ta mission est de traduire une fiche de conseil agricole/santé/sécurité pour des producteurs ruraux.\n"
-        "Pour ce faire, mobilises activement toutes tes connaissances linguistiques externes, dictionnaires bilingues, grammaires académiques et bases de données linguistiques intégrées pour ces cinq langues afin d'obtenir la traduction la plus précise possible.\n"
+        "Pour ce faire, mobilise activement les dictionnaires bilingues Songra et les règles grammaticales du Mooré, du Dioula et du Fulfuldé afin d'obtenir la traduction la plus précise possible.\n"
         "CRITÈRES DE HAUTE QUALITÉ (OBJECTIF 90%+ DE FIDÉLITÉ NATURELLE ET PRÉCISION GRAMMATICALE) :\n"
-        "1. **Règles Grammaticales, Conjugaison & Base de Données Externe** : Appuie-toi sur les règles académiques officielles et ton savoir encyclopédique de la morphologie et de la syntaxe du Mooré, Dioula, Fulfuldé, Gourounsi et Bissa. Utilise des expressions idiomatiques authentiques du Burkina Faso plutôt que des calques mot-à-mot du français. Assure-toi que les termes techniques (médicaux, agricoles, de sécurité) soient traduits par leur équivalent culturel exact.\n"
+        "1. **Règles Grammaticales, Conjugaison & Base de Données Externe** : Appuie-toi sur les règles académiques officielles et ton savoir encyclopédique de la morphologie et de la syntaxe du Mooré, Dioula et Fulfuldé. Utilise des expressions idiomatiques authentiques du Burkina Faso plutôt que des calques mot-à-mot du français. Assure-toi que les termes techniques (médicaux, agricoles, de sécurité) soient traduits par leur équivalent culturel exact.\n"
         "2. **Pas de traduction littérale** : Ne traduis SURTOUT PAS mot-à-mot (pas de traduction littérale). Adapte le sens en utilisant les expressions et termes les plus naturels possibles en langue locale sans altérer le sens original.\n"
         "3. **Gestion des mots difficiles / Synonymes** : Si un mot spécifique (terme technique, moderne ou peu usité) n'a pas de traduction littérale directe reconnue, utilise des synonymes, des paraphrases ou des équivalents imagés naturels en langue locale plutôt que de le laisser en français ou d'inventer un calque artificiel.\n"
         "4. **Ton de Prononciation & Clarté** : Le ton doit être CHALEUREUX, RASSURANT, CONSEILLER et ORAL (adapté à l'écoute par des personnes analphabètes).\n"
@@ -2452,12 +2640,6 @@ def _build_local_translation_prompt(question_fr: str, resolution_fr: str, catego
         '  },\n'
         '  "fulfulde": {\n'
         '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
-        '  },\n'
-        '  "gourounsi": {\n'
-        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
-        '  },\n'
-        '  "bissa": {\n'
-        '    "question": "...", "text": "...", "speech_text": "...", "summary": "...", "actions": [...]\n'
         '  }\n'
         "}\n"
         "Contraintes : pas de markdown, pas d'explication.\n"
@@ -2473,7 +2655,7 @@ def _build_entreprendre_translation_prompt(data: dict) -> str:
     calendrier = "\n".join([f"- {c.get('mois')}: {c.get('activite')} ({c.get('details')})" for c in data.get('calendrier_cultural', [])])
     gestion_eau = f"Techniques: {', '.join(data.get('gestion_eau', {}).get('techniques', []))}. Conseils: {data.get('gestion_eau', {}).get('conseils', '')}"
     
-    return f"""Tu es un traducteur expert émérite et natif en Mooré, Dioula, Fulfuldé, Gourounsi et Bissa au Burkina Faso.
+    return f"""Tu es un traducteur expert émérite et natif en Mooré, Dioula et Fulfuldé au Burkina Faso.
 TA MISSION : Traduire les points clés d'un plan d'exploitation pour un producteur local.
 
 EXIGENCE DE QUALITÉ (OBJECTIF 90%+ DE PROXIMITÉ NATURELLE ET PHONÉTIQUE DE LECTURE) :
@@ -2510,22 +2692,6 @@ RETOURNE UNIQUEMENT un objet JSON avec cette structure :
     "speech_text": "..."
   }},
   "fulfulde": {{
-    "description_terrain": "...",
-    "propositions": ["..."],
-    "decoupage_terrain": "...",
-    "calendrier": ["..."],
-    "gestion_eau": "...",
-    "speech_text": "..."
-  }},
-  "gourounsi": {{
-    "description_terrain": "...",
-    "propositions": ["..."],
-    "decoupage_terrain": "...",
-    "calendrier": ["..."],
-    "gestion_eau": "...",
-    "speech_text": "..."
-  }},
-  "bissa": {{
     "description_terrain": "...",
     "propositions": ["..."],
     "decoupage_terrain": "...",
@@ -2571,34 +2737,158 @@ def _generate_local_translations(
     background_tasks: Optional[BackgroundTasks] = None,
     actions_fr: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    # NOTE: Dictionnaire local Burkina Dict temporairement désactivé/contourné.
-    # Priorité absolue à Gemini (gemini-2.5-flash) pour la traduction des langues locales burkinabè
-    # car il gère parfaitement Mooré, Dioula et Fulfuldé sans boucles de répétition, contrairement à OpenAI.
+    # Une passe indépendante par langue permet d'injecter le dictionnaire
+    # agricole correspondant et évite qu'un modèle mélange trois langues dans
+    # une même réponse JSON.
+    source_fields = {
+        "question": question_fr,
+        "text": resolution_fr,
+    }
+    if actions_fr:
+        source_fields["actions"] = " | ".join(str(action) for action in actions_fr if action)
 
-    prompt = _build_local_translation_prompt(question_fr, resolution_fr, category, actions_fr)
-    provider_errors: List[str] = []
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for language in ("moore", "dioula", "fulfulde"):
+        translated = translate_fields(
+            source_fields,
+            language,
+            GEMINI_API_KEY,
+            category=category,
+        )
+        question_result = translated.get("question", {})
+        text_result = translated.get("text", {})
+        actions_result = translated.get("actions", {})
+        action_text = str(actions_result.get("translation") or "").strip()
+        normalized[language] = {
+            "question": question_result.get("translation", question_fr),
+            "text": text_result.get("translation", resolution_fr),
+            "speech_text": text_result.get("speech_text", text_result.get("translation", resolution_fr)),
+            "summary": text_result.get("translation", resolution_fr),
+            "actions": [part.strip() for part in action_text.split("|") if part.strip()],
+            "updated_at": datetime.utcnow().isoformat(),
+        }
 
-    # Priorité absolue à Gemini pour la qualité et la fluidité des langues africaines
-    try:
-        parsed = _generate_local_translations_with_gemini(prompt)
-        print("[INFO] Traduction locale generee en priorite via Gemini")
-    except Exception as gemini_exc:
-        provider_errors.append(f"gemini: {gemini_exc}")
-        print(f"[WARN] Traduction Gemini indisponible, fallback OpenAI: {gemini_exc}")
-        try:
-            parsed = _generate_local_translations_with_openai(prompt)
-            print("[INFO] Traduction locale generee via OpenAI (fallback)")
-        except Exception as openai_exc:
-            provider_errors.append(f"openai: {openai_exc}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Traduction locale impossible: {' | '.join(provider_errors)}",
-            ) from openai_exc
-
-    normalized = _normalize_expert_local_translations(parsed)
     if not normalized:
         raise HTTPException(status_code=502, detail="La traduction locale renvoyée est vide")
     return _attach_local_translation_audio(normalized, background_tasks)
+
+
+def _find_studio_knowledge_match(
+    db: Session,
+    *,
+    category: str,
+    query_text: str,
+    photo_analysis: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Retourne la fiche validée du Studio la plus proche du texte/diagnostic."""
+    normalized_category = _normalize_expert_local_category(category)
+    candidates = (
+        db.query(ExpertLocalKnowledgeDB)
+        .filter(
+            ExpertLocalKnowledgeDB.category == normalized_category,
+            ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"]),
+        )
+        .order_by(ExpertLocalKnowledgeDB.updated_at.desc())
+        .limit(1000)
+        .all()
+    )
+    analysis = photo_analysis or {}
+    search_parts = [
+        query_text,
+        str(analysis.get("problem_label") or ""),
+        str(analysis.get("disease_detected") or ""),
+        str(analysis.get("diagnosis") or ""),
+        str(analysis.get("situation_type") or ""),
+        str(analysis.get("threat_type") or ""),
+        str(analysis.get("analysis") or ""),
+    ]
+    search_tokens = set(_tokenize(" ".join(part for part in search_parts if part)))
+    if not search_tokens:
+        return None
+
+    best: Optional[Tuple[float, ExpertLocalKnowledgeDB]] = None
+    normalized_problem = _normalize_search_text(
+        str(analysis.get("problem_label") or analysis.get("disease_detected") or query_text)
+    )
+    for item in candidates:
+        tags = [str(tag) for tag in _load_json_list(item.tags_json)]
+        score = (
+            4.0 * len(search_tokens & set(_tokenize(item.title or "")))
+            + 3.5 * len(search_tokens & set(_tokenize(" ".join(tags))))
+            + 2.0 * len(search_tokens & set(_tokenize(item.question_fr or "")))
+            + 0.25 * len(search_tokens & set(_tokenize(item.resolution_fr or "")))
+        )
+        normalized_title = _normalize_search_text(item.title or "")
+        if normalized_title and normalized_problem and (
+            normalized_title in normalized_problem or normalized_problem in normalized_title
+        ):
+            score += 15.0
+        if best is None or score > best[0]:
+            best = (score, item)
+
+    if best is None or best[0] < 4.0:
+        return None
+    result = _serialize_expert_local_knowledge_item(best[1])
+    result["match_score"] = round(best[0], 2)
+    result["source"] = "studio_connaissances"
+    return result
+
+
+def _apply_studio_match_to_v2_response(
+    final_response: Dict[str, Any],
+    studio_match: Dict[str, Any],
+    target_lang: Optional[str],
+) -> Dict[str, Any]:
+    """Remplace la réponse générique par la fiche Studio et ses vraies voix."""
+    result = dict(final_response)
+    result["message"] = studio_match["resolution_fr"]
+    diagnostic = dict(result.get("diagnostic") or {})
+    diagnostic["description"] = studio_match["title"]
+    diagnostic["type"] = studio_match["category"]
+    result["diagnostic"] = diagnostic
+    result["knowledge_mode"] = "studio_knowledge"
+    result["knowledge_card"] = studio_match
+
+    audio_map = studio_match.get("audio") or {}
+    translations = studio_match.get("translations") or {}
+    localizations: Dict[str, Any] = dict(result.get("localizations") or {})
+    french_audio = audio_map.get("fr") if isinstance(audio_map.get("fr"), dict) else {}
+    localizations["fr"] = {
+        "question": studio_match["title"],
+        "text": studio_match["resolution_fr"],
+        "speech_text": studio_match["resolution_fr"],
+        "audio_url": french_audio.get("url"),
+        "audio_mime_type": french_audio.get("mime_type"),
+    }
+
+    for language in _TRANSLATOR_VALID_LANGS:
+        translated = translations.get(language) if isinstance(translations.get(language), dict) else {}
+        local_audio = audio_map.get(language) if isinstance(audio_map.get(language), dict) else {}
+        translated_text = str(translated.get("text") or "").strip()
+        if translated_text or local_audio.get("url"):
+            localizations[language] = {
+                "question": str(translated.get("question") or studio_match["title"]),
+                "text": translated_text or studio_match["resolution_fr"],
+                "speech_text": str(translated.get("speech_text") or translated_text),
+                "summary": str(translated.get("summary") or ""),
+                "audio_url": local_audio.get("url"),
+                "audio_mime_type": local_audio.get("mime_type"),
+            }
+
+    if target_lang in _TRANSLATOR_VALID_LANGS:
+        local_audio = audio_map.get(target_lang) if isinstance(audio_map.get(target_lang), dict) else {}
+        has_local_audio = bool(str(local_audio.get("url") or "").strip())
+        result["local_audio_available"] = has_local_audio
+        result["local_audio_message"] = None if has_local_audio else (
+            "La voix dédiée à cette fiche est indisponible dans cette langue."
+        )
+        result["french_fallback_available"] = True
+        result["target_lang"] = target_lang
+        result["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
+        result["audio_url"] = local_audio.get("url") if has_local_audio else None
+        result["audio_mime_type"] = local_audio.get("mime_type") if has_local_audio else None
+    result["localizations"] = localizations
+    return result
 
 
 def _history_sort_value(value: Any) -> str:
@@ -2730,6 +3020,26 @@ def _normalize_search_text(text: str) -> str:
     normalized = unicodedata.normalize("NFD", text or "")
     normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
     return normalized.lower()
+
+
+def _clean_assistant_text(value: Any) -> str:
+    """Transforme le Markdown LLM en texte propre pour écran et synthèse vocale."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"```(?:[a-zA-Z0-9_+-]+)?\s*", "", text)
+    text = text.replace("```", "").replace("`", "")
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"(?m)^\s*>\s?", "", text)
+    text = re.sub(r"(?m)^\s*[-+*]\s+", "", text)
+    text = re.sub(r"(?m)^\s*\d+[.)]\s+", "", text)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(?<!\w)[*_~]+|[*_~]+(?!\w)", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _extract_offline_keywords(*values: Any, limit: int = 18) -> List[str]:
@@ -3029,6 +3339,46 @@ def _find_reusable_offline_entry(
     return best_entry if best_score >= min_overlap_score else None
 
 
+def _find_previously_answered_question(
+    db: Session, *, domain: str, question_text: str
+) -> Optional[OfflineKnowledgeEntryDB]:
+    """Réutilise d'abord une question identique, puis un cas expert proche.
+
+    Les réponses IA ordinaires ne sont reprises que si la question normalisée
+    est identique. Les tickets résolus par un humain gardent la recherche
+    sémantique plus souple existante.
+    """
+    normalized_question = _normalize_search_text(question_text).strip()
+    if not normalized_question:
+        return None
+
+    recent = (
+        db.query(OfflineKnowledgeEntryDB)
+        .filter(
+            OfflineKnowledgeEntryDB.domain == domain,
+            OfflineKnowledgeEntryDB.source_kind.in_([
+                "assistant_query", "resolved_ticket"
+            ]),
+        )
+        .order_by(
+            OfflineKnowledgeEntryDB.updated_at.desc(),
+            OfflineKnowledgeEntryDB.id.desc(),
+        )
+        .limit(300)
+        .all()
+    )
+    for entry in recent:
+        if _normalize_search_text(entry.question or "").strip() == normalized_question:
+            return entry
+
+    return _find_reusable_offline_entry(
+        db,
+        domain=domain,
+        source_kinds=_trusted_shared_reuse_source_kinds(),
+        question_text=question_text,
+    )
+
+
 def _build_media_cache_question(diagnostic: str, steps: List[str]) -> str:
     clean_steps = [step.strip() for step in steps if step and step.strip()]
     if clean_steps:
@@ -3319,9 +3669,10 @@ class GPTVisionEngine:
     d'analyse avancée de ChatGPT avec sa propre connaissance.
     """
     
-    def __init__(self, openai_client):
+    def __init__(self, openai_client, model: str = "gpt-4o", provider_name: str = "OpenAI"):
         self.client = openai_client
-        self.model = "gpt-4o"
+        self.model = model
+        self.provider_name = provider_name
     
     def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
         """Analyser les images via GPT-4 Vision API"""
@@ -3400,6 +3751,15 @@ FORMAT JSON:
     "analysis": "Analyse en français"
 }"""
             
+            context_prompt += f"""
+
+CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non précisée'}):
+- Identifiez d'abord le type réel de contenu; ne supposez pas qu'il correspond à la catégorie.
+- Si la photo est hors catégorie, floue ou inexploitable, ne fabriquez aucun diagnostic.
+- Ajoutez obligatoirement au JSON: image_category (agriculture|elevage|sos_accident|cybersecurity|other|unclear), category_match (booléen), image_usable (booléen), problem_identified (booléen), problem_status (identified|not_identified|uncertain|wrong_category|unusable), problem_label et validation_message.
+- problem_identified doit être false lorsqu'aucun signe anormal n'est réellement visible.
+"""
+
             # Construire le message pour GPT-4 Vision
             content = [
                 {
@@ -3418,11 +3778,11 @@ FORMAT JSON:
                     }
                 })
             
-            print(f"📤 Envoi à GPT-4o: {len(content)} éléments (1 texte + {len(images_base64)} images)")
+            print(f"📤 Envoi à {self.provider_name}/{self.model}: {len(content)} éléments (1 texte + {len(images_base64)} images)")
             
             # Appeler GPT-4o avec vision
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self.model,
                 messages=[
                     {
                         "role": "user",
@@ -3433,11 +3793,11 @@ FORMAT JSON:
                 temperature=0.7
             )
             
-            print(f"✅ Réponse GPT-4o reçue")
+            print(f"✅ Réponse {self.provider_name} Vision reçue")
             
             # Parser la réponse
             response_text = response.choices[0].message.content
-            print(f"📝 Réponse brute GPT-4o: {response_text[:300]}...")
+            print(f"📝 Réponse brute {self.provider_name}: {response_text[:300]}...")
             
             # Extraire le JSON de la réponse
             analysis_json = None
@@ -3495,6 +3855,8 @@ FORMAT JSON:
                 for i in range(len(valid_images))
             ]
             analysis_json["requires_expert"] = analysis_json.get("urgency") == "high" or analysis_json.get("confidence", 0.5) < 0.6
+            analysis_json["model"] = self.model
+            analysis_json["vision_provider"] = self.provider_name.lower()
             
             return analysis_json
             
@@ -3513,26 +3875,149 @@ FORMAT JSON:
             }
 
 
+def _normalize_photo_analysis_status(
+    analysis: Dict[str, Any], requested_category: Optional[str]
+) -> Dict[str, Any]:
+    """Normalise le contrôle catégorie et l'état du problème pour tous les moteurs."""
+    result = dict(analysis or {})
+    requested = (requested_category or "agriculture").strip().lower()
+    aliases = {
+        "health": "sos_accident",
+        "urgence": "sos_accident",
+        "animal": "elevage",
+        "veterinaire": "elevage",
+        "vétérinaire": "elevage",
+        "plant": "agriculture",
+        "plante": "agriculture",
+    }
+    requested = aliases.get(requested, requested)
+
+    raw_category = str(result.get("image_category") or "").strip().lower()
+    image_category = aliases.get(raw_category, raw_category)
+    if not image_category:
+        consultation = _normalize_search_text(str(result.get("consultation_type") or ""))
+        diagnosis_type = str(result.get("diagnosis_type") or "").strip().lower()
+        if result.get("culture_detected") or "agricol" in consultation:
+            image_category = "agriculture"
+        elif result.get("animal_species") or "veterinaire" in consultation:
+            image_category = "elevage"
+        elif result.get("situation_type") or "premiers secours" in consultation:
+            image_category = "sos_accident"
+        elif result.get("threat_type") or "cyber" in consultation:
+            image_category = "cybersecurity"
+        elif diagnosis_type == "plant_disease_stress":
+            image_category = "agriculture"
+        elif diagnosis_type == "animal_health_injury":
+            image_category = "elevage"
+        elif diagnosis_type == "human_first_aid":
+            image_category = "sos_accident"
+        else:
+            image_category = "unclear"
+
+    image_usable = result.get("image_usable")
+    if not isinstance(image_usable, bool):
+        image_usable = not bool(result.get("error")) and float(result.get("confidence") or 0) > 0
+
+    category_match = result.get("category_match")
+    if not isinstance(category_match, bool):
+        category_match = image_category == requested if image_category != "unclear" else False
+
+    diagnosis = str(
+        result.get("problem_label")
+        or result.get("disease_detected")
+        or result.get("threat_type")
+        or result.get("situation_type")
+        or ""
+    ).strip()
+    normalized_diagnosis = _normalize_search_text(diagnosis)
+    no_problem_markers = (
+        "aucun", "aucune", "pas de probleme", "non identifie", "indetermine",
+        "image inexploitable", "erreur analyse",
+    )
+    explicit_problem = result.get("problem_identified")
+    if isinstance(explicit_problem, bool):
+        problem_identified = explicit_problem
+    elif isinstance(result.get("threat_detected"), bool):
+        problem_identified = bool(result.get("threat_detected"))
+    elif not image_usable or not category_match:
+        problem_identified = False
+    else:
+        problem_identified = bool(diagnosis) and not any(
+            marker in normalized_diagnosis for marker in no_problem_markers
+        )
+
+    if not image_usable:
+        status = "unusable"
+    elif not category_match:
+        status = "wrong_category"
+    elif problem_identified:
+        status = "identified"
+    elif any(marker in normalized_diagnosis for marker in ("aucun", "aucune", "pas de probleme")):
+        status = "not_identified"
+    else:
+        status = "uncertain"
+
+    messages = {
+        "unusable": "La photo n'est pas assez exploitable pour réaliser une analyse fiable.",
+        "wrong_category": f"La photo semble appartenir à la catégorie {image_category}, pas à {requested}.",
+        "identified": f"Un problème probable a été identifié: {diagnosis}.",
+        "not_identified": "Aucun problème visible n'a été identifié sur cette photo.",
+        "uncertain": "La photo correspond à la catégorie, mais aucun problème précis ne peut être confirmé.",
+    }
+    result.update({
+        "requested_category": requested,
+        "image_category": image_category,
+        "category_match": category_match,
+        "image_usable": image_usable,
+        "problem_identified": problem_identified,
+        "problem_status": status,
+        "problem_label": diagnosis or "Aucun problème confirmé",
+        "validation_message": str(result.get("validation_message") or messages[status]),
+    })
+    return result
+
+
 class ResilientVisionEngine:
     """Moteur de vision résilient avec redirection dynamique et bascule automatique.
     Sélectionne la clé préférée selon AI_PROVIDER et bascule sur l'autre en cas d'erreur de facturation/dunning (403/429/etc.).
     """
-    def __init__(self, gemini_key: Optional[str], openai_client: Optional[Any]):
-        self.gemini_engine = GeminiVisionEngine(gemini_key) if gemini_key else None
+    def __init__(
+        self,
+        gemini_key: Optional[str],
+        openai_client: Optional[Any],
+        groq_client: Optional[Any],
+    ):
+        self.gemini_engine = GeminiVisionEngine(gemini_key) if (gemini_key and GeminiVisionEngine) else None
+        self.groq_engine = GPTVisionEngine(
+            groq_client,
+            model=os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
+            provider_name="Groq",
+        ) if groq_client else None
         self.gpt_engine = GPTVisionEngine(openai_client) if openai_client else None
         self.local_engine = LocalComputerVision()
 
     def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
         provider = os.getenv("AI_PROVIDER", "openai").lower()
         engines = []
-        if provider == "openai":
+        if provider == "groq":
+            if self.groq_engine:
+                engines.append(("Groq Vision", self.groq_engine))
             if self.gpt_engine:
                 engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
+            if self.gemini_engine:
+                engines.append(("Gemini", self.gemini_engine))
+        elif provider == "openai":
+            if self.gpt_engine:
+                engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
+            if self.groq_engine:
+                engines.append(("Groq Vision", self.groq_engine))
             if self.gemini_engine:
                 engines.append(("Gemini", self.gemini_engine))
         else:
             if self.gemini_engine:
                 engines.append(("Gemini", self.gemini_engine))
+            if self.groq_engine:
+                engines.append(("Groq Vision", self.groq_engine))
             if self.gpt_engine:
                 engines.append(("OpenAI (GPT-4o)", self.gpt_engine))
         
@@ -3548,7 +4033,7 @@ class ResilientVisionEngine:
                     err_msg = str(res.get("analysis", "")).lower() + " " + str(res.get("error", "")).lower()
                     if res.get("disease_detected") == "Erreur analyse" or "dunning" in err_msg or "403" in err_msg or "permission" in err_msg:
                         raise RuntimeError(f"Analyse invalide ou erreur d'API retournée par {name} : {res.get('analysis')}")
-                return res
+                return _normalize_photo_analysis_status(res, category)
             except Exception as e:
                 print(f"[VISION-RESILIENT] Échec avec {name} : {e}")
                 last_error = e
@@ -3563,7 +4048,7 @@ class ResilientVisionEngine:
         }
 
 
-cv_engine = ResilientVisionEngine(GEMINI_API_KEY, openai_client)
+cv_engine = ResilientVisionEngine(GEMINI_API_KEY, openai_client, groq_client)
 
 # ==========================================
 # TRADUCTION LOCALE — LANGUES DU BURKINA FASO
@@ -3573,8 +4058,6 @@ _LOCAL_LANG_NAMES = {
     "moore":    "Mooré",
     "dioula":   "Dioula",
     "fulfulde": "Fulfuldé",
-    "gourounsi":"Gourounsi",
-    "bissa":    "Bissa",
 }
 
 # Champs du diagnostic à traduire (clés JSON retournées par le scanner)
@@ -3599,15 +4082,15 @@ def translate_analysis_to_local_lang(analysis: Dict[str, Any], target_lang: str)
 
     Args:
         analysis  : dict retourné par cv_engine.analyze_images()
-        target_lang : code langue ("moore", "dioula", "fulfulde", "gourounsi", "bissa")
+        target_lang : code langue ("moore", "dioula", "fulfulde")
 
     Returns:
         Copie du dict d'analyse avec un sous-objet 'local_translation' contenant
         chaque champ traduit dans la langue cible, plus les métadonnées phonétiques.
     """
     lang_name = _LOCAL_LANG_NAMES.get(target_lang)
-    if not lang_name or not GEMINI_API_KEY:
-        return analysis  # pas de clé Gemini ou langue inconnue → on renvoie l'original
+    if not lang_name:
+        return analysis
 
     # Collecter les champs textuels non vides à traduire
     fields_to_translate: Dict[str, str] = {}
@@ -3624,6 +4107,37 @@ def translate_analysis_to_local_lang(analysis: Dict[str, Any], target_lang: str)
     if not fields_to_translate:
         return analysis
 
+    # Utiliser le moteur centralisé : dictionnaire validé d'abord, puis le
+    # fournisseur configuré (Groq/OpenAI/Gemini). Cela évite que cet ancien
+    # endpoint contourne Groq et appelle Gemini directement.
+    translated_fields = translate_fields(
+        fields_to_translate,
+        target_lang,
+        GEMINI_API_KEY,
+        category=str(analysis.get("type_probleme") or "agriculture"),
+    )
+    analysis_copy = dict(analysis)
+    analysis_copy["local_translation"] = {
+        "translations": {
+            field: {
+                "text": result.get("translation", fields_to_translate.get(field, "")),
+                "phonetic": result.get("speech_text", result.get("translation", "")),
+                "vocal_writing": result.get("speech_text", result.get("translation", "")),
+                "confidence": result.get("confidence", 0.0),
+                "source": result.get("source", "unknown"),
+            }
+            for field, result in translated_fields.items()
+        },
+        "target_lang": target_lang,
+        "lang_name": lang_name,
+        "confidence": min(
+            [float(item.get("confidence", 0.0)) for item in translated_fields.values()] or [0.0]
+        ),
+    }
+    return analysis_copy
+
+    # Ancienne implémentation Gemini conservée temporairement comme référence
+    # mais rendue inaccessible par le retour centralisé ci-dessus.
     fields_json = json.dumps(fields_to_translate, ensure_ascii=False, indent=2)
 
     prompt = f"""Vous êtes un linguiste expert en langues locales du Burkina Faso.
@@ -3838,6 +4352,36 @@ app = FastAPI(
     description="Plateforme d'assistance avec IA locale pour l'analyse de photos"
 )
 
+_RATE_BUCKETS: Dict[str, List[float]] = {}
+_RATE_LIMITED_PATHS = {
+    "/api/auth/phone/start": (5, 300),
+    "/api/auth/phone/verify": (15, 300),
+    "/api/auth/pin-login": (20, 300),
+    "/api/auth/login": (20, 300),
+    "/api/sos/alert": (10, 300),
+}
+
+
+@app.middleware("http")
+async def security_rate_limit(request: Request, call_next):
+    """Protection locale minimale; Redis sera la source partagee en production."""
+    rule = _RATE_LIMITED_PATHS.get(request.url.path)
+    if rule:
+        limit, window = rule
+        now = time.time()
+        client = request.client.host if request.client else "unknown"
+        key = f"{client}:{request.url.path}"
+        recent = [stamp for stamp in _RATE_BUCKETS.get(key, []) if stamp > now - window]
+        if len(recent) >= limit:
+            return JSONResponse(status_code=429, content={"detail": "Trop de requetes. Reessayez plus tard."})
+        recent.append(now)
+        _RATE_BUCKETS[key] = recent
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
 app.include_router(agri_services.router)
 app.include_router(yingr_ai_api.router)
 
@@ -3884,7 +4428,146 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(password: str, hashed: str) -> bool:
-    return hash_password(password) == hashed
+    if (hashed or "").startswith("$2"):
+        try:
+            return bcrypt.checkpw(password.encode(), hashed.encode())
+        except ValueError:
+            return False
+    return secrets.compare_digest(hash_password(password), hashed or "")
+
+
+def hash_expert_password(password: str) -> str:
+    """Hash adaptatif pour les comptes experts; les anciens SHA-256 migrent au login."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
+
+
+def _normalize_bf_phone(phone_number: str) -> str:
+    digits = re.sub(r"\D", "", phone_number or "")
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 8:
+        digits = "226" + digits
+    if len(digits) < 11 or len(digits) > 15:
+        raise HTTPException(status_code=422, detail="Numéro de téléphone invalide")
+    return "+" + digits
+
+
+def _hash_pin(pin: str, salt: Optional[str] = None) -> str:
+    clean_pin = (pin or "").strip()
+    if not re.fullmatch(r"\d{4}", clean_pin):
+        raise HTTPException(status_code=422, detail="Le code PIN doit contenir exactement 4 chiffres")
+    resolved_salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", clean_pin.encode(), resolved_salt.encode(), 210000).hex()
+    return f"pbkdf2_sha256${resolved_salt}${digest}"
+
+
+def _verify_pin(pin: str, stored_hash: str) -> bool:
+    try:
+        algorithm, salt, _ = (stored_hash or "").split("$", 2)
+        if algorithm != "pbkdf2_sha256":
+            return verify_password(pin, stored_hash)  # compatibilité anciens comptes
+        return secrets.compare_digest(_hash_pin(pin, salt), stored_hash)
+    except (ValueError, HTTPException):
+        return False
+
+
+_ORANGE_SMS_TOKEN: Optional[str] = None
+_ORANGE_SMS_TOKEN_EXPIRES_AT: float = 0.0
+
+
+def _orange_sms_access_token(force_refresh: bool = False) -> str:
+    """Obtient et réutilise le jeton OAuth Orange (valable environ une heure)."""
+    global _ORANGE_SMS_TOKEN, _ORANGE_SMS_TOKEN_EXPIRES_AT
+    if not force_refresh and _ORANGE_SMS_TOKEN and time.time() < _ORANGE_SMS_TOKEN_EXPIRES_AT:
+        return _ORANGE_SMS_TOKEN
+
+    client_id = os.getenv("ORANGE_SMS_CLIENT_ID", "").strip()
+    client_secret = os.getenv("ORANGE_SMS_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Service SMS Orange non configuré. Ajoutez ORANGE_SMS_CLIENT_ID et ORANGE_SMS_CLIENT_SECRET.",
+        )
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    request = urllib.request.Request(
+        "https://api.orange.com/oauth/v3/token",
+        data=b"grant_type=client_credentials",
+        method="POST",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Impossible de joindre l'authentification SMS Orange") from exc
+    token = str(payload.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=503, detail="Orange n'a pas fourni de jeton SMS valide")
+    expires_in = max(60, int(payload.get("expires_in") or 3600))
+    _ORANGE_SMS_TOKEN = token
+    _ORANGE_SMS_TOKEN_EXPIRES_AT = time.time() + expires_in - 60
+    return token
+
+
+def _send_orange_sms(phone_number: str, message: str, retry: bool = True) -> None:
+    sender_address = os.getenv("ORANGE_SMS_SENDER_ADDRESS", "tel:+2260000").strip()
+    encoded_sender = urllib.parse.quote(sender_address, safe="")
+    body = {
+        "outboundSMSMessageRequest": {
+            "address": f"tel:{phone_number}",
+            "senderAddress": sender_address,
+            "outboundSMSTextMessage": {"message": message},
+        }
+    }
+    sender_name = os.getenv("ORANGE_SMS_SENDER_NAME", "").strip()
+    if sender_name:
+        body["outboundSMSMessageRequest"]["senderName"] = sender_name[:11]
+    request = urllib.request.Request(
+        f"https://api.orange.com/smsmessaging/v1/outbound/{encoded_sender}/requests",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {_orange_sms_access_token()}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.status not in (200, 201, 202):
+                raise HTTPException(status_code=503, detail="Orange n'a pas accepté le SMS")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401 and retry:
+            _orange_sms_access_token(force_refresh=True)
+            return _send_orange_sms(phone_number, message, retry=False)
+        raise HTTPException(status_code=503, detail="Échec d'envoi du SMS Orange") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Impossible de joindre le service SMS Orange") from exc
+
+
+def _send_auth_otp_sms(phone_number: str, code: str) -> None:
+    """Envoie réellement l'OTP avec Orange SMS Burkina Faso.
+
+    En production aucun code n'est renvoyé au client et aucun faux succès n'est
+    accepté. Le mode développement doit être activé explicitement.
+    """
+    provider = os.getenv("SMS_PROVIDER", "orange").strip().lower()
+    message = f"SONGRA : votre code de vérification est {code}. Il expire dans 5 minutes. Ne le partagez avec personne."
+    if provider == "orange":
+        return _send_orange_sms(phone_number, message)
+    if os.getenv("OTP_DEV_MODE", "false").strip().lower() == "true":
+        print(f"[OTP-DEV] {phone_number}: {code}")
+        return
+    raise HTTPException(
+        status_code=503,
+        detail="Service SMS non configuré. Utilisez SMS_PROVIDER=orange et configurez les identifiants Orange.",
+    )
 
 
 def create_access_token(user: User) -> str:
@@ -3895,6 +4578,16 @@ def create_access_token(user: User) -> str:
         "type": "user",
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def create_expert_access_token(expert: Expert) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(expert.id), "type": "expert", "role": getattr(expert, "role", "expert"),
+        "jti": secrets.token_urlsafe(24), "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=min(JWT_EXPIRE_HOURS, 24))).timestamp()),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -3933,7 +4626,10 @@ def get_current_user(
     token = _extract_bearer_token(authorization)
 
     if token.startswith("phone:"):
-        return _get_or_create_user_by_phone(token.split(":", 1)[1], db)
+        raise HTTPException(
+            status_code=401,
+            detail="Ancienne session non sécurisée. Vérifiez votre numéro pour vous reconnecter.",
+        )
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -3962,18 +4658,30 @@ def get_current_expert(
 ) -> Expert:
     token = _extract_bearer_token(authorization)
 
-    if not token.startswith("token_"):
-        raise HTTPException(status_code=401, detail="Invalid expert token")
-
-    parts = token.split("_", 2)
-    if len(parts) < 3 or not parts[1].isdigit():
-        raise HTTPException(status_code=401, detail="Invalid expert token")
-
-    expert = db.query(Expert).filter(Expert.id == int(parts[1])).first()
-    if not expert:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Expert token expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid expert token") from exc
+    if payload.get("type") != "expert" or not payload.get("sub") or not payload.get("jti"):
+        raise HTTPException(status_code=401, detail="Invalid expert token scope")
+    from voice_alert import is_expert_token_revoked
+    if is_expert_token_revoked(SessionLocal, str(payload["jti"])):
+        raise HTTPException(status_code=401, detail="Expert token revoked")
+    expert = db.query(Expert).filter(Expert.id == int(payload["sub"])).first()
+    if not expert or not expert.is_active:
         raise HTTPException(status_code=401, detail="Expert not found")
 
     return expert
+
+
+def get_current_admin_expert(
+    current_expert: Expert = Depends(get_current_expert),
+) -> Expert:
+    if (getattr(current_expert, "role", "expert") or "expert").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Accès administrateur requis")
+    return current_expert
 
 
 def get_current_user_or_expert(
@@ -3996,6 +4704,8 @@ def serialize_user(user: User) -> Dict[str, Any]:
         "phone_number": user.phone_number,
         "name": user.name,
         "location": user.location,
+        "organization": getattr(user, "organization", None),
+        "organization_id": getattr(user, "organization_id", None),
         "is_premium": user.is_premium,
         "messages_used": user.messages_used,
         "messages_limit": user.messages_limit if user.is_premium else 1,
@@ -4043,18 +4753,62 @@ async def startup_seed_data():
     try:
         db = SessionLocal()
         _run_startup_migrations(db)
-        existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
+        default_admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "superadmin@songra.bf").strip()
+        default_admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD", "").strip()
+        existing = db.query(Expert).filter(Expert.email == default_admin_email).first()
         if not existing:
+            if not default_admin_password:
+                if APP_ENV == "production":
+                    raise RuntimeError("DEFAULT_ADMIN_PASSWORD requis pour creer le premier administrateur")
+                default_admin_password = secrets.token_urlsafe(18)
+                print(f"[DEV-ONLY] Mot de passe admin initial genere: {default_admin_password}")
             expert = Expert(
-                email="test@resolvehub.bf",
-                password_hash=hash_password("test123"),
-                full_name="Expert Test IA",
-                specialization="agriculture",
-                is_active=True
+                email=default_admin_email,
+                password_hash=hash_expert_password(default_admin_password),
+                full_name="Super Administrateur SONGRA",
+                specialization="all",
+                role="admin",
+                is_active=True,
+                zone="Burkina Faso",
+                language="Français",
             )
             db.add(expert)
             db.commit()
-            print("[OK] Expert test créé: test@resolvehub.bf / test123")
+            print(f"[OK] Compte super-admin initialisé: {default_admin_email}")
+        else:
+            existing.role = "admin"
+            existing.is_active = True
+            existing.full_name = "Super Administrateur SONGRA"
+            existing.specialization = "all"
+            existing.zone = existing.zone or "Burkina Faso"
+            db.commit()
+
+        default_expert_email = os.getenv("DEFAULT_EXPERT_EMAIL", "expert@songra.bf").strip()
+        default_expert_password = os.getenv("DEFAULT_EXPERT_PASSWORD", "").strip()
+        default_expert = db.query(Expert).filter(Expert.email == default_expert_email).first()
+        if not default_expert:
+            if not default_expert_password:
+                if APP_ENV == "production":
+                    raise RuntimeError("DEFAULT_EXPERT_PASSWORD requis pour creer le premier expert")
+                default_expert_password = secrets.token_urlsafe(18)
+                print(f"[DEV-ONLY] Mot de passe expert initial genere: {default_expert_password}")
+            default_expert = Expert(
+                email=default_expert_email,
+                password_hash=hash_expert_password(default_expert_password),
+                full_name="Expert Terrain Agriculture",
+                specialization="agriculture",
+                role="expert",
+                is_active=True,
+                zone="Ouagadougou",
+                language="Mooré",
+            )
+            db.add(default_expert)
+        else:
+            default_expert.role = "expert"
+            default_expert.is_active = True
+            default_expert.specialization = default_expert.specialization or "agriculture"
+            default_expert.zone = default_expert.zone or "Ouagadougou"
+        db.commit()
 
         try:
             load_knowledge_from_json(db)
@@ -4493,18 +5247,45 @@ def retrieve_knowledge(
             query_builder = query_builder.filter(OfflineKnowledgeEntryDB.domain == target_domain)
         return [_serialize_offline_entry_for_rag(item) for item in query_builder.all()]
 
+    def fetch_studio_items(target_domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        query_builder = db.query(ExpertLocalKnowledgeDB).filter(
+            ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"])
+        )
+        if target_domain:
+            query_builder = query_builder.filter(
+                ExpertLocalKnowledgeDB.category
+                == _normalize_expert_local_category(target_domain)
+            )
+        studio_items: List[Dict[str, Any]] = []
+        for item in query_builder.all():
+            studio_items.append({
+                "id": f"studio-{item.id}",
+                "domain": item.category,
+                "title": item.title,
+                "question": item.question_fr,
+                "answer": item.resolution_fr,
+                "tags": _load_json_list(item.tags_json),
+                "language": "fr",
+                "source": "studio_connaissances",
+                "translations": _load_json_dict(item.translations_json),
+                "audio": _load_json_dict(item.audio_json),
+            })
+        return studio_items
+
     # 1) Fiches strictement dans le domaine demandé
     primary_items = [
         serialize_knowledge_item(item)
         for item in db.query(KnowledgeItem).filter(KnowledgeItem.domain == domain).all()
     ]
     primary_items.extend(fetch_generated_items(domain))
+    primary_items.extend(fetch_studio_items(domain))
     scored = score_items(primary_items)
 
     # 2) Fallback global optionnel : si rien trouvé, on regarde toutes les fiches
     if not scored and expand_scope:
         all_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
         all_items.extend(fetch_generated_items())
+        all_items.extend(fetch_studio_items())
         scored = score_items(all_items)
 
     # 3) Dernier recours : recherche par sous-chaîne, soit dans le domaine
@@ -4514,6 +5295,7 @@ def retrieve_knowledge(
         if expand_scope:
             fallback_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
             fallback_items.extend(fetch_generated_items())
+            fallback_items.extend(fetch_studio_items())
 
         def normalize_text(text: str) -> str:
             if not text:
@@ -4535,7 +5317,8 @@ def retrieve_knowledge(
         scored = [
             entry
             for entry in scored
-            if (entry["item"].get("domain") or "").strip().lower() == domain.strip().lower()
+            if _normalize_expert_local_category(entry["item"].get("domain"))
+            == _normalize_expert_local_category(domain)
         ]
 
     if focus_subject_terms and any(entry.get("subject_match") for entry in scored):
@@ -4729,7 +5512,7 @@ def resolve_knowledge_answer(
     focus_context: Optional[Dict[str, Any]] = None,
     photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Répondre via OpenAI en priorité, fiches locales en fallback uniquement.
+    """Répondre d'abord depuis une fiche validée du Studio de connaissances.
 
     Stratégie ACTUELLE :
     1. OpenAI / LLM général en PREMIER (analyse directe par l'IA)
@@ -4738,7 +5521,23 @@ def resolve_knowledge_answer(
 
     📷 Le diagnostic photo (si disponible) est passé au LLM pour enrichir la réponse.
     """
-    # ÉTAPE 1 : OpenAI / LLM général EN PREMIER (priorité sur les fiches offline)
+    studio_match = _find_studio_knowledge_match(
+        db,
+        category=domain,
+        query_text=question,
+        photo_analysis=photo_analysis,
+    )
+    if studio_match:
+        return {
+            "rag_items": [studio_match],
+            "llm_answer": studio_match["resolution_fr"],
+            "rag_fallback_answer": None,
+            "knowledge_mode": "studio_knowledge",
+            "knowledge_fallback_used": False,
+            "studio_match": studio_match,
+        }
+
+    # Aucune fiche Studio assez proche : analyse générale en repli.
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -5095,6 +5894,126 @@ async def health_check():
     }
 
 
+@app.post("/api/auth/phone/start")
+async def start_phone_auth(data: PhoneAuthStartIn, db: Session = Depends(get_db)):
+    phone = _normalize_bf_phone(data.phone_number)
+    user = db.query(User).filter(User.phone_number == phone).first()
+    pin_configured = bool(user and user.password_hash)
+    if pin_configured and not data.force_otp:
+        return {
+            "sent": False,
+            "phone_number": phone,
+            "account_exists": True,
+            "pin_configured": True,
+            "expires_in_seconds": 0,
+            "message": "Compte reconnu. Entrez votre code PIN.",
+        }
+    now = datetime.utcnow()
+    recent = (
+        db.query(PhoneOtpDB)
+        .filter(PhoneOtpDB.phone_number == phone, PhoneOtpDB.created_at >= now - timedelta(minutes=1))
+        .count()
+    )
+    if recent >= 1:
+        raise HTTPException(status_code=429, detail="Patientez une minute avant de demander un nouveau code")
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    otp = PhoneOtpDB(
+        phone_number=phone,
+        code_hash=hash_password(code),
+        purpose="authentication",
+        expires_at=now + timedelta(minutes=5),
+    )
+    db.add(otp)
+    db.commit()
+    try:
+        _send_auth_otp_sms(phone, code)
+    except Exception:
+        db.delete(otp)
+        db.commit()
+        raise
+
+    return {
+        "sent": True,
+        "phone_number": phone,
+        "account_exists": bool(user),
+        "pin_configured": pin_configured,
+        "expires_in_seconds": 300,
+        "message": "Un code secret à 6 chiffres vient d'être envoyé par SMS.",
+    }
+
+
+@app.post("/api/auth/phone/verify")
+async def verify_phone_otp(data: PhoneOtpVerifyIn, db: Session = Depends(get_db)):
+    phone = _normalize_bf_phone(data.phone_number)
+    now = datetime.utcnow()
+    otp = (
+        db.query(PhoneOtpDB)
+        .filter(PhoneOtpDB.phone_number == phone, PhoneOtpDB.consumed_at.is_(None))
+        .order_by(PhoneOtpDB.created_at.desc())
+        .first()
+    )
+    if not otp or otp.expires_at < now:
+        raise HTTPException(status_code=401, detail="Code expiré. Demandez un nouveau SMS")
+    if otp.attempts >= 5:
+        raise HTTPException(status_code=429, detail="Trop d'essais. Demandez un nouveau code")
+    if not secrets.compare_digest(otp.code_hash, hash_password((data.code or "").strip())):
+        otp.attempts += 1
+        db.commit()
+        raise HTTPException(status_code=401, detail="Code incorrect")
+
+    user = db.query(User).filter(User.phone_number == phone).first()
+    if not user:
+        if not (data.name or "").strip():
+            raise HTTPException(status_code=422, detail="Indiquez votre nom pour créer le compte")
+        if not data.pin:
+            raise HTTPException(status_code=422, detail="Choisissez votre code PIN à 4 chiffres")
+        user = User(
+            phone_number=phone,
+            name=data.name.strip(),
+            location=(data.location or "").strip() or None,
+            password_hash=_hash_pin(data.pin),
+            is_premium=False,
+            messages_used=0,
+            messages_limit=1,
+        )
+        db.add(user)
+    elif data.pin:
+        user.password_hash = _hash_pin(data.pin)
+        if (data.name or "").strip():
+            user.name = data.name.strip()
+        if (data.location or "").strip():
+            user.location = data.location.strip()
+
+    otp.consumed_at = now
+    db.commit()
+    db.refresh(user)
+    return {"token": create_access_token(user), "user": serialize_user(user)}
+
+
+@app.post("/api/auth/pin-login")
+async def login_with_pin(data: PhonePinLoginIn, db: Session = Depends(get_db)):
+    phone = _normalize_bf_phone(data.phone_number)
+    user = db.query(User).filter(User.phone_number == phone).first()
+    now = datetime.utcnow()
+    if user and user.pin_locked_until and user.pin_locked_until > now:
+        raise HTTPException(status_code=429, detail="Compte temporairement bloqué. Utilisez le SMS ou réessayez dans 15 minutes")
+    if not user or not user.password_hash or not _verify_pin(data.pin, user.password_hash):
+        if user:
+            user.failed_pin_attempts = int(user.failed_pin_attempts or 0) + 1
+            if user.failed_pin_attempts >= 5:
+                user.pin_locked_until = now + timedelta(minutes=15)
+                user.failed_pin_attempts = 0
+            db.commit()
+        raise HTTPException(status_code=401, detail="Numéro ou code PIN incorrect")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Ce compte est désactivé")
+    user.failed_pin_attempts = 0
+    user.pin_locked_until = None
+    db.commit()
+    return {"token": create_access_token(user), "user": serialize_user(user)}
+
+
 @app.post("/api/register")
 async def register_user(data: UserRegister, db: Session = Depends(get_db)):
     _validate_user_credentials(data.phone_number, data.password)
@@ -5204,9 +6123,8 @@ async def analyze_scanner_photo(
 ):
     """Analyse UNIQUEMENT une photo du scanner - pas de ticket, pas de chat IA.
     
-    Si `target_lang` est fourni ("moore", "dioula", "fulfulde", "gourounsi", "bissa"),
-    le diagnostic est automatiquement traduit dans la langue locale choisie.
-    Le résultat de traduction est disponible dans `analysis.local_translation`.
+    Si `target_lang` est fourni, le diagnostic reste canonique en français et
+    un véritable audio humain est recherché dans la base locale validée.
     """
 
     # Collecter les photos
@@ -5216,7 +6134,7 @@ async def analyze_scanner_photo(
         raise HTTPException(status_code=400, detail="Aucune photo fournie")
 
     # Valider la langue cible si fournie
-    valid_langs = {"moore", "dioula", "fulfulde", "gourounsi", "bissa"}
+    valid_langs = {"moore", "dioula", "fulfulde"}
     target_lang = (data.target_lang or "").strip().lower() or None
     if target_lang and target_lang not in valid_langs:
         raise HTTPException(
@@ -5233,19 +6151,28 @@ async def analyze_scanner_photo(
             data.category or "agriculture"
         )
 
-        # 2. Traduire le diagnostic si une langue locale est demandée
+        recorded_case = None
         if target_lang:
-            print(f"[TRADUCTION] Traduction du diagnostic vers '{target_lang}'...")
-            photo_analysis = translate_analysis_to_local_lang(photo_analysis, target_lang)
+            recorded_case = _find_recorded_local_case_audio(
+                db,
+                category=data.category or "agriculture",
+                language=target_lang,
+                photo_analysis=photo_analysis,
+                french_answer=str(photo_analysis.get("analysis") or ""),
+            )
 
         return {
             "status": "success",
             "analysis": photo_analysis,
             "category": data.category,
             "model": photo_analysis.get("model", "gemini-2.5-flash"),
-            "translated": target_lang is not None,
+            "translated": False,
             "target_lang": target_lang,
             "lang_name": _LOCAL_LANG_NAMES.get(target_lang) if target_lang else None,
+            "local_audio_available": recorded_case is not None,
+            "audio_url": recorded_case.get("audio_url") if recorded_case else None,
+            "audio_mime_type": recorded_case.get("audio_mime_type") if recorded_case else None,
+            "local_knowledge_match": recorded_case,
         }
 
     except HTTPException:
@@ -5281,6 +6208,7 @@ async def create_mobile_question(
         photo_base64=data.photo_base64,
         photo_base64_list=data.photo_base64_list,
         conversation_context=data.conversation_context,
+        target_lang=data.target_lang,
     )
     return await incoming_sms(message_data, db)
 
@@ -5313,24 +6241,225 @@ async def get_mobile_question_detail(
 @app.post("/api/auth/login")
 async def login(data: ExpertLogin, db: Session = Depends(get_db)):
     expert = db.query(Expert).filter(Expert.email == data.email).first()
-    if not expert or not verify_password(data.password, expert.password_hash):
+    if not expert or not expert.is_active or not verify_password(data.password, expert.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    # Migration transparente des anciens SHA-256 vers bcrypt sans casser les comptes.
+    if not expert.password_hash.startswith("$2"):
+        expert.password_hash = hash_expert_password(data.password)
+        db.commit()
     return {
-        "token": f"token_{expert.id}_{datetime.utcnow().timestamp()}",
+        "token": create_expert_access_token(expert),
         "expert": {
             "id": expert.id,
             "name": expert.full_name,
             "email": expert.email,
-            "specialization": expert.specialization
+            "specialization": expert.specialization,
+            "role": getattr(expert, "role", "expert"),
+            "organization": expert.institution,
+            "organization_id": getattr(expert, "organization_id", None),
+            "zone": expert.zone,
+            "language": expert.language,
+            "project": expert.project,
         }
     }
+
+
+def _normalized_scope_value(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    aliases = {
+        "élevage": "elevage",
+        "agricole": "agriculture",
+        "cybersécurité": "cybersecurity",
+        "cybersecurite": "cybersecurity",
+        "cyber sécurité": "cybersecurity",
+        "santé": "sante",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _scope_ticket_query_for_expert(query: Any, expert: Expert) -> Any:
+    """Applique le cloisonnement metier au niveau SQL, jamais seulement dans l'UI."""
+    domain = _normalized_scope_value(expert.specialization)
+    if domain and domain not in {"all", "admin", "general", "général", "tous"}:
+        query = query.filter(func.lower(func.coalesce(Ticket.category, "")) == domain)
+
+    organization_id = getattr(expert, "organization_id", None)
+    organization = _normalized_scope_value(expert.institution)
+    if organization_id:
+        query = query.join(User, User.id == Ticket.user_id).filter(
+            User.organization_id == organization_id
+        )
+    elif organization:
+        query = query.join(User, User.id == Ticket.user_id).filter(
+            func.lower(func.coalesce(User.organization, "")) == organization
+        )
+    return query
+
+
+def _expert_ticket_or_404(db: Session, expert: Expert, ticket_id: int) -> Ticket:
+    ticket = _scope_ticket_query_for_expert(
+        db.query(Ticket).filter(Ticket.id == ticket_id), expert
+    ).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Dossier introuvable dans votre périmètre")
+    return ticket
+
+
+def _serialize_expert_ticket(db: Session, ticket: Ticket) -> Dict[str, Any]:
+    user = db.query(User).filter(User.id == ticket.user_id).first()
+    last_msg = db.query(Message).filter(Message.ticket_id == ticket.id).order_by(Message.sent_at.desc()).first()
+    photo_paths = _load_json_list(ticket.photo_paths_json)
+    return {
+        "id": ticket.id,
+        "category": ticket.category or "agriculture",
+        "urgency": ticket.urgency or "low",
+        "status": ticket.status or "open",
+        "preferred_language": _normalize_expert_local_language(ticket.preferred_language),
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "last_message": last_msg.content if last_msg else "Aucun message",
+        "ai_confidence": ticket.ai_confidence_score,
+        "photo_url": _build_upload_url(ticket.photo_path),
+        "photo_urls": [_build_upload_url(path) for path in photo_paths if path],
+        "user": {
+            "id": user.id if user else None,
+            "name": user.name if user else None,
+            "phone": user.phone_number if user else None,
+            "location": user.location if user else None,
+            "organization": getattr(user, "organization", None) if user else None,
+        },
+    }
+
+
+@app.get("/api/expert/dashboard")
+async def expert_dashboard(
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    scoped = _scope_ticket_query_for_expert(db.query(Ticket), current_expert)
+    tickets = scoped.all()
+    return {
+        "expert": {
+            "id": current_expert.id,
+            "name": current_expert.full_name,
+            "email": current_expert.email,
+            "specialization": current_expert.specialization,
+            "organization": current_expert.institution,
+            "organization_id": getattr(current_expert, "organization_id", None),
+            "role": getattr(current_expert, "role", "expert"),
+            "zone": current_expert.zone,
+            "language": current_expert.language,
+            "project": current_expert.project,
+        },
+        "stats": {
+            "total": len(tickets),
+            "open": sum(1 for item in tickets if item.status in {None, "open", "awaiting_expert"}),
+            "assigned": sum(1 for item in tickets if item.status == "assigned"),
+            "resolved": sum(1 for item in tickets if item.status == "resolved"),
+            "urgent": sum(1 for item in tickets if _normalized_scope_value(item.urgency) in {"high", "urgent", "critical"}),
+        },
+    }
+
+
+@app.get("/api/expert/tickets")
+async def expert_tickets(
+    status: Optional[str] = None,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    query = _scope_ticket_query_for_expert(db.query(Ticket), current_expert)
+    if status:
+        query = query.filter(Ticket.status == status)
+    tickets = query.order_by(Ticket.created_at.desc()).all()
+    return [_serialize_expert_ticket(db, ticket) for ticket in tickets]
+
+
+@app.get("/api/expert/users")
+async def expert_users(
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    scoped_ticket_ids = _scope_ticket_query_for_expert(db.query(Ticket.user_id), current_expert).subquery()
+    users = db.query(User).filter(User.id.in_(scoped_ticket_ids)).order_by(User.created_at.desc()).all()
+    return [
+        {
+            **serialize_user(user),
+            "ticket_count": _scope_ticket_query_for_expert(
+                db.query(Ticket).filter(Ticket.user_id == user.id), current_expert
+            ).count(),
+        }
+        for user in users
+    ]
+
+
+@app.get("/api/expert/tickets/{ticket_id}")
+async def expert_ticket_detail(
+    ticket_id: int,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    ticket = _expert_ticket_or_404(db, current_expert, ticket_id)
+    result = _serialize_expert_ticket(db, ticket)
+    messages = db.query(Message).filter(Message.ticket_id == ticket.id).order_by(Message.sent_at).all()
+    result["messages"] = [
+        {
+            "id": message.id,
+            "content": message.content,
+            "sender_type": message.sender_type,
+            "sent_at": message.sent_at.isoformat() if message.sent_at else None,
+            "audio_url": _build_upload_url(message.audio_url) if message.audio_url else None,
+            "language": message.language,
+        }
+        for message in messages
+    ]
+    result["photo_analysis"] = ticket.ai_photo_analysis
+    return result
+
+
+@app.post("/api/expert/tickets/{ticket_id}/reply")
+async def expert_reply(
+    ticket_id: int,
+    content: ReplyMessage,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    ticket = _expert_ticket_or_404(db, current_expert, ticket_id)
+    message_text = content.message.strip()
+    if not message_text:
+        raise HTTPException(status_code=422, detail="La réponse est vide")
+    reply_language = _normalize_expert_local_language(content.language or ticket.preferred_language)
+    db.add(Message(ticket_id=ticket.id, sender_type="expert", sender_id=current_expert.id, content=message_text, channel="mobile_expert", language=reply_language))
+    ticket.expert_id = current_expert.id
+    if ticket.status in {None, "open", "awaiting_expert"}:
+        ticket.status = "assigned"
+    db.commit()
+    return {"status": "success", "ticket_status": ticket.status}
+
+
+@app.put("/api/expert/tickets/{ticket_id}/status")
+async def expert_ticket_status(
+    ticket_id: int,
+    payload: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    ticket = _expert_ticket_or_404(db, current_expert, ticket_id)
+    requested_status = str(payload.get("status") or "").strip()
+    if requested_status not in {"open", "assigned", "awaiting_expert", "resolved"}:
+        raise HTTPException(status_code=422, detail="Statut invalide")
+    ticket.status = requested_status
+    ticket.expert_id = current_expert.id
+    ticket.resolved_at = datetime.utcnow() if requested_status == "resolved" else None
+    db.commit()
+    return {"status": "success", "new_status": ticket.status}
 
 @app.get("/api/tickets")
 async def get_tickets(
     status: Optional[str] = None,
+    current_expert: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db)
 ):
+    del current_expert
     query = db.query(Ticket)
     if status:
         query = query.filter(Ticket.status == status)
@@ -5355,6 +6484,7 @@ async def get_tickets(
             "category": ticket.category or "agriculture",
             "urgency": ticket.urgency or "low",
             "status": ticket.status or "open",
+            "preferred_language": _normalize_expert_local_language(ticket.preferred_language),
             "created_at": ticket.created_at,
             "last_message": last_msg.content if last_msg else "Aucun message",
             "ai_confidence": ticket.ai_confidence_score,
@@ -5368,7 +6498,11 @@ async def get_tickets(
     return result
 
 @app.get("/api/stats")
-async def get_stats(db: Session = Depends(get_db)):
+async def get_stats(
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
     total_tickets = db.query(Ticket).count()
     open_tickets = db.query(Ticket).filter(Ticket.status == "open").count()
     assigned_tickets = db.query(Ticket).filter(Ticket.status == "assigned").count()
@@ -5393,7 +6527,12 @@ async def get_stats(db: Session = Depends(get_db)):
     }
 
 @app.get("/api/tickets/{ticket_id}")
-async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
+async def get_ticket_detail(
+    ticket_id: int,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -5433,6 +6572,7 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
             "category": ticket.category or "agriculture",
             "urgency": ticket.urgency or "low",
             "status": ticket.status or "open",
+            "preferred_language": _normalize_expert_local_language(ticket.preferred_language),
             "keywords": keywords,
             "confidence": ticket.ai_confidence_score or 0.5,
             "photo_url": photo_url,
@@ -5454,6 +6594,7 @@ async def get_ticket_detail(ticket_id: int, db: Session = Depends(get_db)):
             "sender_type": msg.sender_type,
             "sent_at": msg.sent_at,
             "audio_url": _build_upload_url(msg.audio_url) if msg.audio_url else None
+            , "language": msg.language
         } for msg in messages]
     }
 
@@ -5534,6 +6675,7 @@ Appelez les secours pendant que vous effectuez ces gestes
             ai_photo_analysis=None,
             photo_path=None,
             status="emergency",
+            preferred_language=_normalize_expert_local_language(data.target_lang),
             internal_notes=json.dumps({
                 "emergency_type": emergency_info["emergency_type"],
                 "severity": emergency_info["severity"],
@@ -5672,7 +6814,8 @@ Appelez les secours pendant que vous effectuez ces gestes
         ai_photo_analysis=photo_analysis,
         photo_path=photo_path,
         photo_paths_json=json.dumps(photo_paths, ensure_ascii=False) if photo_paths else None,
-        status="open"
+        status="open",
+        preferred_language=_normalize_expert_local_language(data.target_lang),
     )
     db.add(ticket)
     db.commit()
@@ -5739,6 +6882,100 @@ Appelez les secours pendant que vous effectuez ces gestes
     return response
 
 
+def _find_recorded_local_case_audio(
+    db: Session,
+    *,
+    category: str,
+    language: str,
+    photo_analysis: Optional[Dict[str, Any]],
+    french_answer: str,
+) -> Optional[Dict[str, Any]]:
+    """Trouve une fiche française validée possédant un vrai audio humain local."""
+    if language not in _TRANSLATOR_VALID_LANGS:
+        return None
+    if photo_analysis and photo_analysis.get("problem_status") != "identified":
+        return None
+
+    normalized_category = _normalize_expert_local_category(category)
+    candidates = (
+        db.query(ExpertLocalKnowledgeDB)
+        .filter(
+            ExpertLocalKnowledgeDB.category == normalized_category,
+            ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"]),
+        )
+        .order_by(ExpertLocalKnowledgeDB.updated_at.desc())
+        .limit(500)
+        .all()
+    )
+
+    analysis = photo_analysis or {}
+    diagnostic_parts: List[str] = [
+        str(analysis.get("problem_label") or ""),
+        str(analysis.get("disease_detected") or ""),
+        str(analysis.get("diagnosis") or ""),
+        str(analysis.get("situation_type") or ""),
+        str(analysis.get("threat_type") or ""),
+        str(analysis.get("analysis") or ""),
+        french_answer or "",
+    ]
+    for key in ("all_symptoms", "visible_symptoms", "symptoms", "red_flags"):
+        value = analysis.get(key)
+        if isinstance(value, list):
+            diagnostic_parts.extend(str(item) for item in value)
+
+    diagnostic_text = " ".join(part for part in diagnostic_parts if part).strip()
+    diagnostic_tokens = set(_tokenize(diagnostic_text))
+    if not diagnostic_tokens:
+        return None
+
+    best: Optional[Tuple[float, ExpertLocalKnowledgeDB, Dict[str, Any]]] = None
+    for item in candidates:
+        audio_map = _load_json_dict(item.audio_json)
+        audio = audio_map.get(language)
+        if not isinstance(audio, dict) or not str(audio.get("url") or "").strip():
+            continue
+
+        tags = [str(tag) for tag in _load_json_list(item.tags_json)]
+        title_tokens = set(_tokenize(item.title or ""))
+        question_tokens = set(_tokenize(item.question_fr or ""))
+        resolution_tokens = set(_tokenize(item.resolution_fr or ""))
+        tag_tokens = set(_tokenize(" ".join(tags)))
+        score = (
+            4.0 * len(diagnostic_tokens & tag_tokens)
+            + 3.0 * len(diagnostic_tokens & title_tokens)
+            + 1.5 * len(diagnostic_tokens & question_tokens)
+            + 0.5 * len(diagnostic_tokens & resolution_tokens)
+        )
+        normalized_title = _normalize_search_text(item.title or "")
+        normalized_problem = _normalize_search_text(str(analysis.get("problem_label") or ""))
+        if normalized_title and normalized_problem and (
+            normalized_title in normalized_problem or normalized_problem in normalized_title
+        ):
+            score += 12.0
+
+        if best is None or score > best[0]:
+            best = (score, item, audio)
+
+    if best is None or best[0] < 4.0:
+        return None
+
+    score, item, audio = best
+    translations = _load_json_dict(item.translations_json)
+    local_text = translations.get(language) if isinstance(translations.get(language), dict) else {}
+    return {
+        "knowledge_id": item.id,
+        "title": item.title,
+        "question_fr": item.question_fr,
+        "resolution_fr": item.resolution_fr,
+        "match_score": round(score, 2),
+        "language": language,
+        "audio_url": str(audio.get("url") or "").strip(),
+        "audio_mime_type": str(audio.get("mime_type") or "audio/webm"),
+        "local_text": str((local_text or {}).get("text") or "").strip() or None,
+        "source": "recorded_expert_local_knowledge",
+    }
+
+
 @app.post("/api/assistant/query")
 async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     """Endpoint conversation IA seule (RAG + GPT) sans création de ticket.
@@ -5747,23 +6984,35 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     Aucun Ticket/Message n'est créé ici, uniquement une réponse IA.
     """
     # ── TRADUCTION DE LA REQUETE DE LANGUE LOCALE VERS LE FRANCAIS ──────────────
+    original_query = (data.content or "").strip()
+    search_query_fr = original_query
+    reconstructed_query_local = original_query
+    query_interpretation_confidence = 1.0
     target_lang = (data.target_lang or "").strip().lower() or None
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
         try:
             from burkina_translator import translate_query_to_french
-            translated_text = translate_query_to_french(data.content, target_lang, GEMINI_API_KEY)
-            print(f"[TRANSLATOR] Traduction requête locale assistant legacy ({target_lang} -> fr): '{data.content}' -> '{translated_text}'")
-            data.content = translated_text
+            interpretation = translate_query_to_french(
+                original_query, target_lang, GEMINI_API_KEY, return_details=True
+            )
+            if isinstance(interpretation, dict):
+                search_query_fr = interpretation.get("french_query") or original_query
+                reconstructed_query_local = interpretation.get("reconstructed_local") or original_query
+                query_interpretation_confidence = float(interpretation.get("confidence") or 0.0)
+            else:
+                search_query_fr = str(interpretation or original_query)
+            print(f"[TRANSLATOR] Interprétation requête locale ({target_lang} -> fr): '{original_query}' -> '{search_query_fr}'")
         except Exception as e_trans:
             print(f"[TRANSLATOR] Erreur traduction requête locale assistant legacy: {e_trans}")
 
     # 1. Analyse IA texte
-    ai_result = ai_engine.classify(data.content)
+    ai_result = ai_engine.classify(search_query_fr)
 
 
     # 2. Déterminer la catégorie finale et le domaine RAG
     nlp_category = ai_result.get("category", "agriculture")
-    chosen_category = data.category or nlp_category
+    allowed_categories = {"agriculture", "elevage", "sos_accident", "cybersecurity"}
+    chosen_category = data.category if data.category in allowed_categories else nlp_category
     ai_result["classifier_category"] = nlp_category
     ai_result["category"] = chosen_category
 
@@ -5784,7 +7033,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     if photo_payloads:
         try:
             photo_data_list = [_decode_photo_payload(payload) for payload in photo_payloads]
-            photo_analysis_result = cv_engine.analyze_images(photo_data_list, data.content, data.category)
+            photo_analysis_result = cv_engine.analyze_images(photo_data_list, search_query_fr, chosen_category)
             photo_analysis = photo_analysis_result
 
             if photo_analysis_result.get("urgency") == "high":
@@ -5806,7 +7055,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         turn["content"]
         for turn in conversation_context[-4:]
     ]
-    contextual_query_parts.append(data.content)
+    contextual_query_parts.append(search_query_fr)
     contextual_query = "\n".join(part for part in contextual_query_parts if part)
 
     # 5. RAG strict d'abord, puis base élargie seulement si besoin
@@ -5816,6 +7065,8 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         photo_analysis,
     )
 
+    # Les recherches utilisateur consultent le Studio, pas l'historique des tickets.
+    reusable_entry = None
     knowledge_result = resolve_knowledge_answer(
         db=db,
         domain=kb_domain,
@@ -5823,9 +7074,14 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         language="fr",
         conversation_context=conversation_context,
         focus_context=focus_context,
+        photo_analysis=photo_analysis,
     )
     rag_items = knowledge_result["rag_items"]
-    llm_answer = knowledge_result["llm_answer"]
+    llm_answer = _clean_assistant_text(knowledge_result["llm_answer"])
+    if knowledge_result.get("rag_fallback_answer"):
+        knowledge_result["rag_fallback_answer"] = _clean_assistant_text(
+            knowledge_result["rag_fallback_answer"]
+        )
 
     image_result = None
     video_result = None
@@ -5835,7 +7091,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
             media_category = _normalize_category(chosen_category)
             media_images = _collect_images_b64(data.photo_base64, data.photo_base64_list)
             media_seed_parts = [
-                data.content,
+                search_query_fr,
                 llm_answer,
                 knowledge_result.get("rag_fallback_answer"),
                 photo_analysis.get("analysis") if isinstance(photo_analysis, dict) else None,
@@ -5845,7 +7101,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
             media_seed_text = "\n".join(part.strip() for part in media_seed_parts if isinstance(part, str) and part.strip())
 
             media_analysis = await v2_services.gemini_analyze(
-                text=media_seed_text or data.content or "Diagnostic Songra",
+                text=media_seed_text or search_query_fr or "Diagnostic Songra",
                 images_b64=media_images,
                 category=media_category,
             )
@@ -5891,6 +7147,10 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         "category": chosen_category,
         "knowledge_mode": knowledge_result["knowledge_mode"],
         "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
+        "original_query": original_query,
+        "normalized_query_fr": search_query_fr,
+        "reconstructed_query_local": reconstructed_query_local,
+        "query_interpretation_confidence": query_interpretation_confidence,
     }
 
     if photo_analysis is not None:
@@ -5903,6 +7163,23 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         response["llm_answer"] = llm_answer
     elif knowledge_result["rag_fallback_answer"]:
         response["rag_fallback_answer"] = knowledge_result["rag_fallback_answer"]
+
+    if isinstance(photo_analysis, dict):
+        photo_status = photo_analysis.get("problem_status")
+        validation_message = _clean_assistant_text(
+            photo_analysis.get("validation_message")
+        )
+        if photo_status in {"wrong_category", "unusable", "not_identified", "uncertain"}:
+            # Ne pas laisser le RAG inventer un problème quand la vision ne l'a
+            # pas confirmé ou lorsque la photo ne correspond pas à la catégorie.
+            response["llm_answer"] = validation_message
+            response.pop("rag_fallback_answer", None)
+        elif photo_status == "identified" and validation_message:
+            current_answer = _clean_assistant_text(
+                response.get("llm_answer") or response.get("rag_fallback_answer")
+            )
+            if current_answer and validation_message not in current_answer:
+                response["llm_answer"] = f"{validation_message}\n\n{current_answer}"
 
     if image_result and image_result.get("success"):
         response["image_base64"] = image_result.get("image_base64")
@@ -5919,47 +7196,82 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         response["video_description"] = video_result.get("video_description")
         response["video_steps"] = video_result.get("steps_visuelles")
 
-    # ── TRADUCTION DE LA REPONSE VERS LA LANGUE LOCALE ───────────────────────
-    # Sans ca, la reponse construite plus haut reste toujours en francais meme
-    # quand l'utilisateur a choisi une langue locale (Moore, Dioula, ...) : le
-    # client vocal ne fait qu'une traduction cote app fragile et silencieuse en
-    # cas d'echec. On traduit ici directement les champs texte principaux, en
-    # remplacant leur valeur francaise par la traduction (le francais original
-    # reste disponible dans conversation_context / ai_analysis).
+    # Conserver la version française canonique dans le cache. Elle sera
+    # retraduite selon la langue choisie lors de chaque future consultation.
+    cache_answer_fr = _clean_assistant_text(
+        response.get("llm_answer") or response.get("rag_fallback_answer")
+    )
+
+    # ── AUDIO HUMAIN DE LA BASE LOCALE ───────────────────────────────────────
+    # Le diagnostic et la recherche restent en français. Pour une langue locale,
+    # on ne traduit plus par LLM et on ne génère plus de TTS: on cherche une
+    # fiche validée correspondant au cas et possédant un enregistrement humain.
     if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
-        # Traduction du texte affiche ET resume vocal + phonetique en UNE SEULE
-        # requete LLM (translate_fields_and_voice_summary), pour eviter de
-        # doubler les appels Gemini/OpenAI et tomber plus vite sur un quota
-        # (429 Too Many Requests) qui faisait echouer la traduction en silence.
         try:
-            fields_to_translate: Dict[str, str] = {}
-            if response.get("llm_answer"):
-                fields_to_translate["llm_answer"] = response["llm_answer"]
-            if response.get("rag_fallback_answer"):
-                fields_to_translate["rag_fallback_answer"] = response["rag_fallback_answer"]
-
-            if fields_to_translate:
-                voice_source_field = "llm_answer" if response.get("llm_answer") else "rag_fallback_answer"
-                combined = translate_fields_and_voice_summary(
-                    fields_to_translate, target_lang, GEMINI_API_KEY, chosen_category,
-                    voice_source_field=voice_source_field,
+            studio_case = knowledge_result.get("studio_match")
+            recorded_case = None
+            if studio_case:
+                audio_entry = (studio_case.get("audio") or {}).get(target_lang) or {}
+                translation_entry = (studio_case.get("translations") or {}).get(target_lang) or {}
+                if str(audio_entry.get("url") or "").strip():
+                    recorded_case = {
+                        **studio_case,
+                        "audio_url": audio_entry.get("url"),
+                        "audio_mime_type": audio_entry.get("mime_type") or "audio/webm",
+                        "local_text": translation_entry.get("text"),
+                    }
+                response["local_knowledge_match"] = studio_case
+                response["local_text"] = translation_entry.get("text")
+                response["french_text"] = studio_case.get("resolution_fr")
+            else:
+                recorded_case = _find_recorded_local_case_audio(
+                    db,
+                    category=chosen_category,
+                    language=target_lang,
+                    photo_analysis=photo_analysis,
+                    french_answer=cache_answer_fr,
                 )
-                for field_name, result in combined.get("translations", {}).items():
-                    translated_value = (result or {}).get("translation")
-                    if translated_value:
-                        response[field_name] = translated_value
-
-                voice_payload = _synthesize_voice_audio(combined.get("voice_summary"), target_lang)
-                if voice_payload:
-                    response["voice_summary"] = voice_payload.get("voice_summary")
-                    response["audio_url"] = voice_payload.get("audio_url")
-                    response["audio_mime_type"] = voice_payload.get("audio_mime_type")
-
-            response["translated"] = bool(fields_to_translate)
+            response["translated"] = False
             response["target_lang"] = target_lang
             response["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
-        except Exception as e_resp_trans:
-            print(f"[TRANSLATOR] Erreur traduction reponse assistant legacy: {e_resp_trans}")
+            response["local_audio_available"] = recorded_case is not None
+            response["local_audio_source"] = (
+                "recorded_expert_local_knowledge" if recorded_case else None
+            )
+            if recorded_case:
+                response["audio_url"] = recorded_case["audio_url"]
+                response["audio_mime_type"] = recorded_case["audio_mime_type"]
+                response["voice_summary"] = recorded_case.get("local_text")
+                response["local_knowledge_match"] = recorded_case
+            else:
+                response["local_audio_message"] = (
+                    "La voix dédiée à cette fiche est indisponible dans cette langue."
+                )
+                response["french_fallback_available"] = True
+        except Exception as local_audio_exc:
+            response["local_audio_available"] = False
+            response["local_audio_message"] = "Recherche d'audio local indisponible."
+            print(f"[LOCAL-AUDIO] Recherche impossible: {local_audio_exc}")
+
+    # Mémoriser la réponse finale pour une future question strictement
+    # identique. Une réponse déjà réutilisée n'est pas enregistrée à nouveau.
+    if reusable_entry is None:
+        if cache_answer_fr:
+            try:
+                _persist_offline_knowledge_entry(
+                    db=db,
+                    user_id=None,
+                    source_kind="assistant_query",
+                    category=chosen_category,
+                    question_text=contextual_query,
+                    response_payload={
+                        "message": cache_answer_fr,
+                        "category": chosen_category,
+                        "target_lang": target_lang,
+                    },
+                )
+            except Exception as cache_exc:
+                print(f"[ASSISTANT] Mise en cache réponse impossible: {cache_exc}")
 
     return response
 
@@ -5967,6 +7279,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
 async def reply_to_ticket(
     ticket_id: int, 
     content: ReplyMessage,
+    current_expert: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db)
 ):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -5976,14 +7289,15 @@ async def reply_to_ticket(
     message = Message(
         ticket_id=ticket_id,
         sender_type="expert",
-        sender_id=1,
+        sender_id=current_expert.id,
         content=content.message,
-        channel="web"
+        channel="web",
+        language=_normalize_expert_local_language(content.language or ticket.preferred_language),
     )
     db.add(message)
     
     if not ticket.expert_id:
-        ticket.expert_id = 1
+        ticket.expert_id = current_expert.id
         ticket.status = "assigned"
     
     db.commit()
@@ -5994,6 +7308,7 @@ async def reply_to_ticket(
 async def reply_to_ticket_with_audio(
     ticket_id: int,
     audio_file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """Permet à l'expert de répondre par message vocal à un ticket."""
@@ -6026,7 +7341,8 @@ async def reply_to_ticket_with_audio(
         sender_id=1,
         content="🔊 Réponse vocale de l'expert",
         channel="web",
-        audio_url=audio_relative_path
+        audio_url=audio_relative_path,
+        language=_normalize_expert_local_language(language or ticket.preferred_language),
     )
     db.add(message)
     
@@ -6534,7 +7850,8 @@ async def get_audio_map():
 async def upload_audio_file(
     key: str,
     language: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_admin_expert),
 ):
     """Uploader un fichier audio pour une clé et une langue spécifique."""
     # Dossier spécifique par langue (ex: uploads/audio/moore)
@@ -6583,7 +7900,10 @@ async def upload_audio_file(
     return {"status": "success", "url": audio_map[key]["voices"][language], "key": key, "language": language}
 
 @app.delete("/api/admin/audio-map/{key}/{language}")
-async def delete_audio_mapping(key: str, language: str):
+async def delete_audio_mapping(
+    key: str, language: str,
+    current_expert: Expert = Depends(get_current_admin_expert),
+):
     """Supprimer une association audio."""
     if not os.path.exists(EXPERT_AUDIO_MAP_PATH):
         return {"status": "skipped"}
@@ -6602,7 +7922,7 @@ async def delete_audio_mapping(key: str, language: str):
 
 
 @app.get("/api/admin/settings")
-async def get_system_settings():
+async def get_system_settings(current_identity: Any = Depends(get_current_user_or_expert)):
     """Récupère les réglages système (Voice ID, etc)."""
     settings_path = os.path.join(BACKEND_DIR, "system_settings.json")
     default_settings = {
@@ -6622,7 +7942,10 @@ async def get_system_settings():
         return default_settings
 
 @app.post("/api/admin/settings")
-async def update_system_settings(payload: Dict[str, Any]):
+async def update_system_settings(
+    payload: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_admin_expert),
+):
     """Met à jour les réglages système."""
     settings_path = os.path.join(BACKEND_DIR, "system_settings.json")
     existing = {}
@@ -6648,14 +7971,38 @@ async def create_broadcast(
     region: str = Form("Toutes"),
     description: str = Form(""),
     offline_allowed: bool = Form(True),
+    current_expert: Expert = Depends(get_current_expert),
 ):
     """Crée une nouvelle diffusion communautaire (Journal Vocal)."""
+    language_aliases = {
+        "fr": "fr", "francais": "fr", "français": "fr",
+        "moore": "moore", "mooré": "moore",
+        "dioula": "dioula",
+        "fulfulde": "fulfulde", "fulfuldé": "fulfulde",
+    }
+    normalized_language = language_aliases.get(language.strip().lower())
+    if not normalized_language:
+        raise HTTPException(status_code=400, detail="Langue non supportee pour la radio.")
+    safe_original_name = os.path.basename(file.filename or "message.mp3")
+    extension = os.path.splitext(safe_original_name)[1].lower()
+    if extension not in {".mp3", ".m4a", ".wav", ".ogg", ".aac"}:
+        raise HTTPException(status_code=400, detail="Format audio non supporte.")
     os.makedirs("uploads/broadcasts", exist_ok=True)
-    filename = f"broadcast_{int(time.time())}_{file.filename}"
+    filename = f"broadcast_{int(time.time())}_{safe_original_name}"
     filepath = f"uploads/broadcasts/{filename}"
-    
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+
+    total_size = 0
+    try:
+        with open(filepath, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > 25 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="Le fichier audio depasse 25 Mo.")
+                buffer.write(chunk)
+    except Exception:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise
     
     # Enregistrer dans broadcasts.json
     db_path = os.path.join(BACKEND_DIR, "broadcasts.json")
@@ -6670,13 +8017,17 @@ async def create_broadcast(
         "id": int(time.time()),
         "title": title,
         "category": category,
-        "language": language,
+        "language": normalized_language,
         "region": region,
         "description": description,
         "offline_allowed": offline_allowed,
         "audio_url": f"/uploads/broadcasts/{filename}",
         "timestamp": datetime.now().isoformat(),
         "listeners": 0
+        ,"created_by_expert_id": current_expert.id
+        ,"created_by_expert": current_expert.full_name
+        ,"organization_id": getattr(current_expert, "organization_id", None)
+        ,"organization": current_expert.institution
     }
     broadcasts.insert(0, new_entry)
     
@@ -6698,7 +8049,10 @@ async def get_broadcasts():
         return []
 # 
 @app.post("/api/admin/upload")
-async def upload_general_file(file: UploadFile = File(...)):
+async def upload_general_file(
+    file: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_admin_expert),
+):
     """Upload un fichier générique (image, audio, etc) vers le dossier uploads."""
     os.makedirs("uploads", exist_ok=True)
     
@@ -6725,6 +8079,7 @@ async def upload_general_file(file: UploadFile = File(...)):
 @app.get("/api/admin/knowledge")
 async def list_knowledge_items(
     domain: Optional[str] = None,
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
     """Lister les fiches de la base de connaissances.
@@ -6790,6 +8145,7 @@ async def public_emergency_numbers(db: Session = Depends(get_db)):
 
 @app.post("/api/admin/reload-knowledge")
 async def reload_knowledge_endpoint(
+    current_expert: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db),
 ):
     """Recharger la base de connaissances depuis le fichier JSON.
@@ -6809,6 +8165,7 @@ async def reload_knowledge_endpoint(
 @app.post("/api/admin/knowledge")
 async def create_knowledge_item(
     payload: KnowledgeItemIn,
+    current_expert: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db),
 ):
     """Créer une nouvelle fiche de connaissance (usage panneau expert)."""
@@ -7107,9 +8464,13 @@ async def list_expert_local_knowledge(
     category: Optional[str] = None,
     language: Optional[str] = None,
     limit: int = Query(default=200, le=10000),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
     query = db.query(ExpertLocalKnowledgeDB)
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    if not is_admin:
+        query = query.filter(ExpertLocalKnowledgeDB.expert_id == current_expert.id)
     if category:
         query = query.filter(
             ExpertLocalKnowledgeDB.category == _normalize_expert_local_category(category)
@@ -7130,11 +8491,328 @@ async def list_expert_local_knowledge(
     return {"status": "success", "items": serialized}
 
 
+@app.post("/api/expert/local-knowledge/import")
+async def import_expert_local_knowledge(
+    file: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    """Importe des fiches et leurs vrais audios depuis JSON ou ZIP.
+
+    Un ZIP doit contenir `manifest.json` et les fichiers audio référencés par
+    `audio: {"moore": "audio/cas-moore.mp3", ...}` dans chaque fiche.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Fichier d'import vide")
+    if len(raw) > 60 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Import limité à 60 Mo")
+
+    archive: Optional[zipfile.ZipFile] = None
+    try:
+        if (file.filename or "").lower().endswith(".zip"):
+            archive = zipfile.ZipFile(BytesIO(raw))
+            manifest_name = next(
+                (name for name in archive.namelist() if name.replace("\\", "/").lower().endswith("manifest.json")),
+                None,
+            )
+            if not manifest_name:
+                raise HTTPException(status_code=400, detail="manifest.json absent du ZIP")
+            manifest = json.loads(archive.read(manifest_name).decode("utf-8"))
+        else:
+            manifest = json.loads(raw.decode("utf-8-sig"))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Import JSON/ZIP invalide: {exc}") from exc
+
+    items = manifest.get("items") if isinstance(manifest, dict) else manifest
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=422, detail="Le manifeste doit contenir une liste `items`")
+    if len(items) > 500:
+        raise HTTPException(status_code=422, detail="Maximum 500 fiches par import")
+
+    created = 0
+    updated = 0
+    audio_count = 0
+    errors: List[Dict[str, Any]] = []
+    for index, payload in enumerate(items, start=1):
+        if not isinstance(payload, dict):
+            errors.append({"index": index, "error": "Fiche non JSON"})
+            continue
+        title = str(payload.get("title") or "").strip()
+        question_fr = str(payload.get("question_fr") or payload.get("question") or "").strip()
+        resolution_fr = str(payload.get("resolution_fr") or payload.get("answer") or "").strip()
+        if not title:
+            title = question_fr[:120]
+        if not title or not question_fr or not resolution_fr:
+            errors.append({"index": index, "title": title, "error": "title, question_fr et resolution_fr requis"})
+            continue
+
+        category = _infer_expert_local_category(
+            payload.get("category"), title, question_fr, resolution_fr, payload.get("tags") or []
+        )
+        item = db.query(ExpertLocalKnowledgeDB).filter(
+            ExpertLocalKnowledgeDB.title == title,
+            ExpertLocalKnowledgeDB.category == category,
+        ).first()
+        if item is None:
+            item = ExpertLocalKnowledgeDB(title=title, category=category, question_fr=question_fr, resolution_fr=resolution_fr)
+            db.add(item)
+            db.flush()
+            created += 1
+        else:
+            updated += 1
+
+        item.question_fr = question_fr
+        item.resolution_fr = resolution_fr
+        item.tags_json = json.dumps(payload.get("tags") or [], ensure_ascii=False)
+        item.status = _normalize_expert_local_status(payload.get("status"))
+        item.origin = str(payload.get("origin") or "bulk_import")
+        item.expert_id = item.expert_id or current_expert.id
+        item.translations_json = json.dumps(
+            _normalize_expert_local_translations(payload.get("translations")), ensure_ascii=False
+        )
+
+        next_audio = _normalize_expert_local_audio(payload.get("audio"))
+        audio_refs = payload.get("audio") or payload.get("audios") or {}
+        if archive and isinstance(audio_refs, dict):
+            archive_names = {name.replace("\\", "/"): name for name in archive.namelist()}
+            for language, audio_ref in audio_refs.items():
+                normalized_language = _normalize_expert_local_language(language)
+                ref_name = audio_ref.get("file") if isinstance(audio_ref, dict) else audio_ref
+                ref_name = str(ref_name or "").replace("\\", "/").lstrip("/")
+                member = archive_names.get(ref_name)
+                if not member or member.endswith("/"):
+                    continue
+                audio_bytes = archive.read(member)
+                if not audio_bytes or len(audio_bytes) > 20 * 1024 * 1024:
+                    continue
+                extension = os.path.splitext(ref_name)[1].lower()
+                if extension not in {".mp3", ".wav", ".m4a", ".ogg", ".webm", ".aac"}:
+                    extension = ".mp3"
+                filename = f"expert-local-{item.id}-{normalized_language}{extension}"
+                relative_path = os.path.join(EXPERT_AUDIO_UPLOAD_DIR, filename).replace("\\", "/")
+                with open(os.path.abspath(relative_path), "wb") as handle:
+                    handle.write(audio_bytes)
+                next_audio[normalized_language] = {
+                    "url": _build_upload_url(relative_path),
+                    "mime_type": mimetypes.guess_type(filename)[0] or "audio/mpeg",
+                    "uploaded_at": datetime.utcnow().isoformat(),
+                }
+                audio_count += 1
+        item.audio_json = json.dumps(next_audio, ensure_ascii=False)
+
+    db.commit()
+    return {
+        "status": "success",
+        "created": created,
+        "updated": updated,
+        "audio_imported": audio_count,
+        "errors": errors,
+        "total_received": len(items),
+    }
+
+
+def _read_knowledge_source_document(filename: str, content: bytes) -> Tuple[str, List[Dict[str, Any]]]:
+    extension = os.path.splitext(filename or "")[1].lower()
+    rows: List[Dict[str, Any]] = []
+    if extension == ".txt":
+        return content.decode("utf-8-sig", errors="replace")[:120000], rows
+    if extension == ".csv":
+        decoded = content.decode("utf-8-sig", errors="replace")
+        sample = decoded[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+            dialect.delimiter = ";"
+        rows = [dict(row) for row in csv.DictReader(decoded.splitlines(), dialect=dialect)][:500]
+    elif extension == ".json":
+        try:
+            parsed = json.loads(content.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Fichier JSON invalide : {exc}") from exc
+        raw_items = parsed.get("items") if isinstance(parsed, dict) else parsed
+        if not isinstance(raw_items, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Le JSON doit être une liste de fiches ou un objet contenant une clé 'items'.",
+            )
+        rows = [dict(item) for item in raw_items[:500] if isinstance(item, dict)]
+    elif extension in {".xlsx", ".xlsm"}:
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise HTTPException(status_code=503, detail="Le support Excel requiert openpyxl") from exc
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        for sheet in workbook.worksheets:
+            values = sheet.iter_rows(values_only=True)
+            headers = [str(value or "").strip() for value in next(values, [])]
+            for values_row in values:
+                row = {headers[index]: value for index, value in enumerate(values_row) if index < len(headers) and headers[index]}
+                if any(value not in {None, ""} for value in row.values()):
+                    row["_feuille"] = sheet.title
+                    rows.append(row)
+                if len(rows) >= 500:
+                    break
+            if len(rows) >= 500:
+                break
+    else:
+        raise HTTPException(status_code=400, detail="Formats acceptés : TXT, CSV, JSON, XLSX")
+    document = "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in rows)
+    return document[:120000], rows
+
+
+def _structured_knowledge_fallback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def raw_value(row: Dict[str, Any], aliases: List[str]) -> Any:
+        normalized = {_normalize_search_text(str(key)): val for key, val in row.items()}
+        for alias in aliases:
+            for key, raw in normalized.items():
+                if alias in key and raw is not None and raw != "":
+                    return raw
+        return None
+
+    def value(row: Dict[str, Any], aliases: List[str]) -> str:
+        raw = raw_value(row, aliases)
+        return str(raw).strip() if raw is not None else ""
+    items = []
+    for row in rows:
+        title = value(row, ["maladie", "probleme", "titre", "title", "diagnostic", "nom"])
+        question = value(row, ["symptome", "question", "description", "observation"])
+        solution = value(row, ["solution", "traitement", "recommandation", "resolution", "conseil"])
+        if not title or not solution:
+            continue
+        tags_raw = raw_value(row, ["tags", "mots cles", "mot cle", "culture", "espece"])
+        if isinstance(tags_raw, list):
+            tags = [str(part).strip() for part in tags_raw if str(part).strip()][:15]
+        else:
+            tags = [
+                part.strip()
+                for part in re.split(r"[,;|]", str(tags_raw or ""))
+                if part.strip()
+            ][:15]
+        category = _infer_expert_local_category(
+            value(row, ["categorie", "category", "domaine", "type"]),
+            title, question, solution, tags,
+        )
+        items.append({
+            "title": title, "category": category, "question_fr": question or title,
+            "resolution_fr": solution,
+            "tags": tags,
+        })
+    return items[:200]
+
+
+@app.post("/api/expert/local-knowledge/ai-bulk-import")
+async def ai_bulk_import_expert_local_knowledge(
+    file: UploadFile = File(...),
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """Transforme un document TXT, CSV, JSON ou Excel en fiches françaises."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Document vide")
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Document limité à 15 Mo")
+    document, structured_rows = _read_knowledge_source_document(file.filename or "document", raw)
+    if not document.strip():
+        raise HTTPException(status_code=422, detail="Aucune information exploitable dans le document")
+
+    prompt = f"""Tu es l'agent documentaliste de Songra au Burkina Faso.
+Transforme le document fourni en fiches de connaissances terrain distinctes. N'invente aucune maladie ni aucun dosage absent du document.
+Pour chaque fiche, produis : title (nom court), category (agriculture, elevage, urgence ou cybersecurity), question_fr (symptômes/problème observable), resolution_fr (solution complète et prudente), tags (5 à 12 mots utiles normalisés).
+Fusionne les doublons. Conserve les précautions et les conditions de consultation d'un agent agricole, vétérinaire ou soignant.
+Retourne uniquement un JSON strict : {{"items":[{{"title":"...","category":"agriculture","question_fr":"...","resolution_fr":"...","tags":["..."]}}]}}.
+Maximum 200 fiches.
+
+DOCUMENT :
+{document}"""
+    extension = os.path.splitext(file.filename or "")[1].lower()
+    parsed_items: List[Dict[str, Any]] = (
+        _structured_knowledge_fallback(structured_rows) if extension == ".json" else []
+    )
+    provider_used = "json_structured" if parsed_items else "structured_fallback"
+    provider_errors: List[str] = []
+    providers = []
+    if groq_client:
+        providers.append(("groq", groq_client, os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")))
+    if openai_client:
+        providers.append(("openai", openai_client, os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")))
+    for provider_name, client, model_name in ([] if parsed_items else providers):
+        try:
+            response = client.chat.completions.create(
+                model=model_name, messages=[{"role": "user", "content": prompt}],
+                temperature=0.1, max_tokens=6000,
+            )
+            parsed = _parse_json_object_from_text(response.choices[0].message.content or "")
+            if isinstance(parsed.get("items"), list):
+                parsed_items, provider_used = parsed["items"][:200], provider_name
+                break
+        except Exception as exc:
+            provider_errors.append(f"{provider_name}: {exc}")
+    if not parsed_items:
+        parsed_items = _structured_knowledge_fallback(structured_rows)
+    if not parsed_items:
+        raise HTTPException(status_code=502, detail="L'agent IA n'a pas pu structurer ce document. " + " | ".join(provider_errors))
+
+    created = updated = rejected = 0
+    imported_items = []
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    for payload in parsed_items:
+        title = str(payload.get("title") or "").strip()[:180]
+        question = str(payload.get("question_fr") or "").strip()
+        solution = str(payload.get("resolution_fr") or "").strip()
+        if not title or not question or not solution:
+            rejected += 1
+            continue
+        category = _infer_expert_local_category(
+            payload.get("category"), title, question, solution, payload.get("tags") or []
+        )
+        item_query = db.query(ExpertLocalKnowledgeDB).filter(
+            ExpertLocalKnowledgeDB.title == title,
+            ExpertLocalKnowledgeDB.expert_id == current_expert.id,
+        )
+        # Pour un JSON structuré, le titre identifie la fiche même si une
+        # ancienne version l'avait rangée dans une mauvaise catégorie.
+        if extension != ".json":
+            item_query = item_query.filter(ExpertLocalKnowledgeDB.category == category)
+        item = item_query.first()
+        if item:
+            updated += 1
+        else:
+            item = ExpertLocalKnowledgeDB(title=title, category=category, expert_id=current_expert.id)
+            db.add(item)
+            created += 1
+        item.category = category
+        item.question_fr, item.resolution_fr = question, solution
+        item.tags_json = json.dumps([str(tag).strip() for tag in (payload.get("tags") or []) if str(tag).strip()][:15], ensure_ascii=False)
+        item.status = "validated" if is_admin else "pending_review"
+        item.origin = f"ai_bulk_import:{provider_used}"
+        item.translations_json = item.translations_json or "{}"
+        item.audio_json = item.audio_json or "{}"
+        imported_items.append(item)
+    db.commit()
+    return {
+        "status": "success", "provider": provider_used, "created": created,
+        "updated": updated, "rejected": rejected, "total_detected": len(parsed_items),
+        "message": "Fiches françaises créées. Ajoutez maintenant les voix locales dans le Studio.",
+    }
+
+
 @app.get("/api/expert/local-knowledge/{item_id}")
-async def get_expert_local_knowledge_item(item_id: int, db: Session = Depends(get_db)):
+async def get_expert_local_knowledge_item(
+    item_id: int,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
     item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    if not is_admin and item.expert_id != current_expert.id:
+        raise HTTPException(status_code=403, detail="Cette fiche appartient à un autre expert")
     return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
 
 
@@ -7144,15 +8822,16 @@ async def create_expert_local_knowledge_item(
     current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
     item = ExpertLocalKnowledgeDB(
         title=payload.title.strip() or payload.question_fr[:120],
         category=_normalize_expert_local_category(payload.category),
         question_fr=payload.question_fr.strip(),
         resolution_fr=payload.resolution_fr.strip(),
         tags_json=json.dumps(payload.tags or [], ensure_ascii=False),
-        status=_normalize_expert_local_status(payload.status),
+        status=_normalize_expert_local_status(payload.status) if is_admin else "pending_review",
         origin=str(payload.origin or "expert_manual"),
+        expert_id=current_expert.id,
         translations_json=json.dumps(
             _normalize_expert_local_translations(payload.translations),
             ensure_ascii=False,
@@ -7175,17 +8854,20 @@ async def update_expert_local_knowledge_item(
     current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
     item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    if not is_admin and item.expert_id != current_expert.id:
+        raise HTTPException(status_code=403, detail="Cette fiche appartient à un autre expert")
 
     item.title = payload.title.strip() or payload.question_fr[:120]
     item.category = _normalize_expert_local_category(payload.category)
     item.question_fr = payload.question_fr.strip()
     item.resolution_fr = payload.resolution_fr.strip()
     item.tags_json = json.dumps(payload.tags or [], ensure_ascii=False)
-    item.status = _normalize_expert_local_status(payload.status)
+    item.status = _normalize_expert_local_status(payload.status) if is_admin else "pending_review"
+    item.expert_id = item.expert_id or current_expert.id
     item.origin = str(payload.origin or item.origin or "expert_manual")
     item.translations_json = json.dumps(
         {
@@ -7213,10 +8895,12 @@ async def translate_expert_local_knowledge_item(
     current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
     item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    if not is_admin and item.expert_id != current_expert.id:
+        raise HTTPException(status_code=403, detail="Cette fiche appartient à un autre expert")
     translations = _generate_local_translations(
         item.question_fr,
         item.resolution_fr,
@@ -7240,10 +8924,12 @@ async def upload_expert_local_knowledge_audio(
     current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
     item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    if not is_admin and item.expert_id != current_expert.id:
+        raise HTTPException(status_code=403, detail="Cette fiche appartient à un autre expert")
 
     normalized_language = _normalize_expert_local_language(language)
     extension = os.path.splitext(audio.filename or "")[1] or ".webm"
@@ -7264,6 +8950,55 @@ async def upload_expert_local_knowledge_audio(
     db.commit()
     db.refresh(item)
     return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.post("/api/expert/local-knowledge/{item_id}/review")
+async def review_expert_local_knowledge_item(
+    item_id: int,
+    payload: ExpertLocalKnowledgeReviewIn,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    item = db.query(ExpertLocalKnowledgeDB).filter(ExpertLocalKnowledgeDB.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Fiche locale introuvable")
+    status = str(payload.status or "").strip().lower()
+    if status not in {"validated", "pending_review", "rejected", "archived"}:
+        raise HTTPException(status_code=422, detail="Statut de validation invalide")
+    item.status = status
+    item.reviewer_id = current_expert.id
+    item.review_notes = str(payload.review_notes or "").strip() or None
+    item.reviewed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _serialize_expert_local_knowledge_item(item)}
+
+
+@app.get("/api/expert/local-knowledge-dashboard")
+async def get_expert_local_knowledge_dashboard(
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    query = db.query(ExpertLocalKnowledgeDB)
+    if not is_admin:
+        query = query.filter(ExpertLocalKnowledgeDB.expert_id == current_expert.id)
+    items = query.all()
+    languages = ("moore", "dioula", "fulfulde")
+    return {
+        "total": len(items),
+        "pending": sum(1 for item in items if item.status == "pending_review"),
+        "validated": sum(1 for item in items if item.status in {"validated", "expert_verified", "resolved"}),
+        "rejected": sum(1 for item in items if item.status == "rejected"),
+        "complete_audio": sum(
+            1 for item in items
+            if all(_load_json_dict(item.audio_json).get(language, {}).get("url") for language in languages)
+        ),
+        "by_category": {
+            category: sum(1 for item in items if item.category == category)
+            for category in ("agriculture", "elevage", "urgence")
+        },
+    }
 
 
 @app.get("/api/audio-map")
@@ -7328,12 +9063,14 @@ async def upload_audio_map_entry(
 
 @app.post("/api/create-test-expert")
 async def create_test_expert(db: Session = Depends(get_db)):
+    if os.getenv("ENABLE_TEST_EXPERT", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Route indisponible")
     existing = db.query(Expert).filter(Expert.email == "test@resolvehub.bf").first()
     if existing:
         return {
             "message": "Expert déjà existant", 
             "email": "test@resolvehub.bf", 
-            "password": "test123"
+            "status": "already_exists"
         }
     
     expert = Expert(
@@ -7349,7 +9086,7 @@ async def create_test_expert(db: Session = Depends(get_db)):
     return {
         "message": "Expert créé avec succès", 
         "email": "test@resolvehub.bf", 
-        "password": "test123"
+        "status": "created"
     }
 
 # ==========================================
@@ -7377,6 +9114,8 @@ class SOSAlertDB(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     status = Column(String, default="pending")  # pending, acknowledged, resolved
     notified_authorities = Column(Boolean, default=False)
+    assigned_expert_id = Column(Integer, nullable=True, index=True)
+    passed_expert_ids_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class ChatMessageDB(Base):
@@ -7480,6 +9219,19 @@ class CommunityCaseFollowUpDB(Base):
 Base.metadata.create_all(bind=engine)
 # 
 # 
+def _ensure_sos_assignment_columns() -> None:
+    try:
+        with engine.connect() as conn:
+            _add_column_if_missing(conn, "sos_alerts", "assigned_expert_id", "INTEGER", "INTEGER")
+            _add_column_if_missing(conn, "sos_alerts", "passed_expert_ids_json", "TEXT", "TEXT")
+            conn.commit()
+    except Exception as exc:
+        print(f"[WARN] Migration affectation SOS impossible: {exc}")
+
+
+_ensure_sos_assignment_columns()
+
+
 def _ensure_community_case_media_columns() -> None:
     try:
         with engine.connect() as conn:
@@ -7654,6 +9406,7 @@ async def create_sos_alert(alert: SOSAlert, db: Session = Depends(get_db)):
 async def update_sos_alert_status(
     alert_id: int,
     body: Dict[str, Any],
+    current_identity: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db)
 ):
     """
@@ -7674,6 +9427,7 @@ async def update_sos_alert_status(
 async def get_sos_alerts(
     status: Optional[str] = None,
     limit: int = Query(default=50, le=200),
+    current_identity: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db)
 ):
     """
@@ -7706,6 +9460,134 @@ async def get_sos_alerts(
         ],
         "total": len(alerts)
     }
+
+
+def _expert_has_passed(raw_ids: Optional[str], expert_id: int) -> bool:
+    return expert_id in [int(value) for value in _load_json_list(raw_ids) if str(value).isdigit()]
+
+
+def _append_passed_expert(raw_ids: Optional[str], expert_id: int) -> str:
+    ids = [int(value) for value in _load_json_list(raw_ids) if str(value).isdigit()]
+    if expert_id not in ids:
+        ids.append(expert_id)
+    return json.dumps(ids)
+
+
+@app.get("/api/expert/nearby-work")
+async def get_expert_nearby_work(
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """File terrain triée par zone : SOS et tickets libres/affectés à l'expert."""
+    expert_zone = _normalize_search_text(current_expert.zone or current_expert.project or "").strip()
+    specialization = _normalized_scope_value(current_expert.specialization)
+    work: List[Dict[str, Any]] = []
+
+    def distance_km(target_lat: Optional[float], target_lng: Optional[float]) -> Optional[float]:
+        if latitude is None or longitude is None or target_lat is None or target_lng is None:
+            return None
+        radius = 6371.0
+        lat1, lat2 = math.radians(latitude), math.radians(target_lat)
+        delta_lat = math.radians(target_lat - latitude)
+        delta_lng = math.radians(target_lng - longitude)
+        value = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lng / 2) ** 2
+        return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+    alerts = db.query(SOSAlertDB).filter(
+        SOSAlertDB.status != "resolved",
+        or_(SOSAlertDB.assigned_expert_id.is_(None), SOSAlertDB.assigned_expert_id == current_expert.id),
+    ).order_by(SOSAlertDB.created_at.desc()).limit(100).all()
+    for alert in alerts:
+        if _expert_has_passed(alert.passed_expert_ids_json, current_expert.id):
+            continue
+        location = str(alert.location_note or "").strip()
+        zone_match = bool(expert_zone and expert_zone in _normalize_search_text(location))
+        distance = distance_km(alert.latitude, alert.longitude)
+        work.append({
+            "work_type": "sos", "id": alert.id,
+            "title": f"Alerte {alert.alert_type}", "description": alert.description,
+            "category": "urgence", "urgency": "critical", "location": location or "Position GPS disponible",
+            "latitude": alert.latitude, "longitude": alert.longitude, "status": alert.status,
+            "assigned_to_me": alert.assigned_expert_id == current_expert.id,
+            "distance_km": round(distance, 1) if distance is not None else None,
+            "proximity_score": max(1, 1000 - distance) if distance is not None else (100 if zone_match else (60 if alert.latitude is not None else 20)),
+            "created_at": alert.created_at.isoformat() if alert.created_at else None,
+        })
+
+    ticket_query = db.query(Ticket, User).join(User, User.id == Ticket.user_id).filter(
+        Ticket.status != "resolved",
+        or_(Ticket.expert_id.is_(None), Ticket.expert_id == current_expert.id),
+    )
+    if specialization and specialization not in {"all", "admin", "general", "tous"}:
+        ticket_query = ticket_query.filter(func.lower(func.coalesce(Ticket.category, "")) == specialization)
+    for ticket, user in ticket_query.order_by(Ticket.created_at.desc()).limit(100).all():
+        if _expert_has_passed(ticket.passed_expert_ids_json, current_expert.id):
+            continue
+        location = str(user.location or "").strip()
+        zone_match = bool(expert_zone and expert_zone in _normalize_search_text(location))
+        work.append({
+            "work_type": "ticket", "id": ticket.id,
+            "title": f"Ticket {ticket.category or 'terrain'} #{ticket.id}",
+            "description": (db.query(Message).filter(Message.ticket_id == ticket.id).order_by(Message.sent_at.asc()).first() or Message(content="Aucune description", ticket_id=ticket.id, sender_type="user", channel="app")).content,
+            "category": ticket.category, "urgency": ticket.urgency, "location": location or "Localisation non précisée",
+            "latitude": None, "longitude": None, "status": ticket.status,
+            "assigned_to_me": ticket.expert_id == current_expert.id,
+            "proximity_score": 100 if zone_match else 10,
+            "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        })
+    work.sort(key=lambda item: (item["assigned_to_me"], item["proximity_score"], item["urgency"] in {"critical", "high"}, item["created_at"] or ""), reverse=True)
+    return {"items": work[:100], "total": len(work), "expert_zone": current_expert.zone}
+
+
+@app.post("/api/expert/nearby-work/{work_type}/{work_id}/action")
+async def act_on_expert_nearby_work(
+    work_type: str,
+    work_id: int,
+    body: Dict[str, Any],
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    action = str(body.get("action") or "").strip().lower()
+    if action not in {"claim", "pass", "resolve"}:
+        raise HTTPException(status_code=422, detail="Action invalide")
+    if work_type == "sos":
+        item = db.query(SOSAlertDB).filter(SOSAlertDB.id == work_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Alerte introuvable")
+        if action == "claim":
+            if item.assigned_expert_id not in {None, current_expert.id}:
+                raise HTTPException(status_code=409, detail="Alerte déjà prise par un autre expert")
+            item.assigned_expert_id, item.status = current_expert.id, "acknowledged"
+        elif action == "pass":
+            if item.assigned_expert_id == current_expert.id:
+                item.assigned_expert_id, item.status = None, "pending"
+            item.passed_expert_ids_json = _append_passed_expert(item.passed_expert_ids_json, current_expert.id)
+        else:
+            if item.assigned_expert_id != current_expert.id:
+                raise HTTPException(status_code=403, detail="Prenez d'abord cette alerte en charge")
+            item.status = "resolved"
+    elif work_type == "ticket":
+        item = db.query(Ticket).filter(Ticket.id == work_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Ticket introuvable")
+        if action == "claim":
+            if item.expert_id not in {None, current_expert.id}:
+                raise HTTPException(status_code=409, detail="Ticket déjà pris par un autre expert")
+            item.expert_id, item.status = current_expert.id, "assigned"
+        elif action == "pass":
+            if item.expert_id == current_expert.id:
+                item.expert_id, item.status = None, "open"
+            item.passed_expert_ids_json = _append_passed_expert(item.passed_expert_ids_json, current_expert.id)
+        else:
+            if item.expert_id != current_expert.id:
+                raise HTTPException(status_code=403, detail="Prenez d'abord ce ticket en charge")
+            item.status, item.resolved_at = "resolved", datetime.utcnow()
+    else:
+        raise HTTPException(status_code=422, detail="Type de travail invalide")
+    db.commit()
+    return {"status": "success", "action": action, "work_type": work_type, "id": work_id}
 
 
 # ==========================================
@@ -9103,7 +10985,7 @@ class V2AnalyzeRequest(BaseModel):
     photo_base64: Optional[str] = None
     photo_base64_list: Optional[List[str]] = None
     generate_media: Optional[bool] = True
-    target_lang: Optional[str] = None  # Langue locale : "moore", "dioula", "fulfulde", "gourounsi", "bissa"
+    target_lang: Optional[str] = None  # Langue locale : "moore", "dioula", "fulfulde"
 
 class V2EntreprendreRequest(BaseModel):
     text: Optional[str] = ""
@@ -9132,6 +11014,8 @@ def _normalize_category(cat: Optional[str]) -> str:
         return "elevage"
     if cat in ("urgence", "sos_accident", "sos", "health"):
         return "urgence"
+    if "cyber" in cat or cat in ("securite_numerique", "sécurité numérique"):
+        return "cybersecurity"
     return "agriculture"
 
 def _collect_images_b64(photo_base64: Optional[str], photo_base64_list: Optional[List[str]]) -> List[str]:
@@ -9282,6 +11166,17 @@ async def v2_analyze(
         image_result=image_result,
         video_result=video_result,
     )
+    target_lang = (data.target_lang or "").strip().lower() or None
+    studio_match = _find_studio_knowledge_match(
+        db,
+        category=category,
+        query_text=text,
+        photo_analysis=analysis,
+    )
+    if studio_match:
+        final_response = _apply_studio_match_to_v2_response(
+            final_response, studio_match, target_lang
+        )
 
     offline_payload = {
         **final_response,
@@ -9303,9 +11198,8 @@ async def v2_analyze(
     duration = int((_time.time() - start_time) * 1000)
 
     # ── TRADUCTION LOCALE (silencieuse, mode tâche invisible) ──────────────
-    target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
         try:
             final_response, voice_payload = _translate_v2_response_with_voice(
                 final_response, target_lang, category
@@ -9317,11 +11211,16 @@ async def v2_analyze(
         "status": "success",
         **final_response,
         "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
+        "audio_url": voice_payload.get("audio_url") if voice_payload else final_response.get("audio_url"),
+        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else final_response.get("audio_mime_type"),
         "_meta": {
             "duration_ms": duration,
-            "model": "gemini-2.5-flash",
+            "provider": v2_services.AI_PROVIDER,
+            "model": (
+                v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq"
+                else v2_services.OPENAI_MODEL if v2_services.AI_PROVIDER == "openai"
+                else v2_services.GEMINI_MODEL
+            ),
             "from_cache": analysis.get("from_cache", False),
             "fallback_used": analysis.get("from_fallback", False),
             "translated": target_lang is not None and target_lang in _TRANSLATOR_VALID_LANGS,
@@ -9360,6 +11259,16 @@ async def v2_scanner_analyze(
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
     decision = v2_services.decide(analysis)
     final_response = v2_services.build_response(analysis=analysis, decision=decision)
+    studio_match = _find_studio_knowledge_match(
+        db,
+        category=category,
+        query_text=text,
+        photo_analysis=analysis,
+    )
+    if studio_match:
+        final_response = _apply_studio_match_to_v2_response(
+            final_response, studio_match, target_lang
+        )
 
     offline_payload = {
         **final_response,
@@ -9381,7 +11290,7 @@ async def v2_scanner_analyze(
     # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
     target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
         try:
             final_response, voice_payload = _translate_v2_response_with_voice(
                 final_response, target_lang, category
@@ -9396,8 +11305,8 @@ async def v2_scanner_analyze(
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
+        "audio_url": voice_payload.get("audio_url") if voice_payload else final_response.get("audio_url"),
+        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else final_response.get("audio_mime_type"),
     }
 
 
@@ -9429,6 +11338,16 @@ async def v2_assistant_query(
     analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
     decision = v2_services.decide(analysis)
     final_response = v2_services.build_response(analysis=analysis, decision=decision)
+    studio_match = _find_studio_knowledge_match(
+        db,
+        category=category,
+        query_text=text,
+        photo_analysis=analysis,
+    )
+    if studio_match:
+        final_response = _apply_studio_match_to_v2_response(
+            final_response, studio_match, target_lang
+        )
 
     offline_payload = {
         **final_response,
@@ -9450,7 +11369,7 @@ async def v2_assistant_query(
     # ── TRADUCTION LOCALE (silencieuse) ──────────────────────────────────────
     target_lang = (data.target_lang or "").strip().lower() or None
     voice_payload = None
-    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS:
+    if target_lang and target_lang in _TRANSLATOR_VALID_LANGS and not studio_match:
         try:
             final_response, voice_payload = _translate_v2_response_with_voice(
                 final_response, target_lang, category
@@ -9465,8 +11384,8 @@ async def v2_assistant_query(
         "target_lang": target_lang,
         "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
         "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else None,
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else None,
+        "audio_url": voice_payload.get("audio_url") if voice_payload else final_response.get("audio_url"),
+        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else final_response.get("audio_mime_type"),
     }
 
 
@@ -10015,6 +11934,30 @@ async def translate_text_endpoint(payload: TranslateRequest):
             "speech_text": payload.text
         }
 
+
+@app.get("/api/admin/dictionaries")
+async def get_dictionary_stats(current_user: Any = Depends(get_current_user_or_expert)):
+    return {"languages": dictionary_stats(), "supported": ["fr", "moore", "dioula", "fulfulde"]}
+
+
+@app.post("/api/admin/dictionaries/import")
+async def import_agricultural_dictionary(
+    language: str = Form(...),
+    replace: bool = Form(False),
+    file: UploadFile = File(...),
+    current_user: Any = Depends(get_current_user_or_expert),
+):
+    try:
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Le fichier depasse 10 Mo.")
+        result = import_dictionary_file(content, file.filename or "dictionary.csv", language, replace)
+        return {"status": "success", **result}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 # @app.post("/api/entreprendre/sync")
 # async def sync_entreprendre(payload: EntreprendreSyncPayload, current_user: User = Depends(get_current_user_or_expert), db: Session = Depends(get_db)):
 #     for r in payload.records:
@@ -10187,8 +12130,87 @@ class LocalTranslateIn(BaseModel):
 #     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
 # ── CAREMA PORTAL ADMIN ENDPOINTS ──────────────────────────────────────
 
+def _serialize_organization(organization: Organization, db: Session) -> Dict[str, Any]:
+    return {
+        "id": organization.id,
+        "name": organization.name,
+        "code": organization.code,
+        "description": organization.description,
+        "region": organization.region,
+        "phone_number": organization.phone_number,
+        "email": organization.email,
+        "is_active": organization.is_active,
+        "experts_count": db.query(Expert).filter(Expert.organization_id == organization.id).count(),
+        "users_count": db.query(User).filter(User.organization_id == organization.id).count(),
+        "created_at": organization.created_at.isoformat() if organization.created_at else None,
+    }
+
+
+@app.get("/api/admin/organizations")
+async def get_admin_organizations(
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    organizations = db.query(Organization).order_by(Organization.name).all()
+    return [_serialize_organization(item, db) for item in organizations]
+
+
+@app.post("/api/admin/organizations")
+async def create_admin_organization(
+    payload: Dict[str, Any],
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Le nom de l'ONG est obligatoire")
+    existing = db.query(Organization).filter(func.lower(Organization.name) == name.lower()).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Cette ONG existe déjà")
+    organization = Organization(
+        name=name,
+        code=(str(payload.get("code") or "").strip() or None),
+        description=(str(payload.get("description") or "").strip() or None),
+        region=(str(payload.get("region") or "").strip() or None),
+        phone_number=(str(payload.get("phone_number") or "").strip() or None),
+        email=(str(payload.get("email") or "").strip() or None),
+        is_active=True,
+    )
+    db.add(organization)
+    try:
+        db.commit()
+        db.refresh(organization)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Code ou nom d'ONG déjà utilisé") from exc
+    return _serialize_organization(organization, db)
+
+
+@app.put("/api/admin/organizations/{organization_id}")
+async def update_admin_organization(
+    organization_id: int,
+    payload: Dict[str, Any],
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    organization = db.query(Organization).filter(Organization.id == organization_id).first()
+    if not organization:
+        raise HTTPException(status_code=404, detail="ONG introuvable")
+    for field in ("name", "code", "description", "region", "phone_number", "email"):
+        if field in payload:
+            value = str(payload.get(field) or "").strip()
+            setattr(organization, field, value or None)
+    if "is_active" in payload:
+        organization.is_active = bool(payload["is_active"])
+    db.commit()
+    db.refresh(organization)
+    return _serialize_organization(organization, db)
+
 @app.get("/api/admin/users")
-async def get_admin_users(db: Session = Depends(get_db)):
+async def get_admin_users(
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
     """Lister les utilisateurs pour CAREMA avec leur historique"""
     users = db.query(User).all()
     result = []
@@ -10199,6 +12221,8 @@ async def get_admin_users(db: Session = Depends(get_db)):
             "phone_number": u.phone_number,
             "name": u.name,
             "location": u.location,
+            "organization": getattr(u, "organization", None),
+            "organization_id": getattr(u, "organization_id", None),
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "is_active": getattr(u, "is_active", True),
             "role": getattr(u, "role", "utilisateur"),
@@ -10206,8 +12230,48 @@ async def get_admin_users(db: Session = Depends(get_db)):
         })
     return result
 
+
+@app.post("/api/admin/users")
+async def create_admin_user(
+    payload: Dict[str, Any],
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    phone_number = str(payload.get("phone_number") or "").strip()
+    password = str(payload.get("password") or "").strip()
+    _validate_user_credentials(phone_number, password)
+    if db.query(User).filter(User.phone_number == phone_number).first():
+        raise HTTPException(status_code=409, detail="Ce numéro est déjà enregistré")
+    organization = None
+    organization_id = payload.get("organization_id")
+    if organization_id not in (None, ""):
+        organization = db.query(Organization).filter(
+            Organization.id == int(organization_id), Organization.is_active == True
+        ).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="ONG introuvable")
+    user = User(
+        phone_number=phone_number,
+        password_hash=hash_password(password),
+        name=(str(payload.get("name") or "").strip() or None),
+        location=(str(payload.get("location") or "").strip() or None),
+        role="utilisateur",
+        is_active=True,
+        organization_id=organization.id if organization else None,
+        organization=organization.name if organization else None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"status": "success", "user": serialize_user(user)}
+
 @app.put("/api/admin/users/{user_id}/status")
-async def update_user_status(user_id: int, payload: dict, db: Session = Depends(get_db)):
+async def update_user_status(
+    user_id: int,
+    payload: dict,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
     """Activer/désactiver ou changer le rôle d'un utilisateur"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -10216,15 +12280,30 @@ async def update_user_status(user_id: int, payload: dict, db: Session = Depends(
         user.is_active = payload["is_active"]
     if "role" in payload:
         user.role = payload["role"]
+    if "organization" in payload:
+        user.organization = (payload.get("organization") or "").strip() or None
+    if "organization_id" in payload:
+        organization_id = payload.get("organization_id")
+        organization = None
+        if organization_id not in (None, ""):
+            organization = db.query(Organization).filter(Organization.id == int(organization_id), Organization.is_active == True).first()
+            if not organization:
+                raise HTTPException(status_code=404, detail="ONG introuvable")
+        user.organization_id = organization.id if organization else None
+        user.organization = organization.name if organization else None
     db.commit()
     return {"status": "success", "user": {
         "id": user.id,
         "is_active": getattr(user, "is_active", True),
         "role": getattr(user, "role", "utilisateur")
+        ,"organization": getattr(user, "organization", None)
     }}
 
 @app.get("/api/admin/experts")
-async def get_admin_experts(db: Session = Depends(get_db)):
+async def get_admin_experts(
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
     """Lister le réseau d'experts"""
     experts = db.query(Expert).all()
     result = []
@@ -10239,15 +12318,34 @@ async def get_admin_experts(db: Session = Depends(get_db)):
             "project": getattr(e, "project", ""),
             "language": getattr(e, "language", ""),
             "institution": getattr(e, "institution", "")
+            ,"organization_id": getattr(e, "organization_id", None)
+            ,"role": getattr(e, "role", "expert")
         })
     return result
 
 @app.post("/api/admin/experts")
-async def create_admin_expert(payload: dict, db: Session = Depends(get_db)):
+async def create_admin_expert(
+    payload: dict,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
     """Créer ou modifier un expert dans le réseau"""
     email = payload.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
+
+    organization = None
+    organization_id = payload.get("organization_id")
+    if organization_id not in (None, ""):
+        organization = db.query(Organization).filter(
+            Organization.id == int(organization_id),
+            Organization.is_active == True,
+        ).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="ONG introuvable")
+    requested_role = str(payload.get("role") or "expert").strip().lower()
+    if requested_role not in {"expert", "admin"}:
+        raise HTTPException(status_code=422, detail="Rôle expert invalide")
         
     expert = db.query(Expert).filter(Expert.email == email).first()
     if not expert:
@@ -10258,22 +12356,29 @@ async def create_admin_expert(payload: dict, db: Session = Depends(get_db)):
             password_hash=password_hash,
             full_name=payload.get("full_name", ""),
             specialization=payload.get("specialization", ""),
+            role=requested_role,
             is_active=payload.get("is_active", True),
             zone=payload.get("zone", ""),
             project=payload.get("project", ""),
             language=payload.get("language", ""),
-            institution=payload.get("institution", "")
+            institution=organization.name if organization else payload.get("institution", ""),
+            organization_id=organization.id if organization else None,
         )
         db.add(expert)
     else:
         # Update existing
         expert.full_name = payload.get("full_name", expert.full_name)
         expert.specialization = payload.get("specialization", expert.specialization)
+        expert.role = requested_role
         expert.is_active = payload.get("is_active", expert.is_active)
         expert.zone = payload.get("zone", expert.zone)
         expert.project = payload.get("project", expert.project)
         expert.language = payload.get("language", expert.language)
-        expert.institution = payload.get("institution", expert.institution)
+        if "organization_id" in payload:
+            expert.organization_id = organization.id if organization else None
+            expert.institution = organization.name if organization else None
+        else:
+            expert.institution = payload.get("institution", expert.institution)
         
     db.commit()
     return {"status": "success", "expert_id": expert.id}
@@ -10282,10 +12387,16 @@ async def create_admin_expert(payload: dict, db: Session = Depends(get_db)):
 async def reply_ticket_voice(
     ticket_id: int,
     file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db)
 ):
     """Associer une réponse audio locale (traduction) à un ticket"""
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    is_admin = (getattr(current_expert, "role", "expert") or "expert").lower() == "admin"
+    ticket = (
+        db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if is_admin else _expert_ticket_or_404(db, current_expert, ticket_id)
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
         
@@ -10300,10 +12411,11 @@ async def reply_ticket_voice(
     new_msg = Message(
         ticket_id=ticket_id,
         sender_type="expert",
-        sender_id=ticket.expert_id or 1,
+        sender_id=current_expert.id,
         content="[Message Vocal Traduit en Langue Locale]",
         channel="web",
-        audio_url=f"/uploads/replies/{filename}"
+        audio_url=f"/uploads/replies/{filename}",
+        language=_normalize_expert_local_language(language or ticket.preferred_language),
     )
     db.add(new_msg)
     
@@ -10320,6 +12432,7 @@ class TicketStatusUpdate(BaseModel):
 async def update_ticket_status(
     ticket_id: int,
     payload: TicketStatusUpdate,
+    current_expert: Expert = Depends(get_current_admin_expert),
     db: Session = Depends(get_db)
 ):
     """Mettre à jour le statut d'un ticket (Workflow CAREMA)"""
@@ -10332,6 +12445,31 @@ async def update_ticket_status(
         ticket.resolved_at = datetime.utcnow()
     db.commit()
     return {"status": "success", "new_status": ticket.status}
+
+
+@app.post("/api/auth/expert/logout")
+async def logout_expert(
+    authorization: Optional[str] = Header(default=None),
+    current_expert: Expert = Depends(get_current_expert),
+):
+    token = _extract_bearer_token(authorization)
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    from voice_alert import revoke_expert_token
+    revoke_expert_token(
+        SessionLocal, current_expert.id, str(payload["jti"]),
+        datetime.utcfromtimestamp(int(payload["exp"])),
+    )
+    return {"success": True}
+
+
+# Domaine agricole distinct des SOS. Le fournisseur inclus est exclusivement mock.
+from voice_alert import AlertBase, create_router as create_voice_alert_router
+
+AlertBase.metadata.create_all(bind=engine)
+app.include_router(create_voice_alert_router(
+    get_db=get_db, get_user=get_current_user, get_expert=get_current_expert,
+    get_admin=get_current_admin_expert, session_factory=SessionLocal,
+))
 
 
 if __name__ == "__main__":

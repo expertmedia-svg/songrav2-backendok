@@ -17,6 +17,11 @@ numpy==1.26.2
 setuptools==70.0.0
 python-dotenv==1.0.0
 PyJWT==2.10.1
+bcrypt==4.2.1
+alembic==1.14.1
+psycopg[binary]==3.2.4
+geoalchemy2==0.17.1
+pytest==8.3.4
 
 # 5. LLM / GENERATIVE AI
 # Google Gemini for ALL AI (PRIMARY - replaces OpenAI)
@@ -25,9 +30,11 @@ google-genai==1.69.0
 
 # OpenAI (optional fallback - not required)
 openai==1.59.7
+openpyxl==3.1.5
 
 # HTTP client for auxiliary HTTP calls
 httpx==0.28.1
+requests==2.32.3
 
 # 6. OPTIONAL/FUTURE
 # tensorflow==2.15.0

@@ -19,14 +19,15 @@ import os
 import json
 import re
 import csv
+import unicodedata
+from difflib import SequenceMatcher
+from io import BytesIO, StringIO
 from typing import Any, Dict, List, Optional
 
 LANG_NAMES: Dict[str, str] = {
     "moore":     "Moore",
     "dioula":    "Dioula",
     "fulfulde":  "Fulfulde",
-    "gourounsi": "Gourounsi",
-    "bissa":     "Bissa",
 }
 
 VALID_LANGS = set(LANG_NAMES.keys())
@@ -38,8 +39,6 @@ _DICT_FILES: Dict[str, str] = {
     "moore":     "dictionnaire_moore_1000.csv",
     "dioula":    "dictionnaire_dioula_1000.csv",
     "fulfulde":  "dictionnaire_fulfulde_1000.csv",
-    "gourounsi": "dictionnaire_gourounsi_500.csv",
-    "bissa":     "dictionnaire_bissa_500.csv",
 }
 
 _FR_SYNONYMS: Dict[str, List[str]] = {
@@ -72,6 +71,25 @@ _FR_SYNONYMS: Dict[str, List[str]] = {
 _SHORT_TEXT_MAX_WORDS = 4
 
 _dictionaries: Dict[str, Dict[str, Any]] = {}
+
+# Corrections vérifiées de transcriptions produites par le moteur vocal
+# francophone d'Android. Ces formes ne sont pas du français saisi par
+# l'utilisateur : ce sont des sons mooré que le STT force vers des mots
+# français proches. Elles doivent être corrigées avant toute recherche RAG.
+_STT_VERIFIED_ALIASES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "moore": {
+        "mon cours": {
+            "reconstructed_local": "mam koo-da",
+            "french_query": "je cultive",
+            "confidence": 0.95,
+        },
+        "mon cour": {
+            "reconstructed_local": "mam koo-da",
+            "french_query": "je cultive",
+            "confidence": 0.95,
+        },
+    },
+}
 
 
 def _load_dict_from_path(path: str) -> Dict[str, Any]:
@@ -109,6 +127,70 @@ def _init_dictionaries() -> None:
 
 
 _init_dictionaries()
+
+
+def dictionary_stats() -> Dict[str, int]:
+    """Nombre d'entrees actives pour les trois langues locales supportees."""
+    return {lang: len(_dictionaries.get(lang, {})) for lang in sorted(VALID_LANGS)}
+
+
+def import_dictionary_file(content: bytes, filename: str, language: str, replace: bool = False) -> Dict[str, Any]:
+    """Importe un lexique français -> langue locale depuis TXT, CSV ou XLSX.
+
+    Les deux premières colonnes sont utilisées. Une ligne d'en-tête courante
+    (francais, traduction) est ignorée. L'écriture est atomique et le nouveau
+    dictionnaire est immédiatement disponible, sans redémarrer le serveur.
+    """
+    language = (language or "").strip().lower()
+    if language not in VALID_LANGS:
+        raise ValueError("Langue invalide. Utilisez moore, dioula ou fulfulde.")
+    extension = os.path.splitext(filename or "")[1].lower()
+    rows: List[List[Any]] = []
+    if extension == ".xlsx":
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise ValueError("Le support Excel requiert openpyxl.") from exc
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        sheet = workbook.active
+        rows = [[cell for cell in row[:2]] for row in sheet.iter_rows(values_only=True)]
+        workbook.close()
+    elif extension in {".csv", ".txt"}:
+        decoded = content.decode("utf-8-sig")
+        sample = decoded[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            rows = list(csv.reader(StringIO(decoded), dialect))
+        except csv.Error:
+            rows = list(csv.reader(StringIO(decoded), delimiter=";" if ";" in sample else ","))
+    else:
+        raise ValueError("Format non supporte. Utilisez .txt, .csv ou .xlsx.")
+
+    imported: Dict[str, Any] = {}
+    header_words = {"fr", "francais", "français", "french", "mot", "terme"}
+    for row in rows:
+        if len(row) < 2:
+            continue
+        french = str(row[0] or "").strip().lower()
+        translation = str(row[1] or "").strip()
+        if not french or not translation or french in header_words:
+            continue
+        imported[french] = {"translation": translation}
+    if not imported:
+        raise ValueError("Aucune paire francais/traduction valide trouvee.")
+
+    merged = {} if replace else dict(_dictionaries.get(language, {}))
+    merged.update(imported)
+    os.makedirs(_TRANSLATE_DIR, exist_ok=True)
+    target = os.path.join(_TRANSLATE_DIR, _DICT_FILES[language])
+    temp_target = target + ".tmp"
+    with open(temp_target, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        for french, entry in sorted(merged.items()):
+            writer.writerow([french, entry.get("translation", "")])
+    os.replace(temp_target, target)
+    _dictionaries[language] = merged
+    return {"language": language, "imported": len(imported), "total": len(merged), "replaced": replace}
 
 
 def _dict_lookup(word: str, lang: str) -> Optional[str]:
@@ -239,8 +321,51 @@ def _call_openai_translation(prompt: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _call_groq_translation(prompt: str, json_mode: bool = True) -> Optional[Any]:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        kwargs = {
+            "model": os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b"),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 2000 if json_mode else 500,
+            "extra_body": {"reasoning_effort": "none", "reasoning_format": "hidden"},
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as first_error:
+            if not json_mode or "json" not in str(first_error).lower():
+                raise
+            kwargs.pop("response_format", None)
+            kwargs["messages"][0]["content"] += (
+                "\n\nRetourne uniquement un objet JSON valide, sans markdown ni commentaire."
+            )
+            response = client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content if response.choices else ""
+        if not json_mode:
+            return content.strip() if content else None
+        cleaned = re.sub(r"```(?:json)?\s*|```", "", content or "").strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start >= 0 and end > start:
+            cleaned = cleaned[start:end + 1]
+        return json.loads(cleaned) if cleaned else None
+    except Exception as e:
+        print(f"[TRANSLATOR] Groq echec: {e}")
+        return None
+
+
 def _call_openai_plain_text(prompt: str) -> Optional[str]:
     """Repli OpenAI pour un prompt attendant une reponse texte brut (pas de JSON)."""
+    if os.getenv("AI_PROVIDER", "openai").lower() == "groq":
+        groq_result = _call_groq_translation(prompt, json_mode=False)
+        if groq_result:
+            return str(groq_result)
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -263,6 +388,10 @@ def _call_openai_plain_text(prompt: str) -> Optional[str]:
 def _call_translation_llm(prompt: str, gemini_api_key: Optional[str]) -> Optional[Dict[str, Any]]:
     """Traduit via Gemini en priorite (meilleure qualite pour les langues locales
     du Burkina Faso), puis bascule automatiquement sur OpenAI si Gemini echoue."""
+    if os.getenv("AI_PROVIDER", "openai").lower() == "groq":
+        result = _call_groq_translation(prompt)
+        if result:
+            return result
     if gemini_api_key:
         result = _call_gemini_translation(prompt, gemini_api_key)
         if result:
@@ -321,7 +450,7 @@ def translate_text(
             "translation": ai.get("translation", text),
             "speech_text": ai.get("speech_text", ai.get("translation", text)),
             "confidence": float(ai.get("confidence", 0.75)),
-            "source": "gemini_ai",
+            "source": "ai_translation",
         }
 
     return {"translation": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
@@ -381,7 +510,7 @@ def translate_and_summarize_for_speech(
             "summary": ai.get("summary", text),
             "speech_text": ai.get("speech_text", ai.get("summary", text)),
             "confidence": float(ai.get("confidence", 0.75)),
-            "source": "gemini_ai_summary",
+            "source": "ai_summary",
         }
 
     return {"summary": text, "speech_text": text, "confidence": 0.0, "source": "fallback_original"}
@@ -458,7 +587,7 @@ def translate_fields(
                         "translation": res.get("translation", needs_ai.get(field, "")),
                         "speech_text": res.get("speech_text", res.get("translation", "")),
                         "confidence": float(res.get("confidence", 0.75)),
-                        "source": "gemini_ai_batch",
+                        "source": "ai_batch",
                     }
                     needs_ai.pop(field, None)
 
@@ -662,7 +791,8 @@ def translate_query_to_french(
     query: str,
     source_lang: str,
     gemini_api_key: Optional[str] = None,
-) -> str:
+    return_details: bool = False,
+) -> Any:
     """Traduit une requête écrite ou vocale de l'utilisateur (en langue locale) vers le Français.
 
     1. Découpe en mots ET en syllabes, cherche des correspondances dans le dictionnaire
@@ -678,6 +808,21 @@ def translate_query_to_french(
     if not query or source_lang not in VALID_LANGS:
         return query
 
+    normalized_stt = unicodedata.normalize("NFD", query.lower())
+    normalized_stt = "".join(
+        char for char in normalized_stt
+        if unicodedata.category(char) != "Mn"
+    )
+    normalized_stt = re.sub(r"[^a-z0-9ɛɔ]+", " ", normalized_stt).strip()
+    verified_alias = _STT_VERIFIED_ALIASES.get(source_lang, {}).get(normalized_stt)
+    if verified_alias:
+        details = {
+            "original_transcript": query,
+            **verified_alias,
+            "source": "verified_stt_alias",
+        }
+        return details if return_details else str(details["french_query"])
+
     # Inverser le dictionnaire local de cette langue (local_word -> french_word)
     d_local = _dictionaries.get(source_lang, {})
     inverted_dict: Dict[str, str] = {}
@@ -687,7 +832,16 @@ def translate_query_to_french(
         if local_val and fr_word:
             inverted_dict[local_val] = fr_word
 
+    def _phonetic_key(value: str) -> str:
+        value = unicodedata.normalize("NFD", value.lower())
+        value = "".join(
+            char for char in value if unicodedata.category(char) != "Mn"
+        )
+        # Le STT francais ajoute souvent espaces et tirets au milieu d'un mot local.
+        return re.sub(r"[^a-z0-9ɛɔ]", "", value)
+
     query_lower = query.lower()
+    query_phonetic = _phonetic_key(query)
     matched_french_words: List[str] = []
 
     def _add_match(fr_word: str) -> None:
@@ -696,18 +850,42 @@ def translate_query_to_french(
 
     # 1. Correspondance exacte de groupes de mots inversés dans la requête
     for local_phrase, fr_word in inverted_dict.items():
-        if local_phrase in query_lower:
+        if len(_phonetic_key(local_phrase)) >= 3 and re.search(
+            rf"(?<!\w){re.escape(local_phrase)}(?!\w)", query_lower
+        ):
             _add_match(fr_word)
 
     # 2. Correspondance mot à mot / sous-chaîne (tolère les frontières de mots
     #    mal placées par le STT)
     words_in_query = re.sub(r"[.,!?;:()'\"\\/@]", " ", query_lower).split()
     for word in words_in_query:
-        if len(word) < 2:
+        if len(_phonetic_key(word)) < 4:
             continue
         for local_phrase, fr_word in inverted_dict.items():
-            if word in local_phrase or local_phrase in word:
+            word_key = _phonetic_key(word)
+            local_key = _phonetic_key(local_phrase)
+            if word_key == local_key or (
+                len(local_key) >= 4 and local_key in word_key
+            ):
                 _add_match(fr_word)
+
+    # 2b. Correspondance phonétique approchée. Elle rapproche par exemple un
+    # mot local découpé en plusieurs syllabes par Android de l'entrée continue
+    # du dictionnaire, sans accepter les rapprochements faibles et ambigus.
+    query_word_keys = [_phonetic_key(word) for word in words_in_query]
+    for candidate in [query_phonetic, *query_word_keys]:
+        if len(candidate) < 4:
+            continue
+        best_match: Optional[tuple] = None
+        for local_phrase, fr_word in inverted_dict.items():
+            local_key = _phonetic_key(local_phrase)
+            if len(local_key) < 4:
+                continue
+            score = SequenceMatcher(None, candidate, local_key).ratio()
+            if best_match is None or score > best_match[0]:
+                best_match = (score, fr_word)
+        if best_match and best_match[0] >= 0.86:
+            _add_match(best_match[1])
 
     # 3. Correspondance syllabique : retrouve des correspondances même quand
     #    le "mot" transcrit par le STT ne matche jamais tel quel. Seuil de
@@ -717,11 +895,17 @@ def translate_query_to_french(
     for fragment in _syllable_fragments(query):
         if len(fragment) < 4:
             continue
+        fragment_key = _phonetic_key(fragment)
+        best_fragment_match: Optional[tuple] = None
         for local_phrase, fr_word in inverted_dict.items():
-            if len(local_phrase) >= 3 and (fragment in local_phrase or local_phrase in fragment):
-                _add_match(fr_word)
-        if len(matched_french_words) >= 20:
-            break
+            local_key = _phonetic_key(local_phrase)
+            if len(local_key) < 4:
+                continue
+            score = SequenceMatcher(None, fragment_key, local_key).ratio()
+            if best_fragment_match is None or score > best_fragment_match[0]:
+                best_fragment_match = (score, fr_word)
+        if best_fragment_match and best_fragment_match[0] >= 0.88:
+            _add_match(best_fragment_match[1])
 
     # 4. Reconstruction intelligente : TOUJOURS passer par Gemini (jamais une
     #    simple substitution mot-à-mot), en combinant les correspondances
@@ -746,6 +930,32 @@ def translate_query_to_french(
             + "\n"
         )
 
+    # Suggestions phonétiques, même imparfaites, pour permettre au linguiste IA
+    # de reconstruire « mam kooda » lorsque le STT français écrit « mon cours ».
+    candidate_scores: List[tuple] = []
+    for local_phrase, fr_word in inverted_dict.items():
+        local_key = _phonetic_key(local_phrase)
+        if len(local_key) < 3:
+            continue
+        score = max(
+            [SequenceMatcher(None, candidate, local_key).ratio()
+             for candidate in [query_phonetic, *query_word_keys] if candidate]
+            or [0.0]
+        )
+        if score >= 0.42:
+            candidate_scores.append((score, local_phrase, fr_word))
+    candidate_scores.sort(key=lambda item: item[0], reverse=True)
+    phonetic_candidates = [
+        {"local": local, "francais": french, "score": round(score, 2)}
+        for score, local, french in candidate_scores[:12]
+    ]
+    candidates_str = (
+        "\nCandidats du dictionnaire ressemblant aux sons entendus :\n"
+        + json.dumps(phonetic_candidates, ensure_ascii=False)
+        + "\n"
+        if phonetic_candidates else ""
+    )
+
     prompt = (
         f"Tu es un traducteur et linguiste expert de la langue {lang_name} (Burkina Faso) vers le Français.\n"
         f"L'utilisateur rural a posé une question en {lang_name}, transcrite PHONÉTIQUEMENT par un moteur "
@@ -755,14 +965,20 @@ def translate_query_to_french(
         f"en Français correct et fluide pour qu'elle puisse servir à interroger un système RAG sur les "
         f"maladies agricoles/d'élevage/urgences.\n\n"
         f"Requête utilisateur (transcription phonétique {lang_name}) : \"{query}\"\n"
-        f"{dict_context_str}{broader_context_str}\n"
-        f"Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
+        f"{dict_context_str}{broader_context_str}{candidates_str}\n"
+        + (
+            "Retourne uniquement ce JSON : "
+            '{"reconstructed_local":"phrase locale reconstruite avec syllabes séparées par des espaces ou tirets",'
+            '"french_query":"sens complet en français","confidence":0.0}. '
+            "La transcription locale reconstruite ne doit jamais être la transcription française brute."
+            if return_details else
+            "Traduis directement en Français (ne donne que la phrase traduite, rien d'autre, pas d'explication)."
+        )
     )
 
-    # Gemini en priorite, puis repli OpenAI si Gemini est indisponible (meme
-    # logique de resilience que pour la traduction de reponses, cf. _call_translation_llm).
-    translated_text = None
-    if gemini_api_key:
+    # Respecter AI_PROVIDER (Groq en production), puis utiliser Gemini comme repli.
+    translated_text = _call_openai_plain_text(prompt)
+    if not translated_text and gemini_api_key:
         try:
             import urllib.request
             url = (
@@ -783,17 +999,45 @@ def translate_query_to_french(
         except Exception as e:
             print(f"[TRANSLATOR] Échec traduction requête Gemini: {e}")
 
-    if not translated_text:
-        translated_text = _call_openai_plain_text(prompt)
-
     if translated_text:
+        if return_details:
+            try:
+                cleaned = re.sub(r"```(?:json)?\s*|```", "", translated_text).strip()
+                start, end = cleaned.find("{"), cleaned.rfind("}")
+                parsed = json.loads(cleaned[start:end + 1])
+                french_query = str(parsed.get("french_query") or "").strip()
+                reconstructed = str(parsed.get("reconstructed_local") or "").strip()
+                if french_query:
+                    return {
+                        "original_transcript": query,
+                        "reconstructed_local": reconstructed or query,
+                        "french_query": french_query,
+                        "confidence": float(parsed.get("confidence") or 0.0),
+                    }
+            except Exception as exc:
+                print(f"[TRANSLATOR] JSON reconstruction vocale invalide: {exc}")
         translated_text = re.sub(r'^["\']|["\']$', '', translated_text).strip()
-        if translated_text:
+        if translated_text and not return_details:
             return translated_text
 
     # Fallback local
     if matched_french_words:
-        return " ".join(matched_french_words)
+        fallback_french = " ".join(matched_french_words)
+        if return_details:
+            return {
+                "original_transcript": query,
+                "reconstructed_local": query,
+                "french_query": fallback_french,
+                "confidence": 0.35,
+            }
+        return fallback_french
         
+    if return_details:
+        return {
+            "original_transcript": query,
+            "reconstructed_local": query,
+            "french_query": query,
+            "confidence": 0.0,
+        }
     return query
 

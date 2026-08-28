@@ -1,6 +1,6 @@
 """
 v2_services.py - Pipeline v2 unifié (porté de backend-node)
-Fournisseur IA configurable via AI_PROVIDER (env var) : "openai" (défaut) ou "gemini"
+Fournisseur IA configurable via AI_PROVIDER (env var) : "groq", "openai" ou "gemini"
 Pour revenir à Gemini quand le billing est réglé : AI_PROVIDER=gemini dans .env
 
 Modules :
@@ -28,9 +28,18 @@ except ImportError:
     _OpenAIClient = None
     _openai_available = False
 
-# ── Gemini ──────────────────────────────────────────
-import google.generativeai as genai
-from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
+# ── Gemini (optionnel quand Groq est actif) ──────────
+try:
+    import google.generativeai as genai
+    from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
+except ImportError:
+    genai = None
+
+    class GoogleAPICallError(Exception):
+        pass
+
+    class ResourceExhausted(Exception):
+        pass
 
 try:
     import google.genai as google_genai
@@ -60,9 +69,26 @@ def _get_openai_client():
         raise RuntimeError("OPENAI_API_KEY non définie ou openai non installé")
     return _openai_client
 
+# Groq expose une API compatible OpenAI. Il traite le texte et les images avec
+# certains modèles vision, mais ne génère pas les images/vidéos de Songra.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b")
+_groq_key = os.environ.get("GROQ_API_KEY")
+_groq_client: Optional[object] = (
+    _OpenAIClient(api_key=_groq_key, base_url="https://api.groq.com/openai/v1")
+    if (_openai_available and _groq_key) else None
+)
+if _groq_client:
+    print(f"[OK] Groq API configuree (Modele: {GROQ_MODEL})")
+
+
+def _get_groq_client():
+    if not _groq_client:
+        raise RuntimeError("GROQ_API_KEY non definie ou openai non installe")
+    return _groq_client
+
 # ── Gemini config ────────────────────────────────────
 _gemini_key = os.environ.get("GEMINI_API_KEY")
-if _gemini_key:
+if _gemini_key and genai is not None:
     genai.configure(api_key=_gemini_key)
 
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -280,6 +306,8 @@ IMPORTANT :
 
 def _get_model(model_name: str = GEMINI_MODEL):
     """Obtenir un modèle Gemini configuré"""
+    if genai is None:
+        raise RuntimeError("google-generativeai non installe; utilisez AI_PROVIDER=groq ou installez la dependance")
     return genai.GenerativeModel(model_name)
 
 
@@ -533,6 +561,69 @@ async def _openai_chat(system: str, user_text: str, images_b64: Optional[List[st
         timeout=GEMINI_TIMEOUT,
     )
     return response.choices[0].message.content
+
+
+async def _groq_chat(system: str, user_text: str, images_b64: Optional[List[str]] = None, max_tokens: int = 2000, json_mode: bool = False) -> str:
+    """Appel Groq compatible OpenAI, y compris les photos si le modèle les accepte."""
+    client = _get_groq_client()
+    user_content: list = [{"type": "text", "text": user_text}]
+    for img_b64 in (images_b64 or [])[:MAX_PHOTOS]:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+        })
+    kwargs = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
+        "extra_body": {"reasoning_effort": "none", "reasoning_format": "hidden"},
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(client.chat.completions.create, **kwargs),
+            timeout=GEMINI_TIMEOUT,
+        )
+    except Exception as first_error:
+        # Certains modèles Groq disponibles selon le compte (notamment Qwen)
+        # produisent du JSON valide mais refusent response_format=json_object.
+        if not json_mode or "json" not in str(first_error).lower():
+            raise
+        kwargs.pop("response_format", None)
+        kwargs["messages"][-1]["content"][0]["text"] += (
+            "\n\nRetourne uniquement l'objet JSON demandé, sans markdown ni commentaire."
+        )
+        response = await asyncio.wait_for(
+            asyncio.to_thread(client.chat.completions.create, **kwargs),
+            timeout=GEMINI_TIMEOUT,
+        )
+    return response.choices[0].message.content
+
+
+async def _groq_analyze(text: str, images_b64: List[str], category: str) -> dict:
+    has_image = bool(images_b64)
+    user_message = (
+        f"\nDescription de l'utilisateur : {text}" if text.strip()
+        else "\n(Pas de description textuelle - analyse basee sur l'image uniquement)"
+    )
+    full_prompt = (
+        ANALYSIS_PROMPT + f"\n{_category_context_hint(category)}"
+        + f"\nPOSTURE : parle comme un {_category_expertise(category)}." + user_message
+    )
+    try:
+        raw = await _groq_chat(SYSTEM_PROMPT, full_prompt, images_b64, json_mode=True)
+        analysis = _validate_analysis(_parse_gemini_json(raw))
+    except Exception as error:
+        print(f"[groq_analyze] Fallback local active: {error}")
+        analysis = _build_analysis_fallback(text, category, has_image, error)
+    if category in ("urgence", "sos_accident"):
+        analysis["type_probleme"] = "urgence"
+    return analysis
 
 
 async def _openai_analyze(text: str, images_b64: List[str], category: str) -> dict:
@@ -849,7 +940,7 @@ async def gemini_analyze(
     category: str = "agriculture",
 ) -> dict:
     """Analyse unifiée texte + images → JSON structuré.
-    Dispatche vers OpenAI ou Gemini selon AI_PROVIDER."""
+    Dispatche vers Groq, OpenAI ou Gemini selon AI_PROVIDER."""
     images_b64 = images_b64 or []
     has_image = len(images_b64) > 0
     has_text = bool(text.strip())
@@ -858,14 +949,18 @@ async def gemini_analyze(
         raise ValueError("Veuillez fournir au moins du texte ou une image")
 
     # ── Routing provider ──────────────────────────────
-    if AI_PROVIDER == "openai":
+    if AI_PROVIDER in ("openai", "groq"):
         # Cache (texte seul) aussi pour OpenAI
         if not has_image and has_text:
             cache_key = _get_cache_key(text, category, False)
             cached = _analysis_cache.get(cache_key)
             if cached and (time.time() - cached["ts"]) < CACHE_TTL:
                 return {**cached["data"], "from_cache": True}
-        analysis = await _openai_analyze(text, images_b64, category)
+        analysis = (
+            await _groq_analyze(text, images_b64, category)
+            if AI_PROVIDER == "groq"
+            else await _openai_analyze(text, images_b64, category)
+        )
         if not has_image and has_text:
             cache_key = _get_cache_key(text, category, False)
             _analysis_cache[cache_key] = {"data": analysis, "ts": time.time()}
