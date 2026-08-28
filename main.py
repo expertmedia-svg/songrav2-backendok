@@ -6629,6 +6629,52 @@ async def expert_reply(
     return {"status": "success", "ticket_status": ticket.status}
 
 
+@app.post("/api/expert/tickets/{ticket_id}/reply-audio")
+async def expert_reply_audio(
+    ticket_id: int,
+    audio: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    current_expert: Expert = Depends(get_current_expert),
+    db: Session = Depends(get_db),
+):
+    """Ajoute une réponse vocale au ticket dans le périmètre de l'expert."""
+    ticket = _expert_ticket_or_404(db, current_expert, ticket_id)
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Le message vocal est vide")
+    extension = os.path.splitext(audio.filename or "message.m4a")[1].lower()
+    if extension not in {".webm", ".ogg", ".mp3", ".wav", ".m4a", ".mp4", ".mpeg", ".aac"}:
+        extension = ".m4a"
+    relative_path = os.path.join(
+        "uploads", "audio", "expert-replies",
+        f"expert_{current_expert.id}_ticket_{ticket.id}_{int(time.time() * 1000)}{extension}",
+    ).replace("\\", "/")
+    absolute_path = os.path.abspath(relative_path)
+    _ensure_parent_dir(absolute_path)
+    with open(absolute_path, "wb") as handle:
+        handle.write(content)
+    reply_language = _normalize_expert_local_language(language or ticket.preferred_language)
+    db.add(Message(
+        ticket_id=ticket.id,
+        sender_type="expert",
+        sender_id=current_expert.id,
+        content="Réponse vocale de l’expert",
+        channel="mobile_expert",
+        audio_url=relative_path,
+        language=reply_language,
+    ))
+    ticket.expert_id = current_expert.id
+    if ticket.status in {None, "open", "awaiting_expert"}:
+        ticket.status = "assigned"
+    db.commit()
+    return {
+        "status": "success",
+        "ticket_status": ticket.status,
+        "audio_url": _build_upload_url(relative_path),
+        "language": reply_language,
+    }
+
+
 @app.put("/api/expert/tickets/{ticket_id}/status")
 async def expert_ticket_status(
     ticket_id: int,
