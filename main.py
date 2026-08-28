@@ -4404,6 +4404,10 @@ app.add_middleware(
         "capacitor://localhost",
         "ionic://localhost",
     ],
+    # Flutter Web choisit un port de developpement dynamique. Cette regex
+    # reste volontairement limitee a la machine locale et n'ouvre aucune
+    # origine distante supplementaire.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
