@@ -5157,6 +5157,108 @@ async def admin_billing_dashboard(
     }
 
 
+@app.get("/api/admin/activity-report")
+async def admin_activity_report(
+    days: int = Query(default=30, ge=1, le=365),
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_admin
+    now = datetime.utcnow()
+    since = now - timedelta(days=days)
+    tickets = db.query(Ticket).all()
+    period_tickets = [ticket for ticket in tickets if ticket.created_at and ticket.created_at >= since]
+    transactions = db.query(BillingTransaction).filter(BillingTransaction.created_at >= since).order_by(BillingTransaction.created_at.desc()).all()
+    paid = [item for item in transactions if item.status == "done"]
+    yengapay_paid = [item for item in paid if item.provider == "yengapay"]
+    statuses: Dict[str, int] = {}
+    categories: Dict[str, int] = {}
+    for ticket in period_tickets:
+        status = ticket.status or "open"
+        category = ticket.category or "agriculture"
+        statuses[status] = statuses.get(status, 0) + 1
+        categories[category] = categories.get(category, 0) + 1
+    payment_kinds: Dict[str, Dict[str, int]] = {}
+    for item in paid:
+        bucket = payment_kinds.setdefault(item.kind, {"count": 0, "amount": 0})
+        bucket["count"] += 1
+        bucket["amount"] += item.amount
+
+    experts = db.query(Expert).order_by(Expert.full_name.asc()).all()
+    expert_reports: List[Dict[str, Any]] = []
+    for expert in experts:
+        assigned = [ticket for ticket in tickets if ticket.expert_id == expert.id]
+        assigned_period = [ticket for ticket in assigned if ticket.created_at and ticket.created_at >= since]
+        resolved = [ticket for ticket in assigned_period if ticket.status == "resolved"]
+        active = [ticket for ticket in assigned if ticket.status not in {"resolved", "closed"}]
+        replies = db.query(Message).filter(
+            Message.sender_type == "expert",
+            Message.sender_id == expert.id,
+            Message.sent_at >= since,
+        ).count()
+        voice_replies = db.query(Message).filter(
+            Message.sender_type == "expert",
+            Message.sender_id == expert.id,
+            Message.sent_at >= since,
+            Message.audio_url.isnot(None),
+        ).count()
+        durations = [
+            (ticket.resolved_at - ticket.created_at).total_seconds() / 3600
+            for ticket in resolved
+            if ticket.resolved_at and ticket.created_at and ticket.resolved_at >= ticket.created_at
+        ]
+        expert_reports.append({
+            "id": expert.id,
+            "name": expert.full_name,
+            "email": expert.email,
+            "specialization": expert.specialization,
+            "zone": expert.zone,
+            "is_active": expert.is_active,
+            "assigned": len(assigned_period),
+            "assigned_all_time": len(assigned),
+            "in_progress": len(active),
+            "resolved": len(resolved),
+            "resolution_rate": round((len(resolved) / len(assigned_period) * 100), 1) if assigned_period else 0,
+            "responses": replies,
+            "voice_responses": voice_replies,
+            "average_resolution_hours": round(sum(durations) / len(durations), 1) if durations else None,
+        })
+
+    return {
+        "status": "success",
+        "period_days": days,
+        "generated_at": now.isoformat(),
+        "payments": {
+            "revenue_xof": sum(item.amount for item in yengapay_paid),
+            "wallet_spending_xof": sum(item.amount for item in paid if item.provider == "wallet"),
+            "successful": len(paid),
+            "pending": sum(1 for item in transactions if item.status == "pending"),
+            "failed": sum(1 for item in transactions if item.status == "failed"),
+            "active_subscribers": db.query(User).filter(User.subscription_expires_at > now).count(),
+            "by_product": payment_kinds,
+            "recent": [{
+                "reference": item.reference,
+                "user_id": item.user_id,
+                "kind": item.kind,
+                "amount": item.amount,
+                "provider": item.provider,
+                "status": item.status,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+            } for item in transactions[:50]],
+        },
+        "tickets": {
+            "total": len(period_tickets),
+            "all_time": len(tickets),
+            "resolved": sum(1 for item in period_tickets if item.status == "resolved"),
+            "unassigned": sum(1 for item in tickets if not item.expert_id and item.status not in {"resolved", "closed"}),
+            "in_progress": sum(1 for item in tickets if item.status not in {"resolved", "closed"}),
+            "by_status": statuses,
+            "by_category": categories,
+        },
+        "experts": expert_reports,
+    }
+
+
 def get_current_user_or_expert(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
