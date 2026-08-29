@@ -6416,7 +6416,10 @@ async def get_mobile_question_detail(
     if not ticket:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    ticket_detail = await get_ticket_detail(question_id, db)
+    # Appel interne : passer explicitement la session DB. L'ancien appel
+    # positionnel plaçait la session dans current_expert et laissait `db`
+    # avec l'objet Depends, empêchant la récupération des nouveaux messages.
+    ticket_detail = await get_ticket_detail(question_id, current_expert=None, db=db)
     ai_summary_data = await get_ticket_ai_summary(question_id, db)
 
     return {
@@ -6606,6 +6609,40 @@ async def expert_ticket_detail(
         for message in messages
     ]
     result["photo_analysis"] = ticket.ai_photo_analysis
+    # Retrouver également la fiche Studio associée afin que l'expert puisse
+    # consulter sa consigne et écouter sa voix locale depuis le ticket.
+    user_text = "\n".join(
+        (message.content or "").strip()
+        for message in messages
+        if message.sender_type == "user" and (message.content or "").strip()
+    )
+    parsed_photo_analysis: Dict[str, Any] = {}
+    if ticket.ai_photo_analysis:
+        try:
+            raw_analysis = json.loads(ticket.ai_photo_analysis)
+            if isinstance(raw_analysis, dict):
+                parsed_photo_analysis = raw_analysis
+        except Exception:
+            parsed_photo_analysis = {"analysis": ticket.ai_photo_analysis}
+    studio_match = _find_studio_knowledge_match(
+        db,
+        category=ticket.category or "agriculture",
+        query_text=user_text,
+        photo_analysis=parsed_photo_analysis,
+    )
+    if studio_match:
+        language = _normalize_expert_local_language(ticket.preferred_language)
+        audio_map = _normalize_expert_local_audio(studio_match.get("audio") or {})
+        selected_audio = audio_map.get(language) if isinstance(audio_map.get(language), dict) else {}
+        result["knowledge_card"] = {
+            "id": studio_match.get("id"),
+            "title": studio_match.get("title"),
+            "resolution_fr": studio_match.get("resolution_fr"),
+            "language": language,
+            "audio_url": selected_audio.get("url"),
+            "audio_mime_type": selected_audio.get("mime_type"),
+            "audio": audio_map,
+        }
     return result
 
 
@@ -6711,6 +6748,10 @@ async def get_tickets(
         last_msg = db.query(Message).filter(
             Message.ticket_id == ticket.id
         ).order_by(Message.sent_at.desc()).first()
+        latest_expert_msg = db.query(Message).filter(
+            Message.ticket_id == ticket.id,
+            Message.sender_type == "expert",
+        ).order_by(Message.sent_at.desc(), Message.id.desc()).first()
         
         # Construire l'URL de la photo
         photo_url = _build_upload_url(ticket.photo_path)
@@ -7981,6 +8022,8 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
             "photo_url": photo_url,
             "photo_urls": photo_urls,
             "photo_analysis": photo_analysis,
+            "latest_expert_message_at": latest_expert_msg.sent_at.isoformat() if latest_expert_msg and latest_expert_msg.sent_at else None,
+            "latest_expert_has_audio": bool(latest_expert_msg and latest_expert_msg.audio_url),
         })
     
     return result
