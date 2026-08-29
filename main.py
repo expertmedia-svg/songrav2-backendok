@@ -4873,7 +4873,7 @@ def _run_startup_migrations(db: Session):
         print("[OK] Migration startup: audio_url ajoutée à la table messages")
     except Exception:
         db.rollback()
-        
+
     # 2. chat_messages
     try:
         db.execute(text("ALTER TABLE chat_messages ADD COLUMN audio_url TEXT;"))
@@ -4881,6 +4881,101 @@ def _run_startup_migrations(db: Session):
         print("[OK] Migration startup: audio_url ajoutée à la table chat_messages")
     except Exception:
         db.rollback()
+
+
+def _seed_academy_courses(db: Session) -> int:
+    """Crée le catalogue pédagogique initial sans écraser les cours existants."""
+    crops = {
+        "Maïs": "céréale exigeante qui valorise une bonne fertilité et un semis à temps",
+        "Mil": "céréale rustique adaptée aux zones sèches et aux sols légers",
+        "Sorgho": "céréale résistante dont les variétés doivent suivre la durée de la saison",
+        "Riz": "culture qui exige une bonne maîtrise de l’eau et du nivellement",
+        "Niébé": "légumineuse alimentaire qui enrichit le sol et supporte la sécheresse",
+        "Arachide": "légumineuse qui préfère un sol meuble, drainant et peu compact",
+        "Sésame": "culture de rente sensible à l’excès d’eau et aux récoltes tardives",
+        "Coton": "culture de rente nécessitant un calendrier rigoureux et une lutte intégrée",
+        "Tomate": "culture maraîchère exigeant eau régulière, tuteurage et surveillance sanitaire",
+        "Oignon": "culture maraîchère demandant une pépinière saine et une irrigation maîtrisée",
+    }
+    crop_modules = [
+        ("Installer la culture de {crop}", "Préparer la campagne, choisir la variété et réussir l’implantation.", [
+            ("Choisir la parcelle", "Choisissez une parcelle adaptée, accessible et sans stagnation durable d’eau."),
+            ("Choisir la semence", "Utilisez une semence saine et une variété adaptée à la zone et à la durée des pluies."),
+            ("Préparer le sol", "Nettoyez, ameublissez et apportez de la matière organique bien décomposée."),
+            ("Semer ou repiquer", "Intervenez au bon moment, respectez profondeur, espacement et densité recommandés."),
+        ]),
+        ("Entretenir et fertiliser le {crop}", "Conduire la culture depuis la levée jusqu’à la production.", [
+            ("Contrôler la levée", "Repérez rapidement les manques, plants faibles et dégâts après implantation."),
+            ("Désherber tôt", "Supprimez les adventices avant qu’elles concurrencent la culture pour l’eau et les éléments nutritifs."),
+            ("Nourrir le sol", "Apportez compost et fertilisants selon les besoins, en évitant les doses excessives."),
+            ("Suivre la croissance", "Visitez la parcelle chaque semaine et notez les changements importants."),
+        ]),
+        ("Gérer l’eau pour le {crop}", "Réduire le stress hydrique, l’érosion et les pertes d’eau.", [
+            ("Observer l’humidité", "Vérifiez l’humidité près des racines avant de décider d’arroser."),
+            ("Conserver l’eau", "Utilisez paillage, zaï, demi-lunes ou travail du sol adapté selon la parcelle."),
+            ("Arroser efficacement", "Arrosez tôt le matin ou le soir, directement dans la zone racinaire."),
+            ("Évacuer l’excès", "Maintenez rigoles et drainage lorsque les pluies risquent d’asphyxier les racines."),
+        ]),
+        ("Protéger le {crop}", "Reconnaître tôt ravageurs et maladies et intervenir sans danger.", [
+            ("Inspecter régulièrement", "Observez feuilles, tiges, fleurs, fruits et sol sur plusieurs points de la parcelle."),
+            ("Identifier avant d’agir", "Comparez les symptômes et demandez confirmation si le problème est inconnu ou se propage vite."),
+            ("Privilégier la prévention", "Assainissez la parcelle, alternez les cultures et protégez les auxiliaires utiles."),
+            ("Traiter avec prudence", "N’utilisez qu’un produit autorisé, à la dose indiquée, avec protection et sans traiter par vent fort."),
+        ]),
+        ("Récolter et valoriser le {crop}", "Limiter les pertes et améliorer conservation, qualité et revenu.", [
+            ("Reconnaître la maturité", "Récoltez au stade adapté pour préserver rendement, goût et qualité marchande."),
+            ("Récolter proprement", "Utilisez du matériel propre et évitez contact prolongé avec le sol humide."),
+            ("Sécher et trier", "Triez les produits abîmés et atteignez un séchage suffisant avant stockage."),
+            ("Stocker et vendre", "Utilisez un stockage propre et ventilé, puis comparez prix, transport et débouchés."),
+        ]),
+    ]
+    techniques = {
+        "Zaï": "concentrer l’eau et la fumure dans des poquets sur sol dégradé",
+        "Demi-lunes": "ralentir le ruissellement et restaurer les terres en pente douce",
+        "Cordons pierreux": "freiner l’érosion suivant les courbes de niveau",
+        "Compostage": "transformer les résidus organiques en amendement mûr et sûr",
+        "Irrigation goutte-à-goutte": "apporter peu d’eau directement près des racines",
+        "Paillage": "couvrir le sol pour conserver l’humidité et limiter les herbes",
+        "Association et rotation": "alterner ou associer les cultures pour fertilité et protection",
+        "Lutte intégrée": "prévenir et contrôler les ravageurs avec plusieurs méthodes complémentaires",
+    }
+    technique_modules = [
+        ("Installer la technique : {name}", "Comprendre, préparer et mettre correctement en place la technique.", [
+            ("Comprendre l’objectif", "Cette technique sert à {purpose}."),
+            ("Choisir l’emplacement", "Observez pente, type de sol, circulation de l’eau et culture prévue avant installation."),
+            ("Préparer le matériel", "Rassemblez les outils et matériaux locaux nécessaires avant de commencer."),
+            ("Installer progressivement", "Testez d’abord sur une petite zone, contrôlez les dimensions puis étendez la technique."),
+        ]),
+        ("Entretenir et améliorer : {name}", "Contrôler l’efficacité, corriger les défauts et pérenniser la technique.", [
+            ("Contrôler après usage", "Vérifiez l’état du dispositif après pluie, irrigation ou travaux dans le champ."),
+            ("Corriger rapidement", "Réparez les ruptures, bouchons, zones érodées ou parties inefficaces."),
+            ("Mesurer le résultat", "Comparez humidité, vigueur, rendement, temps de travail et dépenses avec une zone témoin."),
+            ("Adapter à la parcelle", "Ajustez dimensions et fréquence d’entretien selon le sol, la pente et la culture."),
+        ]),
+    ]
+    existing_titles = {str(value[0]) for value in db.query(AcademyCourseDB.title).all()}
+    created = 0
+    for crop, profile in crops.items():
+        for title_tpl, summary_tpl, steps_tpl in crop_modules:
+            title = title_tpl.format(crop=crop.lower())
+            if title in existing_titles:
+                continue
+            steps = [{"id": f"step-{index + 1}", "title": step_title, "content": step_content, "image_url": None, "audio": {}} for index, (step_title, step_content) in enumerate(steps_tpl)]
+            db.add(AcademyCourseDB(title=title, course_type="culture", crop=crop, summary=f"{summary_tpl} Le {crop.lower()} est une {profile}.", steps_json=json.dumps(steps, ensure_ascii=False), audio_json="{}", status="published"))
+            existing_titles.add(title)
+            created += 1
+    for name, purpose in techniques.items():
+        for title_tpl, summary, steps_tpl in technique_modules:
+            title = title_tpl.format(name=name)
+            if title in existing_titles:
+                continue
+            steps = [{"id": f"step-{index + 1}", "title": step_title, "content": step_content.format(purpose=purpose), "image_url": None, "audio": {}} for index, (step_title, step_content) in enumerate(steps_tpl)]
+            db.add(AcademyCourseDB(title=title, course_type="technique", crop=name, summary=summary, steps_json=json.dumps(steps, ensure_ascii=False), audio_json="{}", status="published"))
+            existing_titles.add(title)
+            created += 1
+    if created:
+        db.commit()
+    return created
 
 
 @app.on_event("startup")
@@ -4952,6 +5047,14 @@ async def startup_seed_data():
             print(f"[OK] Base de connaissances chargée ({total_items} fiches)")
         except Exception as e_load:
             print(f"[WARN] Erreur chargement base de connaissances: {e_load}")
+
+        try:
+            academy_created = _seed_academy_courses(db)
+            academy_total = db.query(AcademyCourseDB).count()
+            print(f"[OK] Académie du paysan chargée ({academy_total} cours, {academy_created} nouveaux)")
+        except Exception as academy_error:
+            db.rollback()
+            print(f"[WARN] Erreur initialisation Académie: {academy_error}")
 
         try:
             # Seed default emergency numbers if empty
