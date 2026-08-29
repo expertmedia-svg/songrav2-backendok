@@ -537,6 +537,22 @@ class ExpertLocalKnowledgeDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AcademyCourseDB(Base):
+    __tablename__ = "academy_courses"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    course_type = Column(String, default="culture")  # culture | technique
+    crop = Column(String, nullable=True)
+    summary = Column(Text, nullable=False)
+    cover_url = Column(String, nullable=True)
+    steps_json = Column(Text, nullable=True)
+    audio_json = Column(Text, nullable=True)
+    status = Column(String, default="published")
+    created_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class OfflineKnowledgeEntryDB(Base):
     __tablename__ = "offline_knowledge_entries"
     id = Column(Integer, primary_key=True, index=True)
@@ -804,6 +820,15 @@ class MobileQuestionCreate(BaseModel):
 class ReplyMessage(BaseModel):
     message: str
     language: Optional[str] = None
+
+
+class AcademyCourseIn(BaseModel):
+    title: str
+    course_type: str = "culture"
+    crop: Optional[str] = None
+    summary: str
+    steps: List[Dict[str, Any]] = []
+    status: str = "published"
 
 
 class PhotoAnalysisHistoryIn(BaseModel):
@@ -8818,6 +8843,158 @@ async def translate_localization_payload(
         "resolution_fr": payload.resolution_fr,
         "translations": translations,
     }
+
+
+def _serialize_academy_course(course: AcademyCourseDB) -> Dict[str, Any]:
+    return {
+        "id": course.id,
+        "title": course.title,
+        "course_type": course.course_type or "culture",
+        "crop": course.crop,
+        "summary": course.summary,
+        "cover_url": _build_upload_url(course.cover_url) if course.cover_url and not str(course.cover_url).startswith("http") else course.cover_url,
+        "steps": _load_json_list(course.steps_json),
+        "audio": _normalize_expert_local_audio(_load_json_dict(course.audio_json)),
+        "status": course.status or "published",
+        "created_at": course.created_at.isoformat() if course.created_at else None,
+        "updated_at": course.updated_at.isoformat() if course.updated_at else None,
+    }
+
+
+def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    previous_by_id = {str(item.get("id")): item for item in (previous or []) if isinstance(item, dict)}
+    result: List[Dict[str, Any]] = []
+    for index, raw in enumerate(raw_steps if isinstance(raw_steps, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        step_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("id") or f"step-{index + 1}")) or f"step-{index + 1}"
+        old = previous_by_id.get(step_id, {})
+        title = str(raw.get("title") or "").strip()
+        content = str(raw.get("content") or "").strip()
+        if not title or not content:
+            continue
+        result.append({
+            "id": step_id,
+            "title": title,
+            "content": content,
+            "image_url": raw.get("image_url") or old.get("image_url"),
+            "audio": _normalize_expert_local_audio({**_load_json_dict(old.get("audio")), **_load_json_dict(raw.get("audio"))}),
+        })
+    return result
+
+
+@app.get("/api/academy/courses")
+async def list_public_academy_courses(db: Session = Depends(get_db)):
+    courses = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published").order_by(AcademyCourseDB.updated_at.desc()).all()
+    return {"status": "success", "courses": [_serialize_academy_course(course) for course in courses]}
+
+
+@app.get("/api/admin/academy/courses")
+async def list_admin_academy_courses(
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    courses = db.query(AcademyCourseDB).order_by(AcademyCourseDB.updated_at.desc()).all()
+    return {"status": "success", "courses": [_serialize_academy_course(course) for course in courses]}
+
+
+@app.post("/api/admin/academy/courses")
+async def create_academy_course(
+    payload: AcademyCourseIn,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    if not payload.title.strip() or not payload.summary.strip():
+        raise HTTPException(status_code=422, detail="Titre et présentation du cours obligatoires")
+    course = AcademyCourseDB(
+        title=payload.title.strip(),
+        course_type="technique" if payload.course_type == "technique" else "culture",
+        crop=(payload.crop or "").strip() or None,
+        summary=payload.summary.strip(),
+        steps_json=json.dumps(_normalize_academy_steps(payload.steps), ensure_ascii=False),
+        audio_json="{}",
+        status="draft" if payload.status == "draft" else "published",
+        created_by=current_expert.id,
+    )
+    db.add(course)
+    db.commit()
+    db.refresh(course)
+    return {"status": "success", "course": _serialize_academy_course(course)}
+
+
+@app.put("/api/admin/academy/courses/{course_id}")
+async def update_academy_course(
+    course_id: int,
+    payload: AcademyCourseIn,
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Cours introuvable")
+    course.title = payload.title.strip()
+    course.course_type = "technique" if payload.course_type == "technique" else "culture"
+    course.crop = (payload.crop or "").strip() or None
+    course.summary = payload.summary.strip()
+    course.steps_json = json.dumps(_normalize_academy_steps(payload.steps, _load_json_list(course.steps_json)), ensure_ascii=False)
+    course.status = "draft" if payload.status == "draft" else "published"
+    db.commit()
+    db.refresh(course)
+    return {"status": "success", "course": _serialize_academy_course(course)}
+
+
+@app.post("/api/admin/academy/courses/{course_id}/media")
+async def upload_academy_course_media(
+    course_id: int,
+    media_kind: str = Form(...),
+    file: UploadFile = File(...),
+    step_id: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    current_expert: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_expert
+    course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Cours introuvable")
+    kind = media_kind.strip().lower()
+    if kind not in {"image", "audio"}:
+        raise HTTPException(status_code=422, detail="Type média invalide")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Le fichier envoyé est vide")
+    extension = os.path.splitext(file.filename or "")[1].lower() or (".jpg" if kind == "image" else ".m4a")
+    safe_step = re.sub(r"[^a-zA-Z0-9_-]", "", step_id or "course") or "course"
+    normalized_language = _normalize_expert_local_language(language) if kind == "audio" else "image"
+    relative_path = os.path.join("uploads", "academy", str(course.id), f"{safe_step}-{normalized_language}-{int(time.time() * 1000)}{extension}").replace("\\", "/")
+    absolute_path = os.path.abspath(relative_path)
+    _ensure_parent_dir(absolute_path)
+    with open(absolute_path, "wb") as handle:
+        handle.write(content)
+    public_url = _build_upload_url(relative_path)
+    if step_id:
+        steps = _load_json_list(course.steps_json)
+        target = next((item for item in steps if isinstance(item, dict) and str(item.get("id")) == str(step_id)), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Étape introuvable")
+        if kind == "image":
+            target["image_url"] = public_url
+        else:
+            audio_map = _normalize_expert_local_audio(target.get("audio") or {})
+            audio_map[normalized_language] = {"url": public_url, "mime_type": file.content_type, "uploaded_at": datetime.utcnow().isoformat()}
+            target["audio"] = audio_map
+        course.steps_json = json.dumps(steps, ensure_ascii=False)
+    elif kind == "image":
+        course.cover_url = relative_path
+    else:
+        audio_map = _normalize_expert_local_audio(_load_json_dict(course.audio_json))
+        audio_map[normalized_language] = {"url": public_url, "mime_type": file.content_type, "uploaded_at": datetime.utcnow().isoformat()}
+        course.audio_json = json.dumps(audio_map, ensure_ascii=False)
+    db.commit()
+    db.refresh(course)
+    return {"status": "success", "course": _serialize_academy_course(course)}
 
 
 @app.get("/api/expert/local-knowledge")
