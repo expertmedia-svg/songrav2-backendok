@@ -5090,7 +5090,8 @@ async def yengapay_payment_return():
     return HTMLResponse("""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Paiement SONGRA</title><style>body{font-family:system-ui;background:#f4faf7;color:#123;padding:32px;text-align:center}.card{max-width:430px;margin:12vh auto;background:white;border-radius:24px;padding:30px;box-shadow:0 12px 40px #1232}a{display:block;background:#118c4f;color:white;text-decoration:none;padding:15px;border-radius:13px;font-weight:800;margin-top:22px}</style></head>
-<body><div class="card"><h1>Paiement enregistré</h1><p>Votre paiement est en cours de confirmation. Revenez dans SONGRA puis appuyez sur « J’ai payé, vérifier ».</p><a href="songra://payment-return">Revenir dans SONGRA</a></div></body></html>""")
+<body><div class="card"><h1>Paiement enregistré</h1><p>Retour automatique vers SONGRA…</p><a id="open-app" href="intent://payment-return#Intent;scheme=songra;package=com.songra.mobileapp;end">Revenir dans SONGRA</a></div>
+<script>function openSongra(){location.href='intent://payment-return#Intent;scheme=songra;package=com.songra.mobileapp;end'};setTimeout(openSongra,250);setTimeout(function(){location.href='songra://payment-return'},1200);</script></body></html>""")
 
 
 def get_current_expert(
@@ -8460,6 +8461,10 @@ async def get_user_tickets(phone: str, db: Session = Depends(get_db)):
         last_msg = db.query(Message).filter(
             Message.ticket_id == ticket.id
         ).order_by(Message.sent_at.desc()).first()
+        latest_expert_msg = db.query(Message).filter(
+            Message.ticket_id == ticket.id,
+            Message.sender_type == "expert",
+        ).order_by(Message.sent_at.desc(), Message.id.desc()).first()
         
         # Construire l'URL de la photo
         photo_url = _build_upload_url(ticket.photo_path)
