@@ -6,7 +6,7 @@ Version FINALE - Avec analyse IA complète
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -5082,6 +5082,15 @@ async def yengapay_webhook(request: Request, db: Session = Depends(get_db)):
             tx.provider_payload_json = json.dumps(payload, ensure_ascii=False)
             _activate_purchase(db, tx, user)
     return {"received": True}
+
+
+@app.get("/api/payments/yengapay/return", response_class=HTMLResponse)
+async def yengapay_payment_return():
+    """Page de retour YengaPay. Le webhook reste la source de vérité du paiement."""
+    return HTMLResponse("""<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paiement SONGRA</title><style>body{font-family:system-ui;background:#f4faf7;color:#123;padding:32px;text-align:center}.card{max-width:430px;margin:12vh auto;background:white;border-radius:24px;padding:30px;box-shadow:0 12px 40px #1232}a{display:block;background:#118c4f;color:white;text-decoration:none;padding:15px;border-radius:13px;font-weight:800;margin-top:22px}</style></head>
+<body><div class="card"><h1>Paiement enregistré</h1><p>Votre paiement est en cours de confirmation. Revenez dans SONGRA puis appuyez sur « J’ai payé, vérifier ».</p><a href="songra://payment-return">Revenir dans SONGRA</a></div></body></html>""")
 
 
 def get_current_expert(
