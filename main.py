@@ -427,6 +427,12 @@ class User(Base):
     messages_limit = Column(Integer, default=1)  # 1 gratuit, 10 pour premium
     failed_pin_attempts = Column(Integer, default=0)
     pin_locked_until = Column(DateTime, nullable=True)
+    wallet_balance = Column(Integer, default=0)
+    subscription_plan = Column(String, nullable=True)
+    subscription_started_at = Column(DateTime, nullable=True)
+    subscription_expires_at = Column(DateTime, nullable=True)
+    analysis_credits = Column(Integer, default=0)
+    ticket_credits = Column(Integer, default=0)
 
 class Expert(Base):
     __tablename__ = "experts"
@@ -551,6 +557,43 @@ class AcademyCourseDB(Base):
     created_by = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BillingTransaction(Base):
+    __tablename__ = "billing_transactions"
+    id = Column(String, primary_key=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    reference = Column(String, unique=True, nullable=False, index=True)
+    provider = Column(String, default="yengapay")
+    provider_intent_id = Column(String, nullable=True, index=True)
+    kind = Column(String, nullable=False)
+    target_id = Column(String, nullable=True)
+    amount = Column(Integer, nullable=False)
+    status = Column(String, default="pending", index=True)
+    checkout_url = Column(Text, nullable=True)
+    provider_payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    paid_at = Column(DateTime, nullable=True)
+
+
+class UsageEventDB(Base):
+    __tablename__ = "usage_events"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    resource = Column(String, nullable=False, index=True)
+    source = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class CourseAccessDB(Base):
+    __tablename__ = "academy_course_access"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, nullable=False, index=True)
+    source = Column(String, nullable=False)
+    period_key = Column(String, nullable=True, index=True)
+    permanent = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class OfflineKnowledgeEntryDB(Base):
@@ -678,6 +721,12 @@ def _ensure_user_auth_columns() -> None:
                 ("organization", "TEXT", "TEXT"),
                 ("organization_id", "INTEGER", "INTEGER"),
                 ("failed_pin_attempts", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
+                ("wallet_balance", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
+                ("subscription_plan", "TEXT", "TEXT"),
+                ("subscription_started_at", "DATETIME", "TIMESTAMP"),
+                ("subscription_expires_at", "DATETIME", "TIMESTAMP"),
+                ("analysis_credits", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
+                ("ticket_credits", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
                 ("pin_locked_until", "DATETIME", "TIMESTAMP"),
             ]
             for col, sqlite_ddl, postgres_ddl in migrations:
@@ -4788,6 +4837,253 @@ def get_current_user(
     return user
 
 
+# ==========================================
+# FACTURATION, ABONNEMENTS ET QUOTAS SONGRA
+# ==========================================
+
+SONGRA_OFFERS: Dict[str, Dict[str, Any]] = {
+    "week": {"label": "Semaine", "price": 500, "days": 7, "analyses": 25, "tickets": 3, "courses": 5},
+    "month": {"label": "Mois Essentiel", "price": 1000, "days": 30, "analyses": 100, "tickets": 10, "courses": -1},
+    "pro": {"label": "Mois Pro", "price": 2000, "days": 30, "analyses": 200, "tickets": 20, "courses": -1},
+}
+SONGRA_PRODUCTS: Dict[str, Dict[str, Any]] = {
+    "ticket": {"label": "1 ticket expert", "price": 300},
+    "course": {"label": "1 cours de l'académie", "price": 100},
+    "analysis_pack": {"label": "Pack de 10 analyses", "price": 200, "quantity": 10},
+}
+YENGAPAY_BASE_URL = os.getenv("YENGAPAY_BASE_URL", "https://api.yengapay.com/api/v1").rstrip("/")
+YENGAPAY_API_KEY = os.getenv("YENGAPAY_API_KEY", "").strip()
+YENGAPAY_ORGANIZATION_ID = os.getenv("YENGAPAY_ORGANIZATION_ID", "").strip()
+YENGAPAY_PROJECT_ID = os.getenv("YENGAPAY_PROJECT_ID", "58165").strip()
+YENGAPAY_WEBHOOK_SECRET = os.getenv("YENGAPAY_WEBHOOK_SECRET", "").strip()
+
+
+class PaymentIntentIn(BaseModel):
+    kind: str
+    amount: Optional[int] = None
+    target_id: Optional[str] = None
+
+
+class WalletPurchaseIn(BaseModel):
+    kind: str
+    target_id: Optional[str] = None
+
+
+def _active_offer(user: User) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    now = datetime.utcnow()
+    plan = (user.subscription_plan or "").strip().lower()
+    if plan in SONGRA_OFFERS and user.subscription_expires_at and user.subscription_expires_at > now:
+        return plan, SONGRA_OFFERS[plan]
+    return None, None
+
+
+def _usage_count(db: Session, user_id: int, resource: str, since: datetime) -> int:
+    return db.query(UsageEventDB).filter(
+        UsageEventDB.user_id == user_id,
+        UsageEventDB.resource == resource,
+        UsageEventDB.created_at >= since,
+    ).count()
+
+
+def _resource_status(db: Session, user: User, resource: str) -> Dict[str, Any]:
+    plan, offer = _active_offer(user)
+    now = datetime.utcnow()
+    if offer:
+        since = user.subscription_started_at or (user.subscription_expires_at - timedelta(days=int(offer["days"])))
+        limit = int(offer[resource])
+        used = _usage_count(db, user.id, resource, since)
+        return {"allowed": used < limit, "used": used, "limit": limit, "remaining": max(0, limit - used), "source": plan}
+    if resource == "analyses":
+        today = datetime(now.year, now.month, now.day)
+        used = _usage_count(db, user.id, resource, today)
+        if used < 3:
+            return {"allowed": True, "used": used, "limit": 3, "remaining": 3 - used, "source": "free_daily"}
+    credits = int((user.analysis_credits if resource == "analyses" else user.ticket_credits) or 0)
+    if credits > 0:
+        return {"allowed": True, "used": 0, "limit": credits, "remaining": credits, "source": "credits"}
+    if resource == "analyses":
+        return {"allowed": False, "used": 3, "limit": 3, "remaining": 0, "source": "free_daily"}
+    return {"allowed": False, "used": 0, "limit": 0, "remaining": 0, "source": "free"}
+
+
+def _require_resource(db: Session, user: User, resource: str) -> Dict[str, Any]:
+    status = _resource_status(db, user, resource)
+    if not status["allowed"]:
+        label = "analyses" if resource == "analyses" else "tickets expert"
+        raise HTTPException(status_code=402, detail=f"Votre quota de {label} est épuisé. Rechargez votre compte ou choisissez un abonnement.")
+    return status
+
+
+def _consume_resource(db: Session, user: User, resource: str, source: str) -> None:
+    status = _require_resource(db, user, resource)
+    if status["source"] == "credits":
+        if resource == "analyses":
+            user.analysis_credits = max(0, int(user.analysis_credits or 0) - 1)
+        else:
+            user.ticket_credits = max(0, int(user.ticket_credits or 0) - 1)
+    db.add(UsageEventDB(user_id=user.id, resource=resource, source=source))
+    db.commit()
+
+
+def _billing_snapshot(db: Session, user: User) -> Dict[str, Any]:
+    plan, offer = _active_offer(user)
+    course_access = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == user.id).count()
+    return {
+        "wallet_balance": int(user.wallet_balance or 0),
+        "currency": "XOF",
+        "subscription": {
+            "plan": plan,
+            "label": offer["label"] if offer else "Gratuit",
+            "expires_at": user.subscription_expires_at.isoformat() if plan and user.subscription_expires_at else None,
+        },
+        "analyses": _resource_status(db, user, "analyses"),
+        "tickets": _resource_status(db, user, "tickets"),
+        "analysis_credits": int(user.analysis_credits or 0),
+        "ticket_credits": int(user.ticket_credits or 0),
+        "course_access_count": course_access,
+        "offers": SONGRA_OFFERS,
+        "products": SONGRA_PRODUCTS,
+        "topup_amounts": [500, 1000, 2000, 5000],
+    }
+
+
+def _price_for(kind: str, amount: Optional[int], target_id: Optional[str]) -> Tuple[int, str]:
+    if kind == "wallet_topup":
+        value = int(amount or 0)
+        if value not in {500, 1000, 2000, 5000}:
+            raise HTTPException(status_code=400, detail="Montant de recharge non autorisé")
+        return value, f"Recharge portefeuille SONGRA {value} F"
+    if kind.startswith("plan_"):
+        plan = kind.removeprefix("plan_")
+        if plan not in SONGRA_OFFERS:
+            raise HTTPException(status_code=400, detail="Abonnement inconnu")
+        return int(SONGRA_OFFERS[plan]["price"]), f"Abonnement {SONGRA_OFFERS[plan]['label']}"
+    if kind not in SONGRA_PRODUCTS:
+        raise HTTPException(status_code=400, detail="Produit inconnu")
+    if kind == "course" and not target_id:
+        raise HTTPException(status_code=400, detail="Cours requis")
+    product = SONGRA_PRODUCTS[kind]
+    return int(product["price"]), str(product["label"])
+
+
+def _activate_purchase(db: Session, tx: BillingTransaction, user: User) -> None:
+    if tx.status == "done":
+        return
+    now = datetime.utcnow()
+    kind = tx.kind
+    if kind == "wallet_topup":
+        user.wallet_balance = int(user.wallet_balance or 0) + tx.amount
+    elif kind.startswith("plan_"):
+        plan = kind.removeprefix("plan_")
+        offer = SONGRA_OFFERS[plan]
+        user.subscription_plan = plan
+        user.subscription_started_at = now
+        user.subscription_expires_at = now + timedelta(days=int(offer["days"]))
+        user.is_premium = True
+        user.premium_expires_at = user.subscription_expires_at
+    elif kind == "ticket":
+        user.ticket_credits = int(user.ticket_credits or 0) + 1
+    elif kind == "analysis_pack":
+        user.analysis_credits = int(user.analysis_credits or 0) + int(SONGRA_PRODUCTS[kind]["quantity"])
+    elif kind == "course":
+        course_id = int(tx.target_id or 0)
+        exists = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == user.id, CourseAccessDB.course_id == course_id, CourseAccessDB.permanent == True).first()
+        if not exists:
+            db.add(CourseAccessDB(user_id=user.id, course_id=course_id, source="purchase", permanent=True))
+    tx.status = "done"
+    tx.paid_at = now
+    db.commit()
+
+
+def _yengapay_call(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not YENGAPAY_API_KEY or not YENGAPAY_ORGANIZATION_ID:
+        raise HTTPException(status_code=503, detail="YengaPay n'est pas encore configuré sur le serveur")
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(f"{YENGAPAY_BASE_URL}{path}", data=body, method=method, headers={"x-api-key": YENGAPAY_API_KEY, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"YengaPay a refusé la demande: {detail[:300]}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="YengaPay est momentanément indisponible") from exc
+
+
+@app.get("/api/billing/status")
+async def billing_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _billing_snapshot(db, current_user)
+
+
+@app.post("/api/billing/payment-intent")
+async def create_billing_payment_intent(payload: PaymentIntentIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    import asyncio
+    amount, label = _price_for(payload.kind, payload.amount, payload.target_id)
+    reference = f"SONGRA-{current_user.id}-{int(time.time())}-{secrets.token_hex(4)}"
+    request_payload = {"paymentAmount": amount, "reference": reference, "articles": [{"title": label, "description": "Service numérique SONGRA", "pictures": [], "price": amount}]}
+    result = await asyncio.to_thread(_yengapay_call, "POST", f"/groups/{YENGAPAY_ORGANIZATION_ID}/payment-intent/{YENGAPAY_PROJECT_ID}", request_payload)
+    checkout_url = result.get("checkoutPageUrlWithPaymentToken")
+    if not checkout_url or not result.get("id"):
+        raise HTTPException(status_code=502, detail="Réponse YengaPay incomplète")
+    tx = BillingTransaction(id=secrets.token_hex(16), user_id=current_user.id, reference=reference, provider_intent_id=str(result["id"]), kind=payload.kind, target_id=payload.target_id, amount=amount, status="pending", checkout_url=checkout_url, provider_payload_json=json.dumps(result, ensure_ascii=False))
+    db.add(tx)
+    db.commit()
+    return {"status": "pending", "transaction_id": tx.id, "reference": reference, "checkout_url": checkout_url, "amount": amount, "currency": "XOF"}
+
+
+@app.post("/api/billing/wallet-purchase")
+async def wallet_purchase(payload: WalletPurchaseIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    amount, _ = _price_for(payload.kind, None, payload.target_id)
+    if int(current_user.wallet_balance or 0) < amount:
+        raise HTTPException(status_code=402, detail="Solde insuffisant. Rechargez votre compte SONGRA.")
+    current_user.wallet_balance = int(current_user.wallet_balance or 0) - amount
+    tx = BillingTransaction(id=secrets.token_hex(16), user_id=current_user.id, reference=f"WALLET-{current_user.id}-{int(time.time())}-{secrets.token_hex(3)}", provider="wallet", kind=payload.kind, target_id=payload.target_id, amount=amount, status="pending")
+    db.add(tx)
+    _activate_purchase(db, tx, current_user)
+    return {"status": "done", "billing": _billing_snapshot(db, current_user)}
+
+
+@app.get("/api/billing/transactions/{transaction_id}")
+async def billing_transaction_status(transaction_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    import asyncio
+    tx = db.query(BillingTransaction).filter(BillingTransaction.id == transaction_id, BillingTransaction.user_id == current_user.id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction introuvable")
+    if tx.status == "pending" and tx.provider_intent_id:
+        result = await asyncio.to_thread(_yengapay_call, "GET", f"/groups/{YENGAPAY_ORGANIZATION_ID}/payment-intent/project/{YENGAPAY_PROJECT_ID}/intent/{tx.provider_intent_id}")
+        if str(result.get("transactionStatus", "")).upper() == "DONE":
+            tx.provider_payload_json = json.dumps(result, ensure_ascii=False)
+            _activate_purchase(db, tx, current_user)
+        elif str(result.get("transactionStatus", "")).upper() == "FAILED":
+            tx.status = "failed"
+            db.commit()
+    return {"status": tx.status, "billing": _billing_snapshot(db, current_user)}
+
+
+@app.post("/api/v1/webhooks/yengapay")
+async def yengapay_webhook(request: Request, db: Session = Depends(get_db)):
+    import asyncio
+    payload = await request.json()
+    reference = str(payload.get("reference") or "")
+    tx = db.query(BillingTransaction).filter(BillingTransaction.reference == reference).first()
+    if not tx:
+        return {"received": True}
+    if tx.status == "done":
+        return {"received": True}
+    received_amount = int(payload.get("paymentAmount") or 0)
+    received_fees = int(payload.get("paymentFees") or 0)
+    amount_matches = received_amount == tx.amount or (received_amount + received_fees) == tx.amount
+    if str(payload.get("projectId") or "") != YENGAPAY_PROJECT_ID or not amount_matches:
+        raise HTTPException(status_code=400, detail="Notification de paiement invalide")
+    verified = await asyncio.to_thread(_yengapay_call, "GET", f"/groups/{YENGAPAY_ORGANIZATION_ID}/payment-intent/project/{YENGAPAY_PROJECT_ID}/intent/{tx.provider_intent_id}")
+    if str(verified.get("transactionStatus", "")).upper() == "DONE":
+        user = db.query(User).filter(User.id == tx.user_id).first()
+        if user:
+            tx.provider_payload_json = json.dumps(payload, ensure_ascii=False)
+            _activate_purchase(db, tx, user)
+    return {"received": True}
+
+
 def get_current_expert(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
@@ -4818,6 +5114,37 @@ def get_current_admin_expert(
     if (getattr(current_expert, "role", "expert") or "expert").lower() != "admin":
         raise HTTPException(status_code=403, detail="Accès administrateur requis")
     return current_expert
+
+
+@app.get("/api/admin/billing")
+async def admin_billing_dashboard(
+    current_admin: Expert = Depends(get_current_admin_expert),
+    db: Session = Depends(get_db),
+):
+    del current_admin
+    transactions = db.query(BillingTransaction).order_by(BillingTransaction.created_at.desc()).limit(300).all()
+    paid = [item for item in transactions if item.status == "done"]
+    active_subscribers = db.query(User).filter(User.subscription_expires_at > datetime.utcnow()).count()
+    return {
+        "status": "success",
+        "summary": {
+            "revenue_xof": sum(item.amount for item in paid if item.provider == "yengapay"),
+            "paid_transactions": len(paid),
+            "pending_transactions": sum(1 for item in transactions if item.status == "pending"),
+            "active_subscribers": active_subscribers,
+        },
+        "transactions": [{
+            "id": item.id,
+            "reference": item.reference,
+            "user_id": item.user_id,
+            "kind": item.kind,
+            "amount": item.amount,
+            "provider": item.provider,
+            "status": item.status,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "paid_at": item.paid_at.isoformat() if item.paid_at else None,
+        } for item in transactions],
+    }
 
 
 def get_current_user_or_expert(
@@ -6453,6 +6780,7 @@ async def create_mobile_question(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _require_resource(db, current_user, "tickets")
     message_data = MessageCreate(
         content=data.content,
         phone_number=current_user.phone_number,
@@ -6463,12 +6791,15 @@ async def create_mobile_question(
         conversation_context=data.conversation_context,
         target_lang=data.target_lang,
     )
-    return await incoming_sms(message_data, db)
+    result = await incoming_sms(message_data, db)
+    _consume_resource(db, current_user, "tickets", "mobile_question")
+    return result
 
 
 @app.post("/api/expert-escalations")
 async def create_fast_expert_escalation(
     data: MessageCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Crée immédiatement un ticket depuis une fiche déjà analysée.
@@ -6476,11 +6807,8 @@ async def create_fast_expert_escalation(
     Aucun second passage Vision/RAG n'est nécessaire : le résumé de la fiche
     est transmis tel quel à l'expert, ce qui rend l'envoi quasi immédiat.
     """
-    user = db.query(User).filter(User.phone_number == data.phone_number).first()
-    if not user:
-        user = User(phone_number=data.phone_number)
-        db.add(user)
-        db.flush()
+    _require_resource(db, current_user, "tickets")
+    user = current_user
 
     photo_path = None
     photo_paths: List[str] = []
@@ -6526,6 +6854,7 @@ async def create_fast_expert_escalation(
     ))
     db.commit()
     db.refresh(ticket)
+    _consume_resource(db, current_user, "tickets", "expert_escalation")
     return {
         "status": "success",
         "ticket_id": ticket.id,
@@ -8948,20 +9277,40 @@ async def translate_localization_payload(
     }
 
 
-def _serialize_academy_course(course: AcademyCourseDB) -> Dict[str, Any]:
-    return {
+def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = True, access: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    result = {
         "id": course.id,
         "title": course.title,
         "course_type": course.course_type or "culture",
         "crop": course.crop,
         "summary": course.summary,
         "cover_url": _build_upload_url(course.cover_url) if course.cover_url and not str(course.cover_url).startswith("http") else course.cover_url,
-        "steps": _load_json_list(course.steps_json),
-        "audio": _normalize_expert_local_audio(_load_json_dict(course.audio_json)),
+        "lesson_count": len(_load_json_list(course.steps_json)),
         "status": course.status or "published",
         "created_at": course.created_at.isoformat() if course.created_at else None,
         "updated_at": course.updated_at.isoformat() if course.updated_at else None,
     }
+    if include_content:
+        result["steps"] = _load_json_list(course.steps_json)
+        result["audio"] = _normalize_expert_local_audio(_load_json_dict(course.audio_json))
+    if access:
+        result["access"] = access
+    return result
+
+
+def _course_access_status(db: Session, user: User, course_id: int) -> Dict[str, Any]:
+    existing = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == user.id, CourseAccessDB.course_id == course_id).first()
+    if existing and (existing.permanent or existing.period_key == (user.subscription_started_at.isoformat() if user.subscription_started_at else None)):
+        return {"allowed": True, "source": existing.source}
+    plan, offer = _active_offer(user)
+    if offer and int(offer["courses"]) == -1:
+        return {"allowed": True, "source": plan}
+    if offer:
+        period_key = user.subscription_started_at.isoformat() if user.subscription_started_at else plan
+        used = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == user.id, CourseAccessDB.period_key == period_key).count()
+        return {"allowed": used < int(offer["courses"]), "source": plan, "remaining": max(0, int(offer["courses"]) - used)}
+    free_used = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == user.id, CourseAccessDB.source == "free").count()
+    return {"allowed": free_used < 1, "source": "free", "remaining": max(0, 1 - free_used)}
 
 
 def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
@@ -8987,9 +9336,27 @@ def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, A
 
 
 @app.get("/api/academy/courses")
-async def list_public_academy_courses(db: Session = Depends(get_db)):
+async def list_public_academy_courses(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     courses = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published").order_by(AcademyCourseDB.updated_at.desc()).all()
-    return {"status": "success", "courses": [_serialize_academy_course(course) for course in courses]}
+    return {"status": "success", "courses": [_serialize_academy_course(course, include_content=False, access=_course_access_status(db, current_user, course.id)) for course in courses]}
+
+
+@app.post("/api/academy/courses/{course_id}/access")
+async def access_academy_course(course_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id, AcademyCourseDB.status == "published").first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Cours introuvable")
+    access = _course_access_status(db, current_user, course_id)
+    if not access.get("allowed"):
+        raise HTTPException(status_code=402, detail="Votre accès aux cours est épuisé. Achetez ce cours à 100 F ou choisissez un abonnement.")
+    existing = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == current_user.id, CourseAccessDB.course_id == course_id).first()
+    plan, offer = _active_offer(current_user)
+    if not existing and not (offer and int(offer["courses"]) == -1):
+        source = plan or "free"
+        period_key = current_user.subscription_started_at.isoformat() if plan and current_user.subscription_started_at else None
+        db.add(CourseAccessDB(user_id=current_user.id, course_id=course_id, source=source, period_key=period_key, permanent=(source == "free")))
+        db.commit()
+    return {"status": "success", "course": _serialize_academy_course(course, include_content=True, access={"allowed": True, "source": access.get("source")})}
 
 
 @app.get("/api/admin/academy/courses")
@@ -11915,6 +12282,7 @@ async def v2_scanner_analyze(
     db: Session = Depends(get_db),
 ):
     """Scanner v2 : au moins 1 photo requise"""
+    _require_resource(db, current_user, "analyses")
     text = data.text or data.content or ""
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
@@ -11977,6 +12345,7 @@ async def v2_scanner_analyze(
     # Pas de traduction : voix Studio si disponible, sinon proposition FR.
     voice_payload = None
 
+    _consume_resource(db, current_user, "analyses", "v2_scanner")
     return {
         "status": "success",
         **final_response,
@@ -11996,6 +12365,7 @@ async def v2_assistant_query(
     db: Session = Depends(get_db),
 ):
     """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
+    _require_resource(db, current_user, "analyses")
     text = data.text or data.content or ""
     category = _normalize_category(data.category)
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
@@ -12040,6 +12410,7 @@ async def v2_assistant_query(
     # Pas de traduction : voix Studio si disponible, sinon proposition FR.
     voice_payload = None
 
+    _consume_resource(db, current_user, "analyses", "v2_assistant")
     return {
         "status": "success",
         **final_response,
