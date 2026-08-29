@@ -6572,6 +6572,96 @@ async def health_check():
     }
 
 
+PRIVACY_POLICY_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Politique de confidentialité — Songra</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; color: #1f2a24; line-height: 1.6; background: #fbfaf7; }
+  h1 { color: #1f6f4a; font-size: 1.6rem; margin-bottom: 4px; }
+  h2 { color: #1f6f4a; font-size: 1.15rem; margin-top: 2.2rem; }
+  .updated { color: #6b7a72; font-size: 0.9rem; margin-bottom: 2rem; }
+  ul { padding-left: 1.2rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: #1f6f4a; }
+  .contact { background: #eef6f0; border-radius: 10px; padding: 16px 20px; margin-top: 1.5rem; }
+  footer { margin-top: 3rem; font-size: 0.85rem; color: #8a978f; }
+</style>
+</head>
+<body>
+<h1>Politique de confidentialité — Songra</h1>
+<p class="updated">Dernière mise à jour : 29 août 2026</p>
+
+<p>Songra ("l'application", "nous") est développée et exploitée par ComstratMedia / Yingr-AI.
+Cette politique explique quelles données l'application collecte, pourquoi, et comment elles sont
+protégées lorsque vous utilisez Songra.</p>
+
+<h2>1. Données que nous collectons</h2>
+<ul>
+  <li><strong>Numéro de téléphone</strong> : utilisé pour créer et sécuriser votre compte.</li>
+  <li><strong>Photos</strong> (accès caméra) : lorsque vous utilisez le scanner de diagnostic, les
+      photos que vous prenez sont analysées pour vous fournir un diagnostic agricole ou d'élevage.</li>
+  <li><strong>Localisation</strong> (position approximative ou précise) : utilisée uniquement pour
+      les fonctionnalités de géolocalisation, notamment le bouton SOS, afin de vous mettre en
+      relation avec l'aide la plus proche.</li>
+  <li><strong>Audio / voix</strong> (accès microphone) : utilisé pour l'assistant vocal et la
+      reconnaissance vocale lorsque vous choisissez d'interagir par la voix.</li>
+  <li><strong>Historique d'utilisation</strong> : vos diagnostics, parcelles et conversations avec
+      l'assistant sont enregistrés dans votre compte pour vous permettre d'y revenir.</li>
+  <li><strong>Notifications</strong> : utilisées pour vous envoyer des alertes et rappels liés à
+      vos parcelles et à vos diagnostics.</li>
+</ul>
+
+<h2>2. Comment nous utilisons vos données</h2>
+<ul>
+  <li>Fournir un diagnostic agricole/élevage à partir de vos photos et de vos questions.</li>
+  <li>Vous permettre de retrouver l'historique de vos diagnostics et parcelles.</li>
+  <li>Vous localiser en cas d'urgence (fonction SOS), avec votre consentement.</li>
+  <li>Améliorer la qualité des réponses de l'assistant.</li>
+</ul>
+
+<h2>3. Partage des données</h2>
+<p>Vos photos et messages peuvent être transmis à des services d'intelligence artificielle
+tiers (traitement d'image et de langage) dans le seul but de générer votre diagnostic ou la
+réponse de l'assistant. Ces prestataires ne sont pas autorisés à utiliser vos données à d'autres
+fins. Nous ne vendons pas vos données personnelles.</p>
+
+<h2>4. Conservation et sécurité</h2>
+<p>Vos données sont conservées tant que votre compte est actif, sur des serveurs sécurisés.
+Nous appliquons des mesures raisonnables (chiffrement des communications, accès restreint) pour
+protéger vos informations contre l'accès non autorisé.</p>
+
+<h2>5. Vos droits</h2>
+<p>Vous pouvez à tout moment demander l'accès, la correction ou la suppression de vos données
+personnelles, ou la suppression complète de votre compte, en nous contactant (coordonnées
+ci-dessous).</p>
+
+<h2>6. Public concerné</h2>
+<p>Songra s'adresse à un public général et n'est pas spécifiquement conçue pour les enfants.
+Nous ne collectons pas sciemment de données auprès d'enfants sans le consentement d'un parent
+ou tuteur.</p>
+
+<h2>7. Modifications de cette politique</h2>
+<p>Cette politique peut être mise à jour occasionnellement. La date de dernière mise à jour est
+indiquée en haut de cette page.</p>
+
+<div class="contact">
+  <strong>Contact</strong><br>
+  Pour toute question ou demande relative à vos données&nbsp;: <a href="mailto:expertmedia@comstratmedia.com">expertmedia@comstratmedia.com</a>
+</div>
+
+<footer>Songra — ComstratMedia / Yingr-AI</footer>
+</body>
+</html>"""
+
+
+@app.get("/privacy-policy", response_class=HTMLResponse)
+async def privacy_policy():
+    return PRIVACY_POLICY_HTML
+
+
 @app.post("/api/auth/phone/start")
 async def start_phone_auth(data: PhoneAuthStartIn, db: Session = Depends(get_db)):
     phone = _normalize_bf_phone(data.phone_number)
