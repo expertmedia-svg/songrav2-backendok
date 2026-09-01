@@ -555,6 +555,7 @@ class AcademyCourseDB(Base):
     audio_json = Column(Text, nullable=True)
     status = Column(String, default="published")
     created_by = Column(Integer, nullable=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -766,6 +767,19 @@ def _ensure_expert_profile_columns() -> None:
 
 
 _ensure_expert_profile_columns()
+
+
+def _ensure_academy_organization_column() -> None:
+    """Relie chaque cours a la communaute de l'expert qui l'a publie."""
+    try:
+        with engine.connect() as conn:
+            _add_column_if_missing(conn, "academy_courses", "organization_id", "INTEGER", "INTEGER")
+            conn.commit()
+    except Exception as e:
+        print(f"[WARN] Impossible d'ajouter organization_id aux cours: {e}")
+
+
+_ensure_academy_organization_column()
 
 
 def _ensure_media_column_for_knowledge_items() -> None:
@@ -988,6 +1002,15 @@ class PhoneOtpVerifyIn(BaseModel):
 class PhonePinLoginIn(BaseModel):
     phone_number: str
     pin: str
+
+
+class AccountDeleteRequestIn(BaseModel):
+    phone_number: str
+
+
+class AccountDeleteConfirmIn(BaseModel):
+    phone_number: str
+    code: str
 
 
 # ==========================================
@@ -4398,13 +4421,17 @@ class AITriageEngine:
         }
         
         self.category_keywords = {
-            "agriculture": ["maïs", "sorgho", "mil", "culture", "plante", "champ", "récolte", 
-                          "irrigation", "tomate", "oignon", "arachide", "coton",
+            "agriculture": ["maïs", "sorgho", "mil", "culture", "plante", "champ", "récolte",
+                          "irrigation", "tomate", "oignon", "arachide", "coton", "semis", "semer",
+                          "planter", "repiquer", "rendement", "production", "compost", "fumure",
+                          "saison des pluies", "calendrier cultural", "récolter", "conserver",
                           "manioc", "riz", "feuille", "insecte", "parasite", "engrais"],
             # Catégorie élevage : animaux, bétail, poules…
             "elevage": ["bétail", "vache", "boeuf", "chèvre", "mouton", "poules", "volaille",
                         "lapin", "lapereau", "clapier",
-                        "agneau", "veau", "animal", "troupeau", "abri", "vermifuge", "parasites"],
+                        "agneau", "veau", "animal", "troupeau", "abri", "vermifuge", "parasites",
+                        "nourrir", "alimentation animale", "ration", "fourrage", "reproduction",
+                        "engraissement", "ponte", "pâturage", "paturage", "élevage"],
             # Catégorie SOS Accident / premiers soins : on garde le domaine health pour le RAG
             "sos_accident": ["blessure", "coupure", "accident", "saigne", "sang", "brûlure",
                               "tomber", "chute", "fracture", "douleur", "secours"],
@@ -4413,12 +4440,12 @@ class AITriageEngine:
         }
     
     def classify(self, text: str):
-        text_lower = text.lower()
+        text_lower = _normalize_free_text(text)
         
         # Catégorie
         category_scores = {}
         for cat, keywords in self.category_keywords.items():
-            score = sum(1 for kw in keywords if kw in text_lower)
+            score = sum(1 for kw in keywords if _normalize_free_text(kw) in text_lower)
             category_scores[cat] = score
         
         category = max(category_scores, key=category_scores.get) if any(category_scores.values()) else "agriculture"
@@ -4433,12 +4460,34 @@ class AITriageEngine:
         
         keywords = [word for word in text_lower.split() if len(word) > 3][:5]
         
+        intent = detect_rural_question_intent(text, category)
         return {
             "category": category,
+            "question_intent": intent,
             "urgency": urgency,
             "confidence": float(confidence),
             "keywords": keywords
         }
+
+
+def detect_rural_question_intent(text: str, category: str) -> str:
+    """Distingue maladie, technique et conseil general sans appel reseau."""
+    normalized = _normalize_free_text(text)
+    disease_terms = {
+        "maladie", "malade", "tache", "jaunit", "fletrit", "pourrit", "fievre",
+        "diarrhee", "plaie", "parasite", "tique", "toux", "mortalite", "meurt",
+    }
+    technique_terms = {
+        "comment semer", "quand semer", "semer", "planter", "repiquer", "preparer le sol",
+        "compost", "fumure", "irrigation", "rendement", "ameliorer la production",
+        "conserver", "recolter", "nourrir", "ration", "fourrage", "engraissement",
+        "reproduction", "abri", "elevage", "technique", "calendrier",
+    }
+    if any(term in normalized for term in disease_terms):
+        return "plant_disease" if category == "agriculture" else "animal_disease" if category == "elevage" else "incident"
+    if category in {"agriculture", "elevage"} and any(term in normalized for term in technique_terms):
+        return "agricultural_technique" if category == "agriculture" else "livestock_technique"
+    return "general_advice"
 
 ai_engine = AITriageEngine()
 
@@ -6189,16 +6238,12 @@ def resolve_knowledge_answer(
     limit: int = 5,
     focus_context: Optional[Dict[str, Any]] = None,
     photo_analysis: Optional[Dict[str, Any]] = None,
+    organization_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Répondre d'abord depuis une fiche validée du Studio de connaissances.
-
-    Stratégie ACTUELLE :
-    1. OpenAI / LLM général en PREMIER (analyse directe par l'IA)
-    2. Fallback RAG : fiches locales si OpenAI échoue ou est indisponible
-    3. Fallback ultime : réponse générique "Je ne sais pas"
-
-    📷 Le diagnostic photo (si disponible) est passé au LLM pour enrichir la réponse.
-    """
+    """Fiches locales, puis cours pratique, puis connaissance IA generale."""
+    course_match = _find_academy_course_match(
+        db, question, domain=domain, organization_id=organization_id
+    )
     studio_match = _find_studio_knowledge_match(
         db,
         category=domain,
@@ -6213,6 +6258,35 @@ def resolve_knowledge_answer(
             "knowledge_mode": "studio_knowledge",
             "knowledge_fallback_used": False,
             "studio_match": studio_match,
+            "recommended_course": course_match,
+        }
+
+    rag_items = retrieve_knowledge(
+        db,
+        domain,
+        question,
+        limit=limit + 3,
+        expand_scope=False,
+        focus_subject=(focus_context or {}).get("subject"),
+        focus_issue=(focus_context or {}).get("issue"),
+    )
+    if rag_items:
+        llm_answer = generate_llm_answer(
+            question=question,
+            language=language,
+            domain=domain,
+            knowledge_items=rag_items,
+            conversation_context=conversation_context,
+            focus_context=focus_context,
+            photo_analysis=photo_analysis,
+        )
+        return {
+            "rag_items": rag_items,
+            "llm_answer": llm_answer,
+            "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
+            "knowledge_mode": "rag_strict",
+            "knowledge_fallback_used": False,
+            "recommended_course": course_match,
         }
 
     # Aucune fiche Studio assez proche : analyse générale en repli.
@@ -6253,35 +6327,7 @@ def resolve_knowledge_answer(
             "rag_fallback_answer": None,
             "knowledge_mode": "llm_general_knowledge",
             "knowledge_fallback_used": False,
-        }
-
-    # ÉTAPE 2 : Fallback RAG - fiches locales si OpenAI indisponible
-    rag_items = retrieve_knowledge(
-        db,
-        domain,
-        question,
-        limit=limit + 3,
-        expand_scope=False,
-        focus_subject=(focus_context or {}).get("subject"),
-        focus_issue=(focus_context or {}).get("issue"),
-    )
-
-    if rag_items:
-        llm_answer = generate_llm_answer(
-            question=question,
-            language=language,
-            domain=domain,
-            knowledge_items=rag_items,
-            conversation_context=conversation_context,
-            focus_context=focus_context,
-            photo_analysis=photo_analysis,
-        )
-        return {
-            "rag_items": rag_items,
-            "llm_answer": llm_answer,
-            "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
-            "knowledge_mode": "rag_strict",
-            "knowledge_fallback_used": True,
+            "recommended_course": course_match,
         }
 
     # ÉTAPE 3 : Fallback ultime - aucune source d'info disponible
@@ -6291,6 +6337,7 @@ def resolve_knowledge_answer(
         "rag_fallback_answer": _build_precise_no_match_answer(domain, focus_context),
         "knowledge_mode": "no_match",
         "knowledge_fallback_used": False,
+        "recommended_course": course_match,
     }
 
 
@@ -6633,10 +6680,11 @@ fins. Nous ne vendons pas vos données personnelles.</p>
 Nous appliquons des mesures raisonnables (chiffrement des communications, accès restreint) pour
 protéger vos informations contre l'accès non autorisé.</p>
 
-<h2>5. Vos droits</h2>
+<h2>5. Vos droits et suppression de compte</h2>
 <p>Vous pouvez à tout moment demander l'accès, la correction ou la suppression de vos données
-personnelles, ou la suppression complète de votre compte, en nous contactant (coordonnées
-ci-dessous).</p>
+personnelles. Pour supprimer définitivement votre compte et vos données, rendez-vous sur
+<a href="/account-deletion">songraback.yingr-ai.com/account-deletion</a> (aucune réinstallation
+de l'application n'est nécessaire), ou contactez-nous directement (coordonnées ci-dessous).</p>
 
 <h2>6. Public concerné</h2>
 <p>Songra s'adresse à un public général et n'est pas spécifiquement conçue pour les enfants.
@@ -6660,6 +6708,128 @@ indiquée en haut de cette page.</p>
 @app.get("/privacy-policy", response_class=HTMLResponse)
 async def privacy_policy():
     return PRIVACY_POLICY_HTML
+
+
+ACCOUNT_DELETION_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Supprimer mon compte — Songra</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 20px 80px; color: #1f2a24; line-height: 1.6; background: #fbfaf7; }
+  h1 { color: #1f6f4a; font-size: 1.5rem; margin-bottom: 4px; }
+  h2 { color: #1f6f4a; font-size: 1.05rem; margin-top: 2rem; }
+  ul { padding-left: 1.2rem; }
+  li { margin-bottom: 0.4rem; }
+  .card { background: #fff; border: 1px solid #e2e8e3; border-radius: 12px; padding: 20px; margin-top: 1.2rem; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.9rem; }
+  input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #cfd8d2; border-radius: 8px; font-size: 1rem; margin-bottom: 14px; }
+  button { background: #c0392b; color: #fff; border: none; border-radius: 8px; padding: 11px 18px; font-size: 0.95rem; font-weight: 600; cursor: pointer; width: 100%; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  button.secondary { background: #1f6f4a; margin-top: 8px; }
+  #msg { margin-top: 14px; font-size: 0.9rem; padding: 10px 12px; border-radius: 8px; display: none; }
+  #msg.ok { background: #eaf7ee; color: #1f6f4a; display: block; }
+  #msg.err { background: #fdecea; color: #b3261e; display: block; }
+  .contact { background: #eef6f0; border-radius: 10px; padding: 16px 20px; margin-top: 1.5rem; font-size: 0.92rem; }
+  a { color: #1f6f4a; }
+</style>
+</head>
+<body>
+<h1>Supprimer mon compte Songra</h1>
+
+<p>Cette page permet de demander la suppression définitive de votre compte Songra et de vos
+données personnelles, même si vous n'avez plus l'application installée.</p>
+
+<h2>Ce qui est supprimé</h2>
+<ul>
+  <li>Numéro de téléphone, nom, localisation et code PIN</li>
+  <li>Accès au compte (désactivation immédiate)</li>
+  <li>Statut d'abonnement / solde du portefeuille interne</li>
+</ul>
+<p>Certaines données non identifiantes (statistiques agrégées) ou des enregistrements financiers
+requis par la réglementation comptable applicable peuvent être conservés sous forme anonymisée,
+sans lien possible avec votre identité.</p>
+
+<h2>Suppression en 2 étapes</h2>
+<div class="card">
+  <label for="phone">Numéro de téléphone du compte</label>
+  <input type="tel" id="phone" placeholder="+226 70 00 00 17" autocomplete="tel">
+  <button id="sendBtn" onclick="sendCode()">Recevoir un code de confirmation par SMS</button>
+
+  <div id="step2" style="display:none; margin-top:18px;">
+    <label for="code">Code reçu par SMS</label>
+    <input type="text" id="code" placeholder="123456" inputmode="numeric" maxlength="6">
+    <button class="secondary" id="confirmBtn" onclick="confirmDelete()">Confirmer la suppression définitive</button>
+  </div>
+
+  <div id="msg"></div>
+</div>
+
+<div class="contact">
+  Vous préférez qu'on s'en charge pour vous, ou vous n'avez plus accès à ce numéro&nbsp;?
+  Écrivez à <a href="mailto:expertmedia@comstratmedia.com">expertmedia@comstratmedia.com</a>
+  depuis l'adresse liée à votre compte, votre demande sera traitée sous 30 jours.
+</div>
+
+<script>
+function showMsg(text, ok) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = ok ? 'ok' : 'err';
+}
+async function sendCode() {
+  const phone = document.getElementById('phone').value.trim();
+  if (!phone) { showMsg('Indiquez un numéro de téléphone.', false); return; }
+  document.getElementById('sendBtn').disabled = true;
+  try {
+    const res = await fetch('/api/account/delete-request', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phone_number: phone})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Erreur');
+    if (data.sent) {
+      document.getElementById('step2').style.display = 'block';
+      showMsg(data.message, true);
+    } else {
+      showMsg(data.message, false);
+    }
+  } catch (e) {
+    showMsg(e.message || 'Une erreur est survenue.', false);
+  } finally {
+    document.getElementById('sendBtn').disabled = false;
+  }
+}
+async function confirmDelete() {
+  const phone = document.getElementById('phone').value.trim();
+  const code = document.getElementById('code').value.trim();
+  if (!code) { showMsg('Saisissez le code reçu par SMS.', false); return; }
+  document.getElementById('confirmBtn').disabled = true;
+  try {
+    const res = await fetch('/api/account/delete-confirm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phone_number: phone, code: code})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Erreur');
+    showMsg(data.message, true);
+    document.getElementById('step2').style.display = 'none';
+    document.getElementById('sendBtn').style.display = 'none';
+  } catch (e) {
+    showMsg(e.message || 'Une erreur est survenue.', false);
+  } finally {
+    document.getElementById('confirmBtn').disabled = false;
+  }
+}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/account-deletion", response_class=HTMLResponse)
+async def account_deletion_page():
+    return ACCOUNT_DELETION_HTML
 
 
 @app.post("/api/auth/phone/start")
@@ -6771,6 +6941,117 @@ async def verify_phone_otp(data: PhoneOtpVerifyIn, db: Session = Depends(get_db)
     db.commit()
     db.refresh(user)
     return {"token": create_access_token(user), "user": serialize_user(user)}
+
+
+@app.post("/api/account/delete-request")
+async def request_account_deletion(data: AccountDeleteRequestIn, db: Session = Depends(get_db)):
+    """Étape 1 de la suppression de compte en libre-service (web ou app) :
+    envoie un code SMS de confirmation au numéro du compte à supprimer.
+    Requis par la politique Google Play sur la suppression de compte."""
+    phone = _normalize_bf_phone(data.phone_number)
+    user = db.query(User).filter(User.phone_number == phone, User.is_anonymized.is_(False)).first()
+    if not user:
+        return {
+            "sent": False,
+            "account_exists": False,
+            "message": "Aucun compte actif trouvé pour ce numéro. Si vous pensez qu'il s'agit "
+                       "d'une erreur, contactez expertmedia@comstratmedia.com.",
+        }
+
+    now = datetime.utcnow()
+    recent = (
+        db.query(PhoneOtpDB)
+        .filter(
+            PhoneOtpDB.phone_number == phone,
+            PhoneOtpDB.purpose == "account_deletion",
+            PhoneOtpDB.created_at >= now - timedelta(minutes=1),
+        )
+        .count()
+    )
+    if recent >= 1:
+        raise HTTPException(status_code=429, detail="Patientez une minute avant de redemander un code")
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    otp = PhoneOtpDB(
+        phone_number=phone,
+        code_hash=hash_password(code),
+        purpose="account_deletion",
+        expires_at=now + timedelta(minutes=5),
+    )
+    db.add(otp)
+    db.commit()
+    try:
+        _send_auth_otp_sms(phone, code)
+    except Exception:
+        db.delete(otp)
+        db.commit()
+        raise
+
+    response_payload: Dict[str, Any] = {
+        "sent": True,
+        "account_exists": True,
+        "expires_in_seconds": 300,
+        "message": "Un code à 6 chiffres vient d'être envoyé par SMS pour confirmer la suppression.",
+    }
+    if _otp_dev_mode_enabled():
+        response_payload["debug_otp"] = code
+        response_payload["message"] = f"Mode test (SMS temporairement désactivé) : votre code est {code}."
+    return response_payload
+
+
+@app.post("/api/account/delete-confirm")
+async def confirm_account_deletion(data: AccountDeleteConfirmIn, db: Session = Depends(get_db)):
+    """Étape 2 : vérifie le code SMS puis supprime/anonymise définitivement le compte."""
+    phone = _normalize_bf_phone(data.phone_number)
+    now = datetime.utcnow()
+    otp = (
+        db.query(PhoneOtpDB)
+        .filter(
+            PhoneOtpDB.phone_number == phone,
+            PhoneOtpDB.purpose == "account_deletion",
+            PhoneOtpDB.consumed_at.is_(None),
+        )
+        .order_by(PhoneOtpDB.created_at.desc())
+        .first()
+    )
+    if not otp or otp.expires_at < now:
+        raise HTTPException(status_code=401, detail="Code expiré. Demandez un nouveau code")
+    if otp.attempts >= 5:
+        raise HTTPException(status_code=429, detail="Trop d'essais. Demandez un nouveau code")
+    if not secrets.compare_digest(otp.code_hash, hash_password((data.code or "").strip())):
+        otp.attempts += 1
+        db.commit()
+        raise HTTPException(status_code=401, detail="Code incorrect")
+
+    user = db.query(User).filter(User.phone_number == phone).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Compte introuvable")
+
+    # Suppression immédiate des données personnelles identifiantes.
+    # Le compte est anonymisé et désactivé plutôt que la ligne supprimée en base
+    # pour préserver l'intégrité des enregistrements liés (facturation, historique
+    # agrégé) — conformément à la politique de confidentialité publiée. Les
+    # enregistrements financiers peuvent être conservés, sous forme anonymisée,
+    # le temps exigé par la réglementation comptable applicable.
+    user.phone_number = f"deleted-{secrets.token_hex(8)}"
+    user.name = None
+    user.location = None
+    user.organization = None
+    user.organization_id = None
+    user.password_hash = None
+    user.is_active = False
+    user.is_anonymized = True
+    user.is_premium = False
+    user.subscription_plan = None
+    user.wallet_balance = 0
+
+    otp.consumed_at = now
+    db.commit()
+
+    return {
+        "deleted": True,
+        "message": "Votre compte et vos données personnelles ont été supprimés.",
+    }
 
 
 @app.post("/api/auth/pin-login")
@@ -7711,6 +7992,7 @@ Appelez les secours pendant que vous effectuez ces gestes
         language="fr",
         focus_context=focus_context,
         photo_analysis=photo_analysis_payload,
+        organization_id=getattr(user, "organization_id", None),
     )
     rag_items = knowledge_result["rag_items"]
     llm_answer = knowledge_result["llm_answer"]
@@ -7797,6 +8079,7 @@ Appelez les secours pendant que vous effectuez ces gestes
         "ai_analysis": ai_result,
         "knowledge_mode": knowledge_result["knowledge_mode"],
         "knowledge_fallback_used": knowledge_result["knowledge_fallback_used"],
+        "recommended_course": knowledge_result.get("recommended_course"),
     }
     
     # Ajouter l'analyse photo si disponible
@@ -7952,9 +8235,16 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     # 2. Déterminer la catégorie finale et le domaine RAG
     nlp_category = ai_result.get("category", "agriculture")
     allowed_categories = {"agriculture", "elevage", "sos_accident", "cybersecurity"}
-    chosen_category = data.category if data.category in allowed_categories else nlp_category
+    # La categorie de l'ecran n'est qu'un indice. Un texte clairement classe
+    # agriculture/elevage doit etre dirige vers le bon corpus automatiquement.
+    chosen_category = (
+        nlp_category if ai_result.get("confidence", 0) > 0
+        else data.category if data.category in allowed_categories
+        else nlp_category
+    )
     ai_result["classifier_category"] = nlp_category
     ai_result["category"] = chosen_category
+    ai_result["question_intent"] = detect_rural_question_intent(search_query_fr, chosen_category)
 
     if chosen_category == "agriculture":
         kb_domain = "agriculture"
@@ -8007,6 +8297,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
 
     # Les recherches utilisateur consultent le Studio, pas l'historique des tickets.
     reusable_entry = None
+    requesting_user = db.query(User).filter(User.phone_number == data.phone_number).first()
     knowledge_result = resolve_knowledge_answer(
         db=db,
         domain=kb_domain,
@@ -8015,6 +8306,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         conversation_context=conversation_context,
         focus_context=focus_context,
         photo_analysis=photo_analysis,
+        organization_id=getattr(requesting_user, "organization_id", None),
     )
     rag_items = knowledge_result["rag_items"]
     llm_answer = _clean_assistant_text(knowledge_result["llm_answer"])
@@ -8104,6 +8396,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
         # LLM général ou du RAG élargi).
         "knowledge_fiche_id": studio_match_info.get("id") if studio_match_info else None,
         "knowledge_fiche_title": studio_match_info.get("title") if studio_match_info else None,
+        "recommended_course": knowledge_result.get("recommended_course"),
     }
 
     if photo_analysis is not None:
@@ -8998,6 +9291,9 @@ async def create_broadcast(
     current_expert: Expert = Depends(get_current_expert),
 ):
     """Crée une nouvelle diffusion communautaire (Journal Vocal)."""
+    if ((current_expert.role or "expert").lower() != "admin"
+            and current_expert.organization_id is None):
+        raise HTTPException(status_code=403, detail="Affectez d'abord cet expert a une ONG")
     language_aliases = {
         "fr": "fr", "francais": "fr", "français": "fr",
         "moore": "moore", "mooré": "moore",
@@ -9061,14 +9357,21 @@ async def create_broadcast(
     return {"status": "success", "broadcast": new_entry}
 
 @app.get("/api/community/broadcasts")
-async def get_broadcasts():
-    """Récupère les dernières diffusions pour l'app mobile."""
+async def get_broadcasts(current_user: Any = Depends(get_current_user_or_expert)):
+    """Retourne uniquement la radio de l'ONG du paysan."""
     db_path = os.path.join(BACKEND_DIR, "broadcasts.json")
     if not os.path.exists(db_path):
         return []
     try:
         with open(db_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            broadcasts = json.load(f)
+            if isinstance(current_user, Expert) and (current_user.role or "expert").lower() == "admin":
+                return broadcasts
+            organization_id = getattr(current_user, "organization_id", None)
+            return [
+                item for item in broadcasts
+                if item.get("organization_id") == organization_id
+            ]
     except:
         return []
 # 
@@ -9493,6 +9796,7 @@ def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = T
         "cover_url": _build_upload_url(course.cover_url) if course.cover_url and not str(course.cover_url).startswith("http") else course.cover_url,
         "lesson_count": len(_load_json_list(course.steps_json)),
         "status": course.status or "published",
+        "organization_id": course.organization_id,
         "created_at": course.created_at.isoformat() if course.created_at else None,
         "updated_at": course.updated_at.isoformat() if course.updated_at else None,
     }
@@ -9501,6 +9805,42 @@ def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = T
         result["audio"] = _normalize_expert_local_audio(_load_json_dict(course.audio_json))
     if access:
         result["access"] = access
+    return result
+
+
+def _scope_courses_for_user(query: Any, user: User) -> Any:
+    organization_id = getattr(user, "organization_id", None)
+    if organization_id is None:
+        return query.filter(AcademyCourseDB.organization_id.is_(None))
+    return query.filter(AcademyCourseDB.organization_id == organization_id)
+
+
+def _find_academy_course_match(
+    db: Session, question: str, *, domain: str, organization_id: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    if domain not in {"agriculture", "elevage"}:
+        return None
+    query = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published")
+    if organization_id is None:
+        query = query.filter(AcademyCourseDB.organization_id.is_(None))
+    else:
+        query = query.filter(AcademyCourseDB.organization_id == organization_id)
+    query_tokens = set(_tokenize(question))
+    best: Optional[Tuple[float, AcademyCourseDB]] = None
+    for course in query.all():
+        searchable = " ".join([
+            course.title or "", course.crop or "", course.summary or "",
+            json.dumps(_load_json_list(course.steps_json), ensure_ascii=False),
+        ])
+        course_tokens = set(_tokenize(searchable))
+        score = float(len(query_tokens & course_tokens))
+        if score and (best is None or score > best[0]):
+            best = (score, course)
+    if best is None:
+        return None
+    result = _serialize_academy_course(best[1], include_content=False)
+    result["match_score"] = best[0]
+    result["open_path"] = f"/academy/courses/{best[1].id}"
     return result
 
 
@@ -9543,13 +9883,18 @@ def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, A
 
 @app.get("/api/academy/courses")
 async def list_public_academy_courses(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    courses = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published").order_by(AcademyCourseDB.updated_at.desc()).all()
+    courses = _scope_courses_for_user(
+        db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published"), current_user
+    ).order_by(AcademyCourseDB.updated_at.desc()).all()
     return {"status": "success", "courses": [_serialize_academy_course(course, include_content=False, access=_course_access_status(db, current_user, course.id)) for course in courses]}
 
 
 @app.post("/api/academy/courses/{course_id}/access")
 async def access_academy_course(course_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id, AcademyCourseDB.status == "published").first()
+    course = _scope_courses_for_user(
+        db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id, AcademyCourseDB.status == "published"),
+        current_user,
+    ).first()
     if not course:
         raise HTTPException(status_code=404, detail="Cours introuvable")
     access = _course_access_status(db, current_user, course_id)
@@ -9567,22 +9912,27 @@ async def access_academy_course(course_id: int, current_user: User = Depends(get
 
 @app.get("/api/admin/academy/courses")
 async def list_admin_academy_courses(
-    current_expert: Expert = Depends(get_current_admin_expert),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
-    courses = db.query(AcademyCourseDB).order_by(AcademyCourseDB.updated_at.desc()).all()
+    query = db.query(AcademyCourseDB)
+    if (getattr(current_expert, "role", "expert") or "expert").lower() != "admin":
+        query = query.filter(AcademyCourseDB.organization_id == current_expert.organization_id)
+    courses = query.order_by(AcademyCourseDB.updated_at.desc()).all()
     return {"status": "success", "courses": [_serialize_academy_course(course) for course in courses]}
 
 
 @app.post("/api/admin/academy/courses")
 async def create_academy_course(
     payload: AcademyCourseIn,
-    current_expert: Expert = Depends(get_current_admin_expert),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
     if not payload.title.strip() or not payload.summary.strip():
         raise HTTPException(status_code=422, detail="Titre et présentation du cours obligatoires")
+    if ((current_expert.role or "expert").lower() != "admin"
+            and current_expert.organization_id is None):
+        raise HTTPException(status_code=403, detail="Affectez d'abord cet expert a une ONG")
     course = AcademyCourseDB(
         title=payload.title.strip(),
         course_type="technique" if payload.course_type == "technique" else "culture",
@@ -9592,6 +9942,7 @@ async def create_academy_course(
         audio_json="{}",
         status="draft" if payload.status == "draft" else "published",
         created_by=current_expert.id,
+        organization_id=getattr(current_expert, "organization_id", None),
     )
     db.add(course)
     db.commit()
@@ -9603,13 +9954,15 @@ async def create_academy_course(
 async def update_academy_course(
     course_id: int,
     payload: AcademyCourseIn,
-    current_expert: Expert = Depends(get_current_admin_expert),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
     course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Cours introuvable")
+    if ((current_expert.role or "expert").lower() != "admin"
+            and course.organization_id != current_expert.organization_id):
+        raise HTTPException(status_code=403, detail="Ce cours appartient a une autre ONG")
     course.title = payload.title.strip()
     course.course_type = "technique" if payload.course_type == "technique" else "culture"
     course.crop = (payload.crop or "").strip() or None
@@ -9628,13 +9981,15 @@ async def upload_academy_course_media(
     file: UploadFile = File(...),
     step_id: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
-    current_expert: Expert = Depends(get_current_admin_expert),
+    current_expert: Expert = Depends(get_current_expert),
     db: Session = Depends(get_db),
 ):
-    del current_expert
     course = db.query(AcademyCourseDB).filter(AcademyCourseDB.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Cours introuvable")
+    if ((current_expert.role or "expert").lower() != "admin"
+            and course.organization_id != current_expert.organization_id):
+        raise HTTPException(status_code=403, detail="Ce cours appartient a une autre ONG")
     kind = media_kind.strip().lower()
     if kind not in {"image", "audio"}:
         raise HTTPException(status_code=422, detail="Type média invalide")
@@ -12573,7 +12928,10 @@ async def v2_assistant_query(
     """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
     _require_resource(db, current_user, "analyses")
     text = data.text or data.content or ""
-    category = _normalize_category(data.category)
+    classified = ai_engine.classify(text)
+    category = _normalize_category(
+        classified["category"] if classified.get("confidence", 0) > 0 else data.category
+    )
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
     # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
@@ -12595,6 +12953,24 @@ async def v2_assistant_query(
         final_response = _apply_studio_match_to_v2_response(
             final_response, studio_match, target_lang
         )
+    knowledge_result = resolve_knowledge_answer(
+        db=db,
+        domain="health" if category == "sos_accident" else category,
+        question=text,
+        language="fr",
+        photo_analysis=analysis,
+        organization_id=getattr(current_user, "organization_id", None),
+    )
+    grounded_answer = _clean_assistant_text(
+        knowledge_result.get("llm_answer") or knowledge_result.get("rag_fallback_answer")
+    )
+    if grounded_answer:
+        final_response["message"] = grounded_answer
+    final_response["category"] = category
+    final_response["question_intent"] = detect_rural_question_intent(text, category)
+    final_response["knowledge_mode"] = knowledge_result.get("knowledge_mode")
+    final_response["rag_items"] = knowledge_result.get("rag_items", [])
+    final_response["recommended_course"] = knowledge_result.get("recommended_course")
 
     offline_payload = {
         **final_response,
