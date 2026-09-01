@@ -96,7 +96,7 @@ def test_calendar_question_uses_general_ai_and_rejects_generic_course(monkeypatc
     assert "pluie utile" in result["llm_answer"]
 
 
-def test_legacy_assistant_rejects_exhausted_analysis_quota():
+def test_legacy_assistant_blocks_quota_without_triggering_old_offline_fallback():
     db = _db()
     user = main.User(phone_number="+22670000002")
     db.add(user)
@@ -112,6 +112,7 @@ def test_legacy_assistant_rejects_exhausted_analysis_quota():
         content="Quand semer le maïs ?",
         category="agriculture",
     )
-    with pytest.raises(HTTPException) as denied:
-        asyncio.run(main.assistant_query(request, db))
-    assert denied.value.status_code == 402
+    response = asyncio.run(main.assistant_query(request, db))
+    assert response["status"] == "quota_exhausted"
+    assert response["quota_exhausted"] is True
+    assert "épuisé" in response["llm_answer"]

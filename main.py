@@ -8236,7 +8236,23 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     requesting_user = db.query(User).filter(User.phone_number == data.phone_number).first()
     if not requesting_user:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")
-    _require_resource(db, requesting_user, "analyses")
+    quota_status = _resource_status(db, requesting_user, "analyses")
+    if not quota_status["allowed"]:
+        # Compatibilite avec les versions Play Store historiques: elles
+        # transformaient toute erreur HTTP en reponse offline. Un contrat 200
+        # explicite bloque l'analyse sans declencher ce faux mode hors ligne.
+        quota_message = (
+            "Votre quota d'analyses est épuisé. Rechargez votre compte "
+            "ou choisissez un abonnement pour continuer."
+        )
+        return {
+            "status": "quota_exhausted",
+            "quota_exhausted": True,
+            "category": ai_engine.classify(search_query_fr).get("category", "agriculture"),
+            "llm_answer": quota_message,
+            "knowledge_mode": "quota_exhausted",
+            "knowledge_fallback_used": False,
+        }
     # Aucune traduction : Groq analyse la photo/le texte, puis la langue cible
     # sert seulement à sélectionner l'audio humain de la fiche Studio.
 
