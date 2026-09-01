@@ -1610,6 +1610,8 @@ async def gemini_llm_general_knowledge(
         f"Tu parles comme un {_category_expertise(domain)}. \n"
         "Réponses SIMPLES, PRATIQUES, HONNÊTES. \n"
         "Tu n'as pas de fiche spécialisée, tu utilises tes connaissances générales. \n"
+        "Pour une question de technique, semis, calendrier, rendement ou alimentation, ne parle pas de maladie sans symptôme explicite. \n"
+        "Pour une période de semis, donne une fenêtre adaptée au Burkina Faso et précise que la pluie utile et la zone locale priment sur une date fixe. \n"
     )
 
     conversation_text = ""

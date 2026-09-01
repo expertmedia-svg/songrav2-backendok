@@ -6241,14 +6241,19 @@ def resolve_knowledge_answer(
     organization_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Fiches locales, puis cours pratique, puis connaissance IA generale."""
+    question_intent = detect_rural_question_intent(question, domain)
+    # Les fiches maladie ne doivent jamais detourner une demande de semis,
+    # rendement, alimentation ou autre technique. Pour ces demandes, Songra
+    # repond directement comme assistant agricole generaliste.
+    use_general_knowledge = (
+        domain in {"agriculture", "elevage"}
+        and question_intent in {"agricultural_technique", "livestock_technique", "general_advice"}
+    )
     course_match = _find_academy_course_match(
         db, question, domain=domain, organization_id=organization_id
     )
-    studio_match = _find_studio_knowledge_match(
-        db,
-        category=domain,
-        query_text=question,
-        photo_analysis=photo_analysis,
+    studio_match = None if use_general_knowledge else _find_studio_knowledge_match(
+        db, category=domain, query_text=question, photo_analysis=photo_analysis
     )
     if studio_match:
         return {
@@ -6261,7 +6266,7 @@ def resolve_knowledge_answer(
             "recommended_course": course_match,
         }
 
-    rag_items = retrieve_knowledge(
+    rag_items = [] if use_general_knowledge else retrieve_knowledge(
         db,
         domain,
         question,
@@ -7189,6 +7194,7 @@ async def analyze_scanner_photo(
     Si `target_lang` est fourni, le diagnostic reste canonique en français et
     un véritable audio humain est recherché dans la base locale validée.
     """
+    _require_resource(db, current_user, "analyses")
 
     # Collecter les photos
     photo_payloads = _collect_photo_payloads(data.photo_base64, data.photo_base64_list)
@@ -7224,7 +7230,7 @@ async def analyze_scanner_photo(
                 french_answer=str(photo_analysis.get("analysis") or ""),
             )
 
-        return {
+        response = {
             "status": "success",
             "analysis": photo_analysis,
             "category": data.category,
@@ -7237,6 +7243,8 @@ async def analyze_scanner_photo(
             "audio_mime_type": recorded_case.get("audio_mime_type") if recorded_case else None,
             "local_knowledge_match": recorded_case,
         }
+        _consume_resource(db, current_user, "analyses", "scanner_legacy")
+        return response
 
     except HTTPException:
         raise
@@ -8225,6 +8233,10 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
     reconstructed_query_local = original_query
     query_interpretation_confidence = 1.0
     target_lang = (data.target_lang or "").strip().lower() or None
+    requesting_user = db.query(User).filter(User.phone_number == data.phone_number).first()
+    if not requesting_user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    _require_resource(db, requesting_user, "analyses")
     # Aucune traduction : Groq analyse la photo/le texte, puis la langue cible
     # sert seulement à sélectionner l'audio humain de la fiche Studio.
 
@@ -8297,7 +8309,6 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
 
     # Les recherches utilisateur consultent le Studio, pas l'historique des tickets.
     reusable_entry = None
-    requesting_user = db.query(User).filter(User.phone_number == data.phone_number).first()
     knowledge_result = resolve_knowledge_answer(
         db=db,
         domain=kb_domain,
@@ -8555,6 +8566,7 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
             except Exception as cache_exc:
                 print(f"[ASSISTANT] Mise en cache réponse impossible: {cache_exc}")
 
+    _consume_resource(db, requesting_user, "analyses", "assistant_legacy")
     return response
 
 @app.post("/api/tickets/{ticket_id}/reply")
@@ -9826,15 +9838,22 @@ def _find_academy_course_match(
     else:
         query = query.filter(AcademyCourseDB.organization_id == organization_id)
     query_tokens = set(_tokenize(question))
+    normalized_question = _normalize_free_text(question)
+    temporal_terms = {"quand", "periode", "date", "calendrier", "saison", "moment"}
+    asks_calendar = any(term in normalized_question for term in temporal_terms)
     best: Optional[Tuple[float, AcademyCourseDB]] = None
     for course in query.all():
-        searchable = " ".join([
-            course.title or "", course.crop or "", course.summary or "",
-            json.dumps(_load_json_list(course.steps_json), ensure_ascii=False),
-        ])
+        headline = " ".join([course.title or "", course.crop or "", course.summary or ""])
+        searchable = " ".join([headline, json.dumps(_load_json_list(course.steps_json), ensure_ascii=False)])
         course_tokens = set(_tokenize(searchable))
-        score = float(len(query_tokens & course_tokens))
-        if score and (best is None or score > best[0]):
+        overlap = query_tokens & course_tokens
+        headline_normalized = _normalize_free_text(headline)
+        if asks_calendar and not any(term in headline_normalized for term in temporal_terms):
+            continue
+        # Un seul mot commun (souvent seulement "mais") ne suffit pas pour
+        # afficher un cours comme pertinent.
+        score = float(len(overlap))
+        if len(overlap) >= 2 and (best is None or score > best[0]):
             best = (score, course)
     if best is None:
         return None
@@ -12690,6 +12709,7 @@ async def v2_analyze(
     """Pipeline v2 complet : texte + photos → Gemini → décision → médias → réponse unique"""
     import time as _time
     start_time = _time.time()
+    _require_resource(db, current_user, "analyses")
 
     text = data.text or data.content or ""
     category = _normalize_category(data.category)
@@ -12813,6 +12833,7 @@ async def v2_analyze(
     # Aucune traduction ni synthèse vocale n'est générée à la volée.
     voice_payload = None
 
+    _consume_resource(db, current_user, "analyses", "v2_analyze")
     return {
         "status": "success",
         **final_response,
@@ -12971,6 +12992,11 @@ async def v2_assistant_query(
     final_response["knowledge_mode"] = knowledge_result.get("knowledge_mode")
     final_response["rag_items"] = knowledge_result.get("rag_items", [])
     final_response["recommended_course"] = knowledge_result.get("recommended_course")
+    if final_response["question_intent"] in {"agricultural_technique", "livestock_technique", "general_advice"}:
+        diagnostic = final_response.get("diagnostic")
+        if isinstance(diagnostic, dict):
+            diagnostic["icone_pedagogique"] = "arrosage" if category == "agriculture" else "veterinaire"
+            diagnostic["type"] = category
 
     offline_payload = {
         **final_response,
