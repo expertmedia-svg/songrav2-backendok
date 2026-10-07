@@ -9555,6 +9555,9 @@ def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = T
     result["version"] = academy_offline.version_for({**result,
         "steps": steps,
         "audio": academy_offline.normalize_audio(_load_json_dict(course.audio_json))})
+    # Reuse an actual teaching illustration for visual discovery, never a fake cover.
+    result["preview_image_url"] = result["cover_url"] or next(
+        (step.get("image_url") for step in steps if step.get("image_url")), None)
     if include_content:
         result["steps"] = steps
         result["audio"] = academy_offline.normalize_audio(_load_json_dict(course.audio_json))

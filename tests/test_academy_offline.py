@@ -56,6 +56,11 @@ def test_serialized_version_is_stable_with_legacy_undated_audio():
     assert one['version'] == two['version'] == academy_offline.version_for(one)
     assert 'gourmantche' in one['audio'] and 'fr' not in one['audio']
     assert 'uploaded_at' not in one['audio']['gourmantche']
+    assert one['preview_image_url'] is None
+    item.steps_json = '[{"id":"one","title":"Étape","image_url":"https://vm.test/real.webp"}]'
+    summary = main._serialize_academy_course(item, include_content=False)
+    assert summary['preview_image_url'] == 'https://vm.test/real.webp'
+    assert 'steps' not in summary
 
 
 def test_external_media_size_stays_unknown_no_server_fetch(tmp_path):
