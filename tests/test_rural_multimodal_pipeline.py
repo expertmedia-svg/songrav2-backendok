@@ -106,7 +106,8 @@ def test_05_garlic_knowledge_and_course(environment):
     db.commit()
     result = query(db, text="Comment cultiver l’ail ?")
     assert result["knowledge_card"]["id"] == item.id
-    assert result["recommended_course"]["id"] and not calls
+    assert result["recommended_course"] is None and not calls
+    assert result["learning_requested"]
 
 
 def test_06_course_only_uses_real_summary(environment):
@@ -115,8 +116,9 @@ def test_06_course_only_uses_real_summary(environment):
     db.add(course)
     db.commit()
     result = query(db, text="Comment cultiver l'ail ?")
-    assert result["recommended_course"]["id"] == course.id
-    assert result["message"] == course.summary and not calls
+    assert result["recommended_course"] is None
+    assert result["message"] != course.summary and calls
+    assert result["learning_requested"]
 
 
 def test_07_no_course_still_answers(environment):

@@ -95,8 +95,9 @@ def test_garlic_training_rejects_disease_and_preserves_courses(environment):
     db.commit()
     result = query(db, "Comment cultiver l'ail ?")
     assert not result.get("knowledge_card")
-    assert result["knowledge_mode"] == "course_knowledge" and result["recommended_course"]
-    assert not calls
+    assert result["knowledge_mode"] != "course_knowledge"
+    assert result["recommended_course"] is None and calls
+    assert result["learning_requested"]
 
 
 def profile():

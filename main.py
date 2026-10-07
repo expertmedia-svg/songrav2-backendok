@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Query, UploadFile, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
 import os
@@ -5803,7 +5803,7 @@ def _select_semantic_resources(db, domain, question, *, photo_analysis=None,
             payload = _serialize_offline_entry_for_rag(item)
             add("resolved", payload, payload.get("title"), payload.get("question"),
                 payload.get("answer"), payload.get("tags") or [])
-    if "course" in kinds and domain in {"agriculture", "elevage"}:
+    if "course" in kinds:
         courses = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published")
         courses = courses.filter(AcademyCourseDB.organization_id.is_(None)) if organization_id is None else courses.filter(AcademyCourseDB.organization_id == organization_id)
         for item in courses.order_by(AcademyCourseDB.id).all():
@@ -5819,7 +5819,7 @@ def _select_semantic_resources(db, domain, question, *, photo_analysis=None,
             "rejectionReason": "needs_clarification" if photo_analysis else "no_resources",
             "fallbackTriggered": not (photo_analysis or {}).get("needs_clarification", False)}
         print("[SONGRA-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
-        return {"studio": None, "rag": [], "course": None, "audit": audit}
+        return {"studio": None, "rag": [], "course": None, "courses": [], "audit": audit}
     profile = knowledge_relevance.understand(question, domain, photo_analysis)
     tokens = _rural_tokens(question + " " + " ".join(profile.get("searchTerms", [])))
     for candidate in resources:
@@ -5848,7 +5848,8 @@ def _select_semantic_resources(db, domain, question, *, photo_analysis=None,
     print("[SONGRA-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
     return {"studio": studios[0]["payload"] if studios else None,
             "rag": [c["payload"] for c in rag],
-            "course": courses[0]["payload"] if courses else None, "audit": audit}
+            "course": courses[0]["payload"] if courses else None,
+            "courses": [c["payload"] for c in courses[:3]], "audit": audit}
 
 
 def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5,
@@ -6040,11 +6041,11 @@ def resolve_knowledge_answer(
     organization_id: Optional[int] = None,
     allow_external: bool = True,
 ) -> Dict[str, Any]:
-    """Fiches locales, puis cours pratique, puis connaissance IA generale."""
+    """Répondre avec les connaissances ; les cours sont un complément séparé."""
     selected = _select_semantic_resources(db, domain, question,
-        photo_analysis=photo_analysis, organization_id=organization_id)
+        photo_analysis=photo_analysis, organization_id=organization_id, kinds=("studio", "rag"))
     studio_match = selected["studio"]
-    course_match = selected["course"]
+    course_match = None
     if selected["audit"].get("clarifyingQuestion"):
         return {"relevance_audit": selected["audit"], "rag_items": [], "llm_answer": selected["audit"]["clarifyingQuestion"],
                 "rag_fallback_answer": None, "knowledge_mode": "needs_clarification",
@@ -6080,12 +6081,6 @@ def resolve_knowledge_answer(
             "recommended_course": course_match,
         }
 
-    if course_match:
-        return {
-            "relevance_audit": selected["audit"], "rag_items": [], "llm_answer": course_match.get("summary"),
-            "rag_fallback_answer": None, "knowledge_mode": "course_knowledge",
-            "knowledge_fallback_used": False, "recommended_course": course_match,
-        }
     if not allow_external:
         return {"relevance_audit": selected["audit"], "rag_items": [], "llm_answer": None, "rag_fallback_answer": None,
                 "knowledge_mode": "no_match", "recommended_course": None}
@@ -9610,6 +9605,35 @@ def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, A
     return result
 
 
+def _is_learning_question(question: str, domain: str) -> bool:
+    intent = detect_rural_question_intent(question, domain)
+    if intent in {"plant_disease", "animal_disease", "incident"}:
+        return False
+    text = _normalize_free_text(question)
+    return intent in {"agricultural_technique", "livestock_technique"} or bool(
+        re.search(r"\b(apprendre|formation|cours|comment|elever|fabriquer)\b", text))
+
+
+class AcademyRecommendationRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    category: str = "agriculture"
+
+
+@app.post("/api/academy/recommendations")
+async def recommend_academy_courses(payload: AcademyRecommendationRequest,
+                                   current_user: User = Depends(get_current_user),
+                                   db: Session = Depends(get_db)):
+    # Called only after SONGRA has displayed its answer. No quota or course unlock.
+    domain = _normalize_expert_local_category(payload.category)
+    if not _is_learning_question(payload.question, domain):
+        return {"courses": []}
+    import asyncio
+    selected = await asyncio.to_thread(_select_semantic_resources, db, domain,
+        payload.question, organization_id=getattr(current_user, "organization_id", None),
+        kinds=("course",))
+    return {"courses": selected["courses"]}
+
+
 @app.get("/api/academy/courses")
 async def list_public_academy_courses(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     courses = _scope_courses_for_user(
@@ -12604,6 +12628,7 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         final_response["message"] = grounded_answer
     final_response["category"] = category
     final_response["question_intent"] = detect_rural_question_intent(search_text, category)
+    final_response["learning_requested"] = _is_learning_question(search_text, category) and not analysis.get("needs_clarification")
     final_response["knowledge_mode"] = knowledge_result.get("knowledge_mode")
     final_response["rag_items"] = knowledge_result.get("rag_items", [])
     final_response["recommended_course"] = knowledge_result.get("recommended_course")
