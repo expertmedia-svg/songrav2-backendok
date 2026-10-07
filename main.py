@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, D
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import hashlib
+import academy_offline
 import unicodedata
 import json
 import re
@@ -5422,7 +5423,9 @@ async def startup_seed_data():
             print(f"[WARN] Erreur chargement base de connaissances: {e_load}")
 
         try:
-            academy_created = _seed_academy_courses(db)
+            # The Academy now serves authored/published courses only. Keep all
+            # existing courses; restarting must not publish generated templates.
+            academy_created = 0
             academy_total = db.query(AcademyCourseDB).count()
             print(f"[OK] Académie du paysan chargée ({academy_total} cours, {academy_created} nouveaux)")
         except Exception as academy_error:
@@ -9534,6 +9537,8 @@ async def translate_localization_payload(
 
 
 def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = True, access: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    steps = [{**step, "audio": academy_offline.normalize_audio(step.get("audio"))}
+        for step in _load_json_list(course.steps_json) if isinstance(step, dict)]
     result = {
         "id": course.id,
         "title": course.title,
@@ -9541,15 +9546,18 @@ def _serialize_academy_course(course: AcademyCourseDB, include_content: bool = T
         "crop": course.crop,
         "summary": course.summary,
         "cover_url": _build_upload_url(course.cover_url) if course.cover_url and not str(course.cover_url).startswith("http") else course.cover_url,
-        "lesson_count": len(_load_json_list(course.steps_json)),
+        "lesson_count": len(steps),
         "status": course.status or "published",
         "organization_id": course.organization_id,
         "created_at": course.created_at.isoformat() if course.created_at else None,
         "updated_at": course.updated_at.isoformat() if course.updated_at else None,
     }
+    result["version"] = academy_offline.version_for({**result,
+        "steps": steps,
+        "audio": academy_offline.normalize_audio(_load_json_dict(course.audio_json))})
     if include_content:
-        result["steps"] = _load_json_list(course.steps_json)
-        result["audio"] = _normalize_expert_local_audio(_load_json_dict(course.audio_json))
+        result["steps"] = steps
+        result["audio"] = academy_offline.normalize_audio(_load_json_dict(course.audio_json))
     if access:
         result["access"] = access
     return result
@@ -9600,7 +9608,7 @@ def _normalize_academy_steps(raw_steps: Any, previous: Optional[List[Dict[str, A
             "title": title,
             "content": content,
             "image_url": raw.get("image_url") or old.get("image_url"),
-            "audio": _normalize_expert_local_audio({**_load_json_dict(old.get("audio")), **_load_json_dict(raw.get("audio"))}),
+            "audio": academy_offline.normalize_audio({**_load_json_dict(old.get("audio")), **_load_json_dict(raw.get("audio"))}),
         })
     return result
 
@@ -9661,6 +9669,48 @@ async def access_academy_course(course_id: int, current_user: User = Depends(get
         db.add(CourseAccessDB(user_id=current_user.id, course_id=course_id, source=source, period_key=period_key, permanent=(source == "free")))
         db.commit()
     return {"status": "success", "course": _serialize_academy_course(course, include_content=True, access={"allowed": True, "source": access.get("source")})}
+
+
+@app.get("/api/academy/courses/{course_id}/offline-info")
+async def academy_offline_info(course_id: int,
+                               current_user: User = Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    course = _scope_courses_for_user(db.query(AcademyCourseDB).filter(
+        AcademyCourseDB.id == course_id, AcademyCourseDB.status == "published"), current_user).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Cours introuvable")
+    try:
+        manifest = academy_offline.build_manifest(_serialize_academy_course(course),
+            os.path.abspath("uploads"), _build_upload_url("uploads"))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    # Preview actual size without unlocking or disclosing protected lessons/media URLs.
+    return {"id": course.id, "version": manifest["course"]["version"],
+        "media_size_bytes": manifest["media_size_bytes"],
+        "visual_complete": manifest["visual_complete"], "languages": manifest["languages"],
+        "assets": [{"asset_key": asset["sha256"] or hashlib.sha256(asset["url"].encode()).hexdigest(),
+                    "size_bytes": asset["size_bytes"]} for asset in manifest["assets"]]}
+
+
+@app.get("/api/academy/courses/{course_id}/offline-manifest")
+async def academy_offline_manifest(course_id: int,
+                                   current_user: User = Depends(get_current_user),
+                                   db: Session = Depends(get_db)):
+    course = _scope_courses_for_user(db.query(AcademyCourseDB).filter(
+        AcademyCourseDB.id == course_id, AcademyCourseDB.status == "published"), current_user).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Cours introuvable")
+    unlocked = db.query(CourseAccessDB).filter(CourseAccessDB.user_id == current_user.id,
+        CourseAccessDB.course_id == course_id).first()
+    _, offer = _active_offer(current_user)
+    unlimited = bool(offer and int(offer["courses"]) == -1)
+    if not (unlocked or unlimited) or not _course_access_status(db, current_user, course_id).get("allowed"):
+        raise HTTPException(status_code=403, detail="Ouvrez cette formation avant de la télécharger")
+    try:
+        return academy_offline.build_manifest(_serialize_academy_course(course),
+            os.path.abspath("uploads"), _build_upload_url("uploads"))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.get("/api/admin/academy/courses")
@@ -9746,12 +9796,34 @@ async def upload_academy_course_media(
     kind = media_kind.strip().lower()
     if kind not in {"image", "audio"}:
         raise HTTPException(status_code=422, detail="Type média invalide")
-    content = await file.read()
+    content = await file.read(20 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="Le fichier envoyé est vide")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Média trop volumineux (20 Mo maximum)")
+    if step_id and not any(str(item.get("id")) == str(step_id)
+            for item in _load_json_list(course.steps_json) if isinstance(item, dict)):
+        raise HTTPException(status_code=404, detail="Étape introuvable")
     extension = os.path.splitext(file.filename or "")[1].lower() or (".jpg" if kind == "image" else ".m4a")
+    if kind == "image":
+        # Resize the supplied teaching illustration, preserving its actual content.
+        try:
+            from PIL import ImageOps
+            picture = ImageOps.exif_transpose(Image.open(BytesIO(content)))
+            picture.thumbnail((1440, 1440), Image.Resampling.LANCZOS)
+            if picture.mode not in {"RGB", "RGBA"}:
+                picture = picture.convert("RGB")
+            optimized = BytesIO()
+            picture.save(optimized, format="WEBP", quality=82, method=6)
+            content = optimized.getvalue()
+            extension = ".webp"
+        except Exception as error:
+            raise HTTPException(status_code=422, detail="Image pédagogique invalide") from error
     safe_step = re.sub(r"[^a-zA-Z0-9_-]", "", step_id or "course") or "course"
-    normalized_language = _normalize_expert_local_language(language) if kind == "audio" else "image"
+    try:
+        normalized_language = academy_offline.language_code(language or "fr") if kind == "audio" else "image"
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     relative_path = os.path.join("uploads", "academy", str(course.id), f"{safe_step}-{normalized_language}-{int(time.time() * 1000)}{extension}").replace("\\", "/")
     absolute_path = os.path.abspath(relative_path)
     _ensure_parent_dir(absolute_path)
@@ -9766,14 +9838,14 @@ async def upload_academy_course_media(
         if kind == "image":
             target["image_url"] = public_url
         else:
-            audio_map = _normalize_expert_local_audio(target.get("audio") or {})
+            audio_map = academy_offline.normalize_audio(target.get("audio") or {})
             audio_map[normalized_language] = {"url": public_url, "mime_type": file.content_type, "uploaded_at": datetime.utcnow().isoformat()}
             target["audio"] = audio_map
         course.steps_json = json.dumps(steps, ensure_ascii=False)
     elif kind == "image":
         course.cover_url = relative_path
     else:
-        audio_map = _normalize_expert_local_audio(_load_json_dict(course.audio_json))
+        audio_map = academy_offline.normalize_audio(_load_json_dict(course.audio_json))
         audio_map[normalized_language] = {"url": public_url, "mime_type": file.content_type, "uploaded_at": datetime.utcnow().isoformat()}
         course.audio_json = json.dumps(audio_map, ensure_ascii=False)
     db.commit()
@@ -12629,6 +12701,7 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
     final_response["category"] = category
     final_response["question_intent"] = detect_rural_question_intent(search_text, category)
     final_response["learning_requested"] = _is_learning_question(search_text, category) and not analysis.get("needs_clarification")
+    final_response["learning_query"] = search_text
     final_response["knowledge_mode"] = knowledge_result.get("knowledge_mode")
     final_response["rag_items"] = knowledge_result.get("rag_items", [])
     final_response["recommended_course"] = knowledge_result.get("recommended_course")
@@ -12648,6 +12721,8 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
     }.items():
         if any(marker in normalized_request for marker in markers):
             intents.append(label)
+    if final_response["learning_requested"]:
+        intents.append("APPRENTISSAGE")
     if images_b64:
         intents.append("ANALYSE_IMAGE")
     if category == "urgence" or analysis.get("gravite") == "critique":
@@ -12657,7 +12732,7 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         "input_type": final_response["input_type"], "domain": category, "intents": intents,
         "crop": (_find_best_focus_match("agriculture", search_text, FOCUS_SUBJECTS) or {}).get("label"),
         "animal": (_find_best_focus_match("elevage", search_text, FOCUS_SUBJECTS) or {}).get("label"),
-        "needs_training": "FORMATION" in intents,
+        "needs_training": final_response["learning_requested"],
         "urgency": analysis.get("gravite"),
         "clarifying_question": analysis.get("question_complementaire") or None,
     }
