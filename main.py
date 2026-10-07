@@ -6297,8 +6297,12 @@ def resolve_knowledge_answer(
     # Aucune fiche Studio assez proche : analyse générale en repli.
     import asyncio
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        try:
+            asyncio.get_running_loop()
+            loop_running = True
+        except RuntimeError:
+            loop_running = False
+        if loop_running:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 general_answer = pool.submit(
@@ -13001,7 +13005,9 @@ async def v2_assistant_query(
     grounded_answer = _clean_assistant_text(
         knowledge_result.get("llm_answer") or knowledge_result.get("rag_fallback_answer")
     )
-    if grounded_answer:
+    # Une absence de fiche ne doit pas effacer le diagnostic deja obtenu.
+    # La fiche Studio conserve aussi son texte et ses actions coherentes.
+    if grounded_answer and not studio_match and knowledge_result.get("knowledge_mode") != "no_match":
         final_response["message"] = grounded_answer
     final_response["category"] = category
     final_response["question_intent"] = detect_rural_question_intent(text, category)

@@ -963,14 +963,14 @@ async def gemini_analyze(
         if not has_image and has_text:
             cache_key = _get_cache_key(text, category, False)
             cached = _analysis_cache.get(cache_key)
-            if cached and (time.time() - cached["ts"]) < CACHE_TTL:
+            if cached and not cached["data"].get("from_fallback") and (time.time() - cached["ts"]) < CACHE_TTL:
                 return {**cached["data"], "from_cache": True}
         analysis = (
             await _groq_analyze(text, images_b64, category)
             if AI_PROVIDER == "groq"
             else await _openai_analyze(text, images_b64, category)
         )
-        if not has_image and has_text:
+        if not has_image and has_text and not analysis.get("from_fallback"):
             cache_key = _get_cache_key(text, category, False)
             _analysis_cache[cache_key] = {"data": analysis, "ts": time.time()}
             if len(_analysis_cache) > 500:
@@ -982,7 +982,7 @@ async def gemini_analyze(
     if not has_image and has_text:
         cache_key = _get_cache_key(text, category, False)
         cached = _analysis_cache.get(cache_key)
-        if cached and (time.time() - cached["ts"]) < CACHE_TTL:
+        if cached and not cached["data"].get("from_fallback") and (time.time() - cached["ts"]) < CACHE_TTL:
             return {**cached["data"], "from_cache": True}
 
     model = _get_model()
@@ -1019,7 +1019,7 @@ async def gemini_analyze(
         analysis["type_probleme"] = "urgence"
 
     # Mettre en cache (texte seul)
-    if not has_image and has_text:
+    if not has_image and has_text and not analysis.get("from_fallback"):
         cache_key = _get_cache_key(text, category, False)
         _analysis_cache[cache_key] = {"data": analysis, "ts": time.time()}
         if len(_analysis_cache) > 500:
