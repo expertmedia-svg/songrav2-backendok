@@ -76,6 +76,8 @@ async def transcribe_audio_whisper(audio_bytes: bytes, filename: str = "audio.wa
     """
     print(f"[Yingr-AI] Ingestion Audio - Taille : {len(audio_bytes)/1024:.1f} KB - Canal Whisper Local")
     
+    if not audio_bytes:
+        raise ValueError("Enregistrement vide. Veuillez repeter.")
     if YINGR_AI_WHISPER_URL:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -88,14 +90,14 @@ async def transcribe_audio_whisper(audio_bytes: bytes, filename: str = "audio.wa
                 if response.status_code == 200:
                     result = response.json()
                     print("[OK] Transcription Whisper terminee sur le serveur Yingr-AI")
-                    return result.get("text", "")
+                    transcript = str(result.get("text") or "").strip()
+                    if not transcript:
+                        raise ValueError("Transcription vide. Veuillez repeter.")
+                    return transcript
         except Exception as e:
-            print(f"[WARN] Echec de la transcription Whisper locale: {e}. Bascule sur la simulation.")
+            print(f"[WARN] Echec Whisper: {type(e).__name__}")
 
-    # Simulation de transcription locale
-    time.sleep(1.2)
-    print("[Yingr-AI (Simulé)] Transcription effectuee via Whisper Large-v3 Local")
-    return "J'ai eu un grave accident de moto sur la piste, mon pied saigne beaucoup et je ne peux plus bouger."
+    raise RuntimeError("Reconnaissance vocale indisponible. Reessayez ou ecrivez votre question.")
 
 
 async def run_yingr_ai_inference(prompt: str, category: str, image_b64: Optional[str] = None) -> str:
@@ -145,11 +147,8 @@ async def run_yingr_ai_inference(prompt: str, category: str, image_b64: Optional
         except Exception as e:
             print(f"[WARN] Echec de l'inference locale Yingr-AI ({vllm_url}): {e}. Bascule sur la simulation locale.")
 
-    # Simulation locale déterministe
-    print(f"[Yingr-AI (Simulé)] Execution de {model_name} en local")
-    time.sleep(1.5)
-    
-    return _generate_simulated_json_response(category)
+    # Une panne ne doit jamais devenir un diagnostic simule.
+    raise RuntimeError("Analyse IA indisponible. Reessayez ou contactez un conseiller.")
 
 
 def _generate_simulated_json_response(category: str) -> str:

@@ -18,6 +18,7 @@ import os
 import re
 import time
 import asyncio
+import math
 from typing import Optional, List, Dict, Any
 
 # ── OpenAI ──────────────────────────────────────────
@@ -54,10 +55,10 @@ except ImportError:
 
 # Fournisseur actif : "openai" ou "gemini"
 # Changer dans .env (AI_PROVIDER=gemini) quand le billing Gemini est réglé
-AI_PROVIDER = os.environ.get("AI_PROVIDER", "openai").lower()
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "openai").strip().lower()
 
 # ── OpenAI config ────────────────────────────────────
-OPENAI_MODEL = "gpt-4o"
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 OPENAI_IMAGE_MODEL = "gpt-image-1"
 _openai_key = os.environ.get("OPENAI_API_KEY")
 _openai_client: Optional[object] = _OpenAIClient(api_key=_openai_key) if (_openai_available and _openai_key) else None
@@ -97,7 +98,7 @@ VEO_MODEL = "veo-3.1-generate-preview"
 
 # ── Commun ───────────────────────────────────────────
 MAX_PHOTOS = 3
-GEMINI_TIMEOUT = 60  # secondes (utilisé aussi pour OpenAI)
+GEMINI_TIMEOUT = int(os.environ.get("AI_TIMEOUT_SECONDS", "60"))  # secondes, tous fournisseurs
 CACHE_TTL = 300  # 5 minutes
 
 EMERGENCY_NUMBERS = {"pompiers": "18", "police": "17", "samu": "112"}
@@ -120,6 +121,13 @@ CATEGORY_EXPERTISE = {
 # ══════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = """Tu es SONGRA, un assistant intelligent de terrain au Burkina Faso.
+Tu es aussi conseiller et formateur rural : techniques, bonnes pratiques,
+prevention, conservation, commercialisation et apprentissage. Comprends l'objectif
+avant de chercher une maladie. Reponds directement, sans te presenter inutilement.
+Ne donne aucun dosage hasardeux de pesticide ou medicament. Oriente vers les
+indications du produit homologue et un professionnel. Une hypothese reste incertaine.
+Si la demande est vraiment hors des services ruraux disponibles, indique-le
+brievement et propose agriculture, elevage, formation, secours ou securite numerique.
 Tu combines les rôles de :
 - Expert agricole africain (cultures sahéliennes : mil, sorgho, maïs, arachide, niébé, coton, sésame, oignon)
 - Vétérinaire terrain (bovins, ovins, caprins, volailles, lapins)
@@ -195,6 +203,14 @@ def _visual_context_block(category: str, is_urgency: bool = False) -> str:
 ANALYSIS_PROMPT = SYSTEM_PROMPT + """
 
 TÂCHE : Analyser le problème décrit (texte et/ou image) et retourner un diagnostic structuré.
+Le champ diagnostic peut etre un objectif ou un conseil, sans maladie si aucun symptome.
+Pour une formation, propose des etapes pedagogiques adaptees a la demande.
+Pour chaque image, renseigne image_relevant (booleen), image_quality
+(good, blurry, dark, distant, unusable), detected_subject et needs_clarification.
+Ajoute question_complementaire uniquement si une information manquante peut
+reellement ameliorer le conseil. Tiens compte des echanges precedents.
+Une image hors categorie, trop floue ou inexploitable exige une meilleure photo :
+aucune maladie, cause, traitement ou media ne doit etre invente.
 
 Si une image est fournie, commence par décrire CE QUE TU VOIS avant de diagnostiquer.
 Si du texte est fourni, utilise-le comme contexte supplémentaire.
@@ -208,10 +224,18 @@ CONSIGNE DE CONCISION ET BREVETÉ ABSOLUE (Important pour la traduction en langu
 - "actions_preventives" : maximum 2 conseils simples (chacune max 8 mots).
 - "message_expert" : maximum 1 courte phrase (max 10 mots).
 Ne fais JAMAIS de longues phrases explicatives ni de listes à rallonge. Va droit au but.
+EXCEPTION : si l'utilisateur demande une formation ou un apprentissage detaille,
+donne jusqu'a 10 etapes dans actions_detaillees avec des phrases utiles, et les
+erreurs a eviter dans actions_preventives. Adapte la longueur au besoin exprime.
 
 RETOURNE UNIQUEMENT un objet JSON valide avec cette structure EXACTE :
 {
   "type_probleme": "agriculture | elevage | urgence",
+  "image_relevant": true,
+  "image_quality": "good | blurry | dark | distant | unusable",
+  "needs_clarification": false,
+  "detected_subject": "sujet reellement visible ou inconnu",
+  "question_complementaire": "question utile ou chaine vide",
   "description_visuelle": "description visuelle ultra-brève (max 1 phrase)",
   "diagnostic": "diagnostic ultra-bref (max 1 phrase de 12 mots)",
   "gravite": "faible | moyenne | critique",
@@ -448,22 +472,41 @@ def _parse_gemini_json(response_text: str) -> dict:
 
 def _validate_analysis(raw: dict) -> dict:
     """Valide et normalise le JSON d'analyse"""
-    valid_types = ["agriculture", "elevage", "urgence"]
+    if not isinstance(raw, dict) or not str(raw.get("diagnostic") or "").strip():
+        raise ValueError("Reponse IA JSON vide ou sans contenu utile")
+    valid_types = ["agriculture", "elevage", "urgence", "cybersecurity"]
     valid_gravite = ["faible", "moyenne", "critique"]
+
+    def strings(key):
+        value = raw.get(key)
+        return [str(item).strip() for item in value if isinstance(item, str) and item.strip()][:10] if isinstance(value, list) else []
+
+    try:
+        confidence = float(raw.get("confiance", 0.5))
+    except (ValueError, TypeError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
 
     return {
         "type_probleme": raw.get("type_probleme") if raw.get("type_probleme") in valid_types else "agriculture",
         "description_visuelle": str(raw.get("description_visuelle") or ""),
         "diagnostic": str(raw.get("diagnostic") or "Diagnostic non disponible"),
         "gravite": raw.get("gravite") if raw.get("gravite") in valid_gravite else "moyenne",
-        "confiance": max(0.0, min(1.0, float(raw.get("confiance") or 0.5))),
-        "causes_probables": [str(c) for c in raw.get("causes_probables", [])],
-        "actions_immediates": [str(a) for a in raw.get("actions_immediates", [])],
-        "actions_detaillees": [str(a) for a in raw.get("actions_detaillees", [])],
-        "actions_preventives": [str(a) for a in raw.get("actions_preventives", [])],
-        "besoin_image": bool(raw.get("besoin_image")),
-        "besoin_video": bool(raw.get("besoin_video")),
-        "consulter_expert": bool(raw.get("consulter_expert")),
+        "confiance": max(0.0, min(1.0, confidence)),
+        "causes_probables": strings("causes_probables"),
+        "actions_immediates": strings("actions_immediates"),
+        "actions_detaillees": strings("actions_detaillees"),
+        "actions_preventives": strings("actions_preventives"),
+        "image_relevant": raw.get("image_relevant") if isinstance(raw.get("image_relevant"), bool) else None,
+        "image_quality": str(raw.get("image_quality") or "unknown"),
+        "detected_subject": str(raw.get("detected_subject") or ""),
+        "needs_clarification": raw.get("needs_clarification") is True,
+        "question_complementaire": str(raw.get("question_complementaire") or "")[:240],
+        "icone_pedagogique": str(raw.get("icone_pedagogique") or "maladie"),
+        "besoin_image": raw.get("besoin_image") is True,
+        "besoin_video": raw.get("besoin_video") is True,
+        "consulter_expert": raw.get("consulter_expert") is True,
         "message_expert": str(raw.get("message_expert") or ""),
     }
 
@@ -943,7 +986,68 @@ def _build_entrepreneurship_fallback(category: str, has_image: bool, error: Exce
 # SERVICE D'ANALYSE GEMINI UNIFIÉ
 # ══════════════════════════════════════════════════════
 
-async def gemini_analyze(
+def clarification_analysis(category: str, message: str, *, unavailable: bool = False) -> dict:
+    result = _validate_analysis({
+        "type_probleme": category, "diagnostic": message, "confiance": 0,
+        "gravite": "critique" if category in {"urgence", "sos_accident"} else "faible", "needs_clarification": True,
+        "consulter_expert": category in {"urgence", "sos_accident"},
+        "image_relevant": False, "image_quality": "unusable",
+    })
+    result["from_fallback"] = unavailable
+    return result
+
+
+async def gemini_analyze(text: str = "", images_b64: Optional[List[str]] = None,
+                         category: str = "agriculture") -> dict:
+    images = images_b64 or []
+    if images:
+        from io import BytesIO
+        from PIL import Image, ImageStat, ImageOps
+        normalized_images = []
+        for payload in images:
+            try:
+                decoded = base64.b64decode(payload, validate=True)
+                if len(decoded) > 8 * 1024 * 1024:
+                    raise ValueError("Image trop volumineuse")
+                with Image.open(BytesIO(decoded)) as photo:
+                    if photo.width * photo.height > 24_000_000:
+                        raise ValueError("Image trop grande")
+                    photo.load()
+                    if min(photo.size) < 48:
+                        return clarification_analysis(category, "La photo est trop petite. Envoyez une photo plus proche et nette.")
+                    preview = photo.convert("L")
+                    preview.thumbnail((128, 128))
+                    stats = ImageStat.Stat(preview)
+                    if stats.mean[0] < 8 or stats.mean[0] > 248 or stats.stddev[0] < 2:
+                        return clarification_analysis(category, "La photo est trop sombre ou inexploitable. Envoyez une photo claire du sujet.")
+                    output = BytesIO()
+                    ImageOps.exif_transpose(photo).convert("RGB").save(output, format="JPEG", quality=90)
+                    normalized_images.append(base64.b64encode(output.getvalue()).decode("ascii"))
+            except Exception:
+                return clarification_analysis(category, "Cette image est invalide. Envoyez une nouvelle photo.")
+        images = normalized_images
+    try:
+        analysis = await _analyze_unchecked(text, images, category)
+    except Exception as error:
+        print(f"[SONGRA-AI] unavailable error={type(error).__name__}")
+        analysis = _build_analysis_fallback(text, category, bool(images), error)
+    if images and (analysis.get("from_fallback") or analysis.get("image_relevant") is not True
+                   or analysis.get("image_quality") not in {"good", "acceptable"}
+                   or analysis.get("needs_clarification")):
+        unavailable = bool(analysis.get("from_fallback"))
+        subject = {"agriculture": "la plante ou de la partie touchee", "elevage": "l'animal ou de la partie touchee",
+                   "cybersecurity": "l'ecran concerne sans information confidentielle"}.get(category, "la situation sans vous mettre en danger")
+        message = ("L'analyse photo est temporairement indisponible. Reessayez ou contactez un conseiller."
+                   if unavailable else f"Cette photo ne permet pas l'analyse demandee. Envoyez une photo nette et bien eclairee de {subject}.")
+        result = clarification_analysis(category, message, unavailable=unavailable)
+        result["image_quality"] = analysis.get("image_quality", "unknown")
+        return result
+    if analysis.get("from_fallback") and category not in {"urgence", "sos_accident"}:
+        return clarification_analysis(category, "Le service IA est temporairement indisponible. Reessayez ou contactez un conseiller.", unavailable=True)
+    return analysis
+
+
+async def _analyze_unchecked(
     text: str = "",
     images_b64: Optional[List[str]] = None,
     category: str = "agriculture",
@@ -1102,6 +1206,11 @@ def decide(analysis: dict) -> dict:
         "transfert_expert": False,
         "priorite": 3,
     }
+
+    if analysis.get("needs_clarification") or analysis.get("from_fallback"):
+        decision["transfert_expert"] = bool(analysis.get("consulter_expert"))
+        decision["mode_urgence"] = analysis.get("gravite") == "critique"
+        return decision
 
     # MODE URGENCE
     if gravite == "critique" or type_probleme == "urgence":
@@ -1426,6 +1535,17 @@ def _build_human_message(analysis: dict, decision: dict) -> str:
         return urgency_header + short_diag + "\n\n" + immediate_steps + emergency_line
 
     # STANDARD / DÉTAILLÉ
+    if analysis.get("needs_clarification"):
+        return diagnostic
+    advice = analysis.get("question_intent") in {"general_advice", "agricultural_technique", "livestock_technique"}
+    if advice:
+        steps = analysis.get("actions_immediates", []) + analysis.get("actions_detaillees", [])
+        unique_steps = list(dict.fromkeys(steps))
+        body = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(unique_steps))
+        title = "Objectif : " if analysis.get("learning_requested") else ""
+        prevention = "\n".join(analysis.get("actions_preventives", []))
+        question = analysis.get("question_complementaire")
+        return title + diagnostic + ("\n\nEtapes :\n" + body if body else "") + ("\n\nBonnes pratiques :\n" + prevention if prevention else "") + ("\n\n" + question if question else "")
     header = {"agriculture": "🌿 Diagnostic agricole\n\n", "elevage": "🐄 Diagnostic animal\n\n"}.get(type_probleme, "ℹ️ Résultat\n\n")
 
     visual_part = f"👁️ Ce que j'observe :\n{analysis['description_visuelle']}\n\n" if analysis.get("description_visuelle") else ""
@@ -1446,7 +1566,8 @@ def _build_human_message(analysis: dict, decision: dict) -> str:
     if analysis.get("consulter_expert") and analysis.get("message_expert"):
         expert_part = f"\n👨‍⚕️ {analysis['message_expert']}\n"
 
-    return header + visual_part + diag_part + confiance_part + causes_part + expert_part
+    question = analysis.get("question_complementaire")
+    return header + visual_part + diag_part + confiance_part + causes_part + expert_part + ("\n" + question if question else "")
 
 
 def _build_actions_list(analysis: dict, decision: dict) -> list:
@@ -1544,8 +1665,12 @@ async def gemini_llm_answer(
 
     # Diagnostic photo
     photo_section = ""
-    if photo_analysis and (photo_analysis.get("disease_detected") or photo_analysis.get("observations")):
+    if photo_analysis and not photo_analysis.get("from_fallback") and (photo_analysis.get("disease_detected") or photo_analysis.get("observations") or photo_analysis.get("diagnostic") or photo_analysis.get("description_visuelle")):
         parts = []
+        if photo_analysis.get("diagnostic"):
+            parts.append(f"Hypothese : {photo_analysis['diagnostic']}")
+        if photo_analysis.get("description_visuelle"):
+            parts.append(f"Visible : {photo_analysis['description_visuelle']}")
         if photo_analysis.get("disease_detected"):
             parts.append(f"Problème : {photo_analysis['disease_detected']}")
         if photo_analysis.get("detected_subject"):
@@ -1556,7 +1681,7 @@ async def gemini_llm_answer(
 
     if photo_section:
         user_prompt = (
-            f"Domaine: {domain}. Langue: {language or 'fr'}.\n\n"
+            f"Domaine: {domain}. Langue: {language or 'fr'}. Question: {question}\n\n"
             f"{photo_section}\n"
             f"FICHES :\n{context_text}\n\n"
             f"{focus_instruction}{conversation_text}"
@@ -1605,7 +1730,7 @@ async def gemini_llm_general_knowledge(
     }.get(domain, domain)
 
     system_prompt = (
-        "Tu es Songra, un assistant rural qui aide les communautés du Burkina Faso. \n"
+        SYSTEM_PROMPT + "\n"
         f"Spécialité actuelle : {domain_description}. \n"
         f"Tu parles comme un {_category_expertise(domain)}. \n"
         "Réponses SIMPLES, PRATIQUES, HONNÊTES. \n"
@@ -1626,8 +1751,12 @@ async def gemini_llm_general_knowledge(
             conversation_text = "\nConversation:\n" + "\n".join(turns) + "\n"
 
     photo_section = ""
-    if photo_analysis and (photo_analysis.get("disease_detected") or photo_analysis.get("observations")):
+    if photo_analysis and not photo_analysis.get("from_fallback") and (photo_analysis.get("disease_detected") or photo_analysis.get("observations") or photo_analysis.get("diagnostic") or photo_analysis.get("description_visuelle")):
         parts = []
+        if photo_analysis.get("diagnostic"):
+            parts.append(f"Hypothese : {photo_analysis['diagnostic']}")
+        if photo_analysis.get("description_visuelle"):
+            parts.append(f"Visible : {photo_analysis['description_visuelle']}")
         if photo_analysis.get("disease_detected"):
             parts.append(f"Problème : {photo_analysis['disease_detected']}")
         if photo_analysis.get("detected_subject"):
@@ -1638,7 +1767,7 @@ async def gemini_llm_general_knowledge(
 
     if photo_section:
         user_prompt = (
-            f"Domaine: {domain}. Langue: {language or 'fr'}.\n\n"
+            f"Domaine: {domain}. Langue: {language or 'fr'}. Question: {question}\n\n"
             f"{photo_section}\n"
             "Commence par 'D'après l'analyse de ta photo :'. Sois extrêmement bref et concis. Maximum 4 à 5 courtes phrases simples au total (pas de longues phrases).\n"
             f"{conversation_text}"
@@ -1647,7 +1776,7 @@ async def gemini_llm_general_knowledge(
         user_prompt = (
             f"Langue : {language or 'fr'}. Domaine : {domain}.\n"
             f"Question : {question}\n{conversation_text}\n"
-            "Aide cette personne de façon très brève. Donne maximum 3 conseils concrets ultra-courts (chaque conseil max 8 mots). Maximum 4 à 5 courtes phrases au total pour faciliter la traduction."
+            "Reponds directement a la demande. Une question simple appelle une reponse courte. Pour apprendre ou se former, explique les etapes, bonnes pratiques et erreurs a eviter a la profondeur demandee."
         )
 
     # ── Routing provider ──────────────────────────────

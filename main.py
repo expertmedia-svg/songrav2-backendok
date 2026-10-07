@@ -2890,6 +2890,8 @@ def _find_studio_knowledge_match(
     photo_analysis: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Retourne la fiche validée du Studio la plus proche du texte/diagnostic."""
+    if (photo_analysis or {}).get("needs_clarification"):
+        return None
     normalized_category = _normalize_expert_local_category(category)
     candidates = (
         db.query(ExpertLocalKnowledgeDB)
@@ -2918,7 +2920,7 @@ def _find_studio_knowledge_match(
         str(analysis.get("analysis") or ""),
     ]
     search_blob = " ".join(part for part in search_parts if part)
-    search_tokens = set(_tokenize(search_blob))
+    search_tokens = _rural_tokens(search_blob)
     # Les modèles Vision peuvent employer les noms internationaux même quand
     # la fiche Studio est rédigée en français. Ces équivalences ne traduisent
     # pas la réponse : elles servent uniquement au rapprochement des fiches.
@@ -2944,11 +2946,13 @@ def _find_studio_knowledge_match(
     )
     for item in candidates:
         tags = [str(tag) for tag in _load_json_list(item.tags_json)]
+        if not _resource_relevant(search_blob, " ".join([item.title or "", item.question_fr or "", " ".join(tags)]), normalized_category):
+            continue
         score = (
-            4.0 * len(search_tokens & set(_tokenize(item.title or "")))
-            + 3.5 * len(search_tokens & set(_tokenize(" ".join(tags))))
-            + 2.0 * len(search_tokens & set(_tokenize(item.question_fr or "")))
-            + 0.25 * len(search_tokens & set(_tokenize(item.resolution_fr or "")))
+            4.0 * len(search_tokens & _rural_tokens(item.title or ""))
+            + 3.5 * len(search_tokens & _rural_tokens(" ".join(tags)))
+            + 2.0 * len(search_tokens & _rural_tokens(item.question_fr or ""))
+            + 0.25 * len(search_tokens & _rural_tokens(item.resolution_fr or ""))
         )
         normalized_title = _normalize_search_text(item.title or "")
         if normalized_title and normalized_problem and (
@@ -2960,10 +2964,10 @@ def _find_studio_knowledge_match(
 
     if best is not None:
         print(
-            f"[STUDIO-MATCH] diagnostic='{str(analysis.get('diagnostic') or analysis.get('disease_detected') or '')[:120]}' "
+            f"[STUDIO-MATCH] "
             f"meilleure_fiche=#{best[1].id} '{best[1].title}' score={round(best[0], 2)}"
         )
-    if best is None or best[0] < 4.0:
+    if best is None or best[0] < float(os.getenv("SONGRA_KNOWLEDGE_MIN_SCORE", "4")):
         return None
     result = _serialize_expert_local_knowledge_item(best[1])
     result["match_score"] = round(best[0], 2)
@@ -3024,7 +3028,7 @@ def _apply_studio_match_to_v2_response(
         result["local_audio_message"] = None if has_local_audio else (
             "La voix dédiée à cette fiche est indisponible dans cette langue."
         )
-        result["french_fallback_available"] = True
+        result["french_fallback_available"] = bool(str(french_audio.get("url") or "").strip())
         result["target_lang"] = target_lang
         result["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
         result["audio_url"] = local_audio.get("url") if has_local_audio else None
@@ -4425,9 +4429,10 @@ class AITriageEngine:
                           "irrigation", "tomate", "oignon", "arachide", "coton", "semis", "semer",
                           "planter", "repiquer", "rendement", "production", "compost", "fumure",
                           "saison des pluies", "calendrier cultural", "récolter", "conserver",
-                          "manioc", "riz", "feuille", "insecte", "parasite", "engrais"],
+                          "manioc", "riz", "feuille", "insecte", "parasite", "engrais",
+                          "ail", "niebe", "sesame", "maraichage", "termite", "stockage"],
             # Catégorie élevage : animaux, bétail, poules…
-            "elevage": ["bétail", "vache", "boeuf", "chèvre", "mouton", "poules", "volaille",
+            "elevage": ["bétail", "vache", "boeuf", "chèvre", "mouton", "poules", "poulet", "volaille",
                         "lapin", "lapereau", "clapier",
                         "agneau", "veau", "animal", "troupeau", "abri", "vermifuge", "parasites",
                         "nourrir", "alimentation animale", "ration", "fourrage", "reproduction",
@@ -4483,7 +4488,10 @@ def detect_rural_question_intent(text: str, category: str) -> str:
         "conserver", "recolter", "nourrir", "ration", "fourrage", "engraissement",
         "reproduction", "abri", "elevage", "technique", "calendrier",
     }
-    if any(term in normalized for term in disease_terms):
+    disease_terms.update({"termite", "ravageur", "chenille", "jaune", "jaunissement", "meurent", "ne mange plus", "attaque"})
+    technique_terms.update({"cultiver", "culture de", "apprendre", "formation", "maraichage", "stockage", "commercialiser", "vendre", "prevention"})
+    words = set(re.findall(r"\w+", normalized)) | set(_tokenize(normalized))
+    if any(term in words or (" " in term and term in normalized) for term in disease_terms):
         return "plant_disease" if category == "agriculture" else "animal_disease" if category == "elevage" else "incident"
     if category in {"agriculture", "elevage"} and any(term in normalized for term in technique_terms):
         return "agricultural_technique" if category == "agriculture" else "livestock_technique"
@@ -4493,6 +4501,9 @@ ai_engine = AITriageEngine()
 
 FOCUS_SUBJECTS: Dict[str, List[Dict[str, Any]]] = {
     "agriculture": [
+        {"label": "Ail", "aliases": ["ail", "caieux", "caïeux"]},
+        {"label": "Niébé", "aliases": ["niebe", "niébé"]},
+        {"label": "Sésame", "aliases": ["sesame", "sésame"]},
         {"label": "Maïs", "aliases": ["maïs", "mais"]},
         {"label": "Tomate", "aliases": ["tomate", "tomates"]},
         {"label": "Manioc", "aliases": ["manioc", "bouture de manioc"]},
@@ -5749,6 +5760,37 @@ def _normalize_free_text(text: str) -> str:
     return " ".join(normalized.split())
 
 
+def _rural_tokens(text: str) -> set:
+    """Equivalences locales explicites, sans service d'embeddings supplementaire."""
+    aliases = {"cultiver": "culture", "planter": "culture", "plantation": "culture",
+               "poule": "volaille", "poulet": "volaille", "poulets": "volaille",
+               "bovin": "vache", "caprin": "chevre", "ovin": "mouton",
+               "jaunit": "jaune", "jaunissement": "jaune", "attaque": "ravageur"}
+    ignored = {"dans", "mon", "mes", "une", "des", "les", "qui", "que", "pour",
+               "comment", "veux", "apprendre", "avoir", "faire", "sont", "surtout",
+               "elle", "son", "sur", "est", "avec", "champ", "culture", "question"}
+    words = " ".join(re.findall(r"\w+", _normalize_free_text(text)))
+    tokens = {aliases.get(token, token) for token in _tokenize(words)}
+    # Culture reste discriminante pour un cours technique.
+    return tokens - (ignored - {"culture"})
+
+
+def _resource_relevant(question: str, resource: str, domain: str) -> bool:
+    query = _rural_tokens(question)
+    content = _rural_tokens(resource)
+    subjects = FOCUS_SUBJECTS.get(domain, [])
+    for subject in subjects:
+        terms = _rural_tokens(" ".join(subject["aliases"]))
+        if query & terms and not content & terms:
+            return False
+    intent = detect_rural_question_intent(question, domain)
+    resource_intent = detect_rural_question_intent(resource, domain)
+    if intent in {"agricultural_technique", "livestock_technique"} and resource_intent in {"plant_disease", "animal_disease"}:
+        return False
+    overlap = query & content
+    return len(overlap) >= 2 or (len(query) == 1 and bool(overlap))
+
+
 def _build_focus_terms(label: Optional[str], aliases: Optional[List[str]] = None) -> List[str]:
     values = [label or "", *(aliases or [])]
     terms: List[str] = []
@@ -5777,7 +5819,7 @@ def _find_best_focus_match(category: str, text: str, focus_map: Dict[str, List[D
         matched_aliases = []
         for alias in aliases:
             normalized_alias = _normalize_free_text(alias)
-            if normalized_alias and normalized_alias in normalized_text:
+            if normalized_alias and re.search(r"\b" + re.escape(normalized_alias) + r"\b", normalized_text):
                 matched_aliases.append(alias)
 
         score = len(matched_aliases)
@@ -5888,7 +5930,7 @@ def retrieve_knowledge(
             domaine demandé, on fait un second passage sur toutes les fiches pour
             éviter de rater une correspondance évidente.
     """
-    query_tokens = set(_tokenize(query))
+    query_tokens = _rural_tokens(query)
     if not query_tokens:
         return []
 
@@ -5918,6 +5960,8 @@ def retrieve_knowledge(
     def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         scored_local: List[Dict[str, Any]] = []
         for it in items:
+            if not _resource_relevant(query, " ".join([it.get("title") or "", it.get("question") or "", " ".join(it.get("tags") or [])]), domain):
+                continue
             # Séparer les zones de texte pour mieux pondérer
             title_tokens = set(_tokenize(it.get("title") or ""))
             question_tokens = set(_tokenize(it.get("question") or ""))
@@ -6239,6 +6283,7 @@ def resolve_knowledge_answer(
     focus_context: Optional[Dict[str, Any]] = None,
     photo_analysis: Optional[Dict[str, Any]] = None,
     organization_id: Optional[int] = None,
+    allow_external: bool = True,
 ) -> Dict[str, Any]:
     """Fiches locales, puis cours pratique, puis connaissance IA generale."""
     question_intent = detect_rural_question_intent(question, domain)
@@ -6252,7 +6297,7 @@ def resolve_knowledge_answer(
     course_match = _find_academy_course_match(
         db, question, domain=domain, organization_id=organization_id
     )
-    studio_match = None if use_general_knowledge else _find_studio_knowledge_match(
+    studio_match = _find_studio_knowledge_match(
         db, category=domain, query_text=question, photo_analysis=photo_analysis
     )
     if studio_match:
@@ -6266,7 +6311,7 @@ def resolve_knowledge_answer(
             "recommended_course": course_match,
         }
 
-    rag_items = [] if use_general_knowledge else retrieve_knowledge(
+    rag_items = retrieve_knowledge(
         db,
         domain,
         question,
@@ -6276,7 +6321,7 @@ def resolve_knowledge_answer(
         focus_issue=(focus_context or {}).get("issue"),
     )
     if rag_items:
-        llm_answer = generate_llm_answer(
+        llm_answer = rag_items[0].get("answer") if not allow_external else generate_llm_answer(
             question=question,
             language=language,
             domain=domain,
@@ -6293,6 +6338,16 @@ def resolve_knowledge_answer(
             "knowledge_fallback_used": False,
             "recommended_course": course_match,
         }
+
+    if course_match:
+        return {
+            "rag_items": [], "llm_answer": course_match.get("summary"),
+            "rag_fallback_answer": None, "knowledge_mode": "course_knowledge",
+            "knowledge_fallback_used": False, "recommended_course": course_match,
+        }
+    if not allow_external:
+        return {"rag_items": [], "llm_answer": None, "rag_fallback_answer": None,
+                "knowledge_mode": "no_match", "recommended_course": None}
 
     # Aucune fiche Studio assez proche : analyse générale en repli.
     import asyncio
@@ -9857,7 +9912,7 @@ def _find_academy_course_match(
         query = query.filter(AcademyCourseDB.organization_id.is_(None))
     else:
         query = query.filter(AcademyCourseDB.organization_id == organization_id)
-    query_tokens = set(_tokenize(question))
+    query_tokens = _rural_tokens(question)
     normalized_question = _normalize_free_text(question)
     temporal_terms = {"quand", "periode", "date", "calendrier", "saison", "moment"}
     asks_calendar = any(term in normalized_question for term in temporal_terms)
@@ -9865,7 +9920,9 @@ def _find_academy_course_match(
     for course in query.all():
         headline = " ".join([course.title or "", course.crop or "", course.summary or ""])
         searchable = " ".join([headline, json.dumps(_load_json_list(course.steps_json), ensure_ascii=False)])
-        course_tokens = set(_tokenize(searchable))
+        course_tokens = _rural_tokens(searchable)
+        if not _resource_relevant(question, headline, domain):
+            continue
         overlap = query_tokens & course_tokens
         headline_normalized = _normalize_free_text(headline)
         if asks_calendar and not any(term in headline_normalized for term in temporal_terms):
@@ -9873,7 +9930,7 @@ def _find_academy_course_match(
         # Un seul mot commun (souvent seulement "mais") ne suffit pas pour
         # afficher un cours comme pertinent.
         score = float(len(overlap))
-        if len(overlap) >= 2 and (best is None or score > best[0]):
+        if score >= float(os.getenv("SONGRA_COURSE_MIN_SCORE", "2")) and (best is None or score > best[0]):
             best = (score, course)
     if best is None:
         return None
@@ -12620,6 +12677,9 @@ class V2AnalyzeRequest(BaseModel):
     photo_base64_list: Optional[List[str]] = None
     generate_media: Optional[bool] = True
     target_lang: Optional[str] = None  # Langue locale : "moore", "dioula", "fulfulde"
+    input_type: str = "text"
+    source_lang: Optional[str] = None
+    conversation_context: Optional[List[Dict[str, str]]] = None
 
 class V2EntreprendreRequest(BaseModel):
     text: Optional[str] = ""
@@ -12726,25 +12786,109 @@ async def v2_analyze(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Pipeline v2 complet : texte + photos → Gemini → décision → médias → réponse unique"""
-    import time as _time
-    start_time = _time.time()
-    _require_resource(db, current_user, "analyses")
+    """Analyse multimodale commune, avec medias optionnels."""
+    return await _run_v2_pipeline(data, current_user, db, generate_media=data.generate_media is not False)
 
-    text = data.text or data.content or ""
-    category = _normalize_category(data.category)
-    generate_media = data.generate_media is not False
+
+@app.post("/api/v2/scanner/analyze")
+async def v2_scanner_analyze(
+    data: V2AnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Scanner : meme moteur que le texte/vocal apres validation photo."""
+    if not data.photo_base64 and not data.photo_base64_list:
+        raise HTTPException(status_code=400, detail="Le scanner necessite au moins une photo.")
+    return await v2_assistant_query(data, current_user=current_user, db=db)
+
+
+@app.post("/api/v2/assistant/query")
+async def v2_assistant_query(
+    data: V2AnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return await _run_v2_pipeline(data, current_user, db)
+
+
+def _resolve_v2_local_knowledge(**kwargs):
+    try:
+        return resolve_knowledge_answer(**kwargs)
+    except Exception as error:
+        print(f"[SONGRA-KNOWLEDGE] unavailable error={type(error).__name__}")
+        return {"knowledge_mode": "no_match", "rag_items": [],
+                "recommended_course": None, "knowledge_unavailable": True}
+
+
+async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Session,
+                           *, generate_media: bool = False):
+    """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
+    started_at = time.perf_counter()
+    _require_resource(db, current_user, "analyses")
+    text = (data.text or data.content or "").strip()
+    original_text = text
+    history = [
+        {"role": turn.get("role", "user"), "content": str(turn.get("content") or "")[:1200]}
+        for turn in (data.conversation_context or [])[-6:]
+        if turn.get("role") in {"user", "assistant"} and str(turn.get("content") or "").strip()
+    ]
+    if data.input_type == "voice" and (len(text) < 3 or text.lower() in {"error", "erreur", "null", "undefined"}):
+        raise HTTPException(status_code=422, detail="Je n'ai pas compris. Veuillez repeter ou ecrire votre question.")
+    source_lang = (data.source_lang or "fr").strip().lower()
+    # La preference de lecture peut etre locale alors que le texte saisi est
+    # francais. Ne retraduire que les entrees locales, pas ces phrases claires.
+    french_markers = {"comment", "pourquoi", "quand", "mon", "mes", "dans", "cultiver",
+                      "planter", "semer", "nourrir", "conserver", "apprendre", "feuille", "poulet"}
+    if data.input_type != "voice" and len(set(_tokenize(text)) & french_markers) >= 2:
+        source_lang = "fr"
+    if source_lang in _TRANSLATOR_VALID_LANGS:
+        import asyncio
+        from burkina_translator import translate_query_to_french
+        details = await asyncio.to_thread(translate_query_to_french, text, source_lang, GEMINI_API_KEY, True)
+        if not isinstance(details, dict) or details.get("source") == "fallback_original" or float(details.get("confidence") or 0) < float(os.getenv("SONGRA_LANGUAGE_MIN_CONFIDENCE", "0.5")):
+            raise HTTPException(status_code=422, detail="Je n'ai pas compris la question dans cette langue. Veuillez repeter ou reformuler.")
+        text = str(details.get("french_query") or "").strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="La transcription est vide. Veuillez repeter.")
+    search_text = text
+    if history and not _find_best_focus_match(_normalize_category(data.category), text, FOCUS_SUBJECTS):
+        previous = next((turn["content"] for turn in reversed(history) if turn["role"] == "user"), "")
+        search_text = f"{previous}\nQuestion actuelle : {text}"
+    classified = ai_engine.classify(search_text)
+    category = _normalize_category(
+        classified["category"] if classified.get("confidence", 0) > 0 and not (data.photo_base64 or data.photo_base64_list) else data.category
+    )
     images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
 
+    # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
+    target_lang = (data.target_lang or "").strip().lower() or None
+
     if not text.strip() and not images_b64:
-        raise HTTPException(status_code=400, detail="Envoyez au moins du texte ou une photo pour obtenir un diagnostic.")
+        raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
 
-    # ÉTAPE 1 : Analyse Gemini unifiée
-    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
-
-    # ÉTAPE 2 : Décision (image? vidéo? urgence?)
+    # Les ressources internes passent avant le modele, sauf lorsqu'une photo
+    # exige d'abord une observation visuelle reelle.
+    domain = "health" if category in {"urgence", "sos_accident"} else category
+    knowledge_result = None
+    if not images_b64:
+        knowledge_result = _resolve_v2_local_knowledge(
+            db=db, domain=domain, question=search_text, language="fr",
+            conversation_context=history, organization_id=getattr(current_user, "organization_id", None),
+            allow_external=False,
+        )
+    local_answer = (knowledge_result or {}).get("llm_answer") or (knowledge_result or {}).get("rag_fallback_answer")
+    if local_answer and (knowledge_result or {}).get("knowledge_mode") != "no_match":
+        card = knowledge_result.get("studio_match") or {}
+        analysis = v2_services._validate_analysis({
+            "type_probleme": category, "diagnostic": card.get("title") or local_answer,
+            "gravite": "critique" if category == "urgence" else "faible", "confiance": 1,
+            "consulter_expert": classified.get("urgency") == "high",
+        })
+    else:
+        analysis = await v2_services.gemini_analyze(text=search_text, images_b64=images_b64, category=category)
+    analysis["question_intent"] = detect_rural_question_intent(search_text, category)
+    analysis["learning_requested"] = any(term in _normalize_free_text(text) for term in {"apprendre", "formation", "apprends", "enseigne"})
     decision = v2_services.decide(analysis)
-
     # ÉTAPE 3 : Génération médias (si demandé)
     image_result = None
     video_result = None
@@ -12794,214 +12938,29 @@ async def v2_analyze(
                 elif label == "video":
                     video_result = result
 
-    # ÉTAPE 4 : Réponse unique
-    final_response = v2_services.build_response(
-        analysis=analysis,
-        decision=decision,
-        image_result=image_result,
-        video_result=video_result,
-    )
-    target_lang = (data.target_lang or "").strip().lower() or None
-    studio_match = _find_studio_knowledge_match(
-        db,
-        category=category,
-        query_text=text,
-        photo_analysis=analysis,
-    )
-    if studio_match:
-        print(
-            f"[STUDIO] [V2-ANALYZE] Fiche #{studio_match.get('id')} "
-            f"'{studio_match.get('title')}' utilisee "
-            f"(score={studio_match.get('match_score')}, langue={target_lang or 'fr'})"
-        )
-        final_response = _apply_studio_match_to_v2_response(
-            final_response, studio_match, target_lang
-        )
-        selected_audio = ((studio_match.get("audio") or {}).get(target_lang) or {}) if target_lang else {}
-        if target_lang and not str(selected_audio.get("url") or "").strip():
-            print(
-                f"[STUDIO] [V2-ANALYZE] Voix {target_lang} indisponible; "
-                "le mobile doit proposer la lecture francaise"
+    final_response = v2_services.build_response(analysis=analysis, decision=decision, image_result=image_result, video_result=video_result)
+    studio_match = (knowledge_result or {}).get("studio_match")
+    if not studio_match and not analysis.get("needs_clarification"):
+        try:
+            studio_match = _find_studio_knowledge_match(
+                db, category=category, query_text=search_text, photo_analysis=analysis,
             )
-    else:
-        print(
-            f"[STUDIO] [V2-ANALYZE] Aucune fiche validee correspondante "
-            f"(categorie={category}, langue={target_lang or 'fr'}); "
-            "le mobile doit proposer la lecture francaise"
-        )
-
-    offline_payload = {
-        **final_response,
-        "input_photo_base64": images_b64[0] if images_b64 else None,
-    }
-
-    try:
-        _persist_offline_knowledge_entry(
-            db=db,
-            user_id=current_user.id,
-            source_kind="v2_analyze",
-            category=category,
-            question_text=text or "Analyse photo Songra",
-            response_payload=offline_payload,
-        )
-    except Exception as e:
-        print(f"[OFFLINE-CORPUS] Erreur persistance v2/analyze: {e}")
-
-    duration = int((_time.time() - start_time) * 1000)
-
-    # La langue locale sélectionne uniquement une voix de fiche Studio.
-    # Aucune traduction ni synthèse vocale n'est générée à la volée.
-    voice_payload = None
-
-    _consume_resource(db, current_user, "analyses", "v2_analyze")
-    return {
-        "status": "success",
-        **final_response,
-        "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else final_response.get("audio_url"),
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else final_response.get("audio_mime_type"),
-        "_meta": {
-            "duration_ms": duration,
-            "provider": v2_services.AI_PROVIDER,
-            "model": (
-                v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq"
-                else v2_services.OPENAI_MODEL if v2_services.AI_PROVIDER == "openai"
-                else v2_services.GEMINI_MODEL
-            ),
-            "from_cache": analysis.get("from_cache", False),
-            "fallback_used": analysis.get("from_fallback", False),
-            "translated": False,
-            "target_lang": target_lang,
-            "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
-        },
-    }
-
-
-@app.post("/api/v2/scanner/analyze")
-async def v2_scanner_analyze(
-    data: V2AnalyzeRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Scanner v2 : au moins 1 photo requise"""
-    _require_resource(db, current_user, "analyses")
-    text = data.text or data.content or ""
-    category = _normalize_category(data.category)
-    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
-
-    # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
-    target_lang = (data.target_lang or "").strip().lower() or None
-
-
-    if not images_b64:
-        raise HTTPException(status_code=400, detail="Le scanner nécessite au moins une photo.")
-
-    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
-    decision = v2_services.decide(analysis)
-    final_response = v2_services.build_response(analysis=analysis, decision=decision)
-    studio_match = _find_studio_knowledge_match(
-        db,
-        category=category,
-        query_text=text,
-        photo_analysis=analysis,
-    )
-    if studio_match:
-        print(
-            f"[STUDIO] [V2-SCANNER] Fiche #{studio_match.get('id')} "
-            f"'{studio_match.get('title')}' utilisee "
-            f"(score={studio_match.get('match_score')}, langue={target_lang or 'fr'})"
-        )
-        final_response = _apply_studio_match_to_v2_response(
-            final_response, studio_match, target_lang
-        )
-        selected_audio = ((studio_match.get("audio") or {}).get(target_lang) or {}) if target_lang else {}
-        if target_lang and not str(selected_audio.get("url") or "").strip():
-            print(
-                f"[STUDIO] [V2-SCANNER] Voix {target_lang} indisponible; "
-                "proposition de lecture francaise envoyee au mobile"
-            )
-    else:
-        print(
-            f"[STUDIO] [V2-SCANNER] Aucune fiche validee correspondante "
-            f"(categorie={category}, langue={target_lang or 'fr'}); "
-            "proposition de lecture francaise envoyee au mobile"
-        )
-
-    offline_payload = {
-        **final_response,
-        "input_photo_base64": images_b64[0] if images_b64 else None,
-    }
-
-    try:
-        _persist_offline_knowledge_entry(
-            db=db,
-            user_id=current_user.id,
-            source_kind="v2_scanner",
-            category=category,
-            question_text=text or "Scan photo Songra",
-            response_payload=offline_payload,
-        )
-    except Exception as e:
-        print(f"[OFFLINE-CORPUS] Erreur persistance v2/scanner: {e}")
-
-    # Pas de traduction : voix Studio si disponible, sinon proposition FR.
-    voice_payload = None
-
-    _consume_resource(db, current_user, "analyses", "v2_scanner")
-    return {
-        "status": "success",
-        **final_response,
-        "translated": False,
-        "target_lang": target_lang,
-        "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
-        "voice_summary": voice_payload.get("voice_summary") if voice_payload else None,
-        "audio_url": voice_payload.get("audio_url") if voice_payload else final_response.get("audio_url"),
-        "audio_mime_type": voice_payload.get("audio_mime_type") if voice_payload else final_response.get("audio_mime_type"),
-    }
-
-
-@app.post("/api/v2/assistant/query")
-async def v2_assistant_query(
-    data: V2AnalyzeRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
-    _require_resource(db, current_user, "analyses")
-    text = data.text or data.content or ""
-    classified = ai_engine.classify(text)
-    category = _normalize_category(
-        classified["category"] if classified.get("confidence", 0) > 0 else data.category
-    )
-    images_b64 = _collect_images_b64(data.photo_base64, data.photo_base64_list)
-
-    # target_lang sert uniquement à choisir la voix enregistrée dans le Studio.
-    target_lang = (data.target_lang or "").strip().lower() or None
-
-    if not text.strip() and not images_b64:
-        raise HTTPException(status_code=400, detail="Posez une question ou envoyez une photo.")
-
-    analysis = await v2_services.gemini_analyze(text=text, images_b64=images_b64, category=category)
-    decision = v2_services.decide(analysis)
-    final_response = v2_services.build_response(analysis=analysis, decision=decision)
-    studio_match = _find_studio_knowledge_match(
-        db,
-        category=category,
-        query_text=text,
-        photo_analysis=analysis,
-    )
+        except Exception as error:
+            print(f"[SONGRA-KNOWLEDGE] studio unavailable error={type(error).__name__}")
     if studio_match:
         final_response = _apply_studio_match_to_v2_response(
             final_response, studio_match, target_lang
         )
-    knowledge_result = resolve_knowledge_answer(
+    knowledge_result = knowledge_result or ({} if analysis.get("needs_clarification") else _resolve_v2_local_knowledge(
         db=db,
-        domain="health" if category == "sos_accident" else category,
-        question=text,
+        domain=domain,
+        question=search_text,
         language="fr",
         photo_analysis=analysis,
         organization_id=getattr(current_user, "organization_id", None),
-    )
+        conversation_context=history,
+        allow_external=False,
+    ))
     grounded_answer = _clean_assistant_text(
         knowledge_result.get("llm_answer") or knowledge_result.get("rag_fallback_answer")
     )
@@ -13010,15 +12969,77 @@ async def v2_assistant_query(
     if grounded_answer and not studio_match and knowledge_result.get("knowledge_mode") != "no_match":
         final_response["message"] = grounded_answer
     final_response["category"] = category
-    final_response["question_intent"] = detect_rural_question_intent(text, category)
+    final_response["question_intent"] = detect_rural_question_intent(search_text, category)
     final_response["knowledge_mode"] = knowledge_result.get("knowledge_mode")
     final_response["rag_items"] = knowledge_result.get("rag_items", [])
     final_response["recommended_course"] = knowledge_result.get("recommended_course")
+    final_response["original_query"] = original_text
+    final_response["source_lang"] = source_lang
+    final_response["input_type"] = "photo" if images_b64 else data.input_type
+    final_response["needs_clarification"] = bool(analysis.get("needs_clarification"))
+    final_response["fallback_used"] = bool(analysis.get("from_fallback"))
+    normalized_request = _normalize_free_text(search_text)
+    intents = ["DIAGNOSTIC" if final_response["question_intent"] in {"plant_disease", "animal_disease"} else "CONSEIL"]
+    for label, markers in {
+        "FORMATION": ("formation", "apprendre", "apprends", "enseigne"),
+        "TECHNIQUE": ("cultiver", "planter", "semer", "nourrir", "conserver"),
+        "PREVENTION": ("prevenir", "prevention", "eviter"),
+        "BONNE_PRATIQUE": ("bonne pratique", "stockage", "conservation"),
+        "ORIENTATION": ("contacter", "ou trouver", "professionnel"),
+    }.items():
+        if any(marker in normalized_request for marker in markers):
+            intents.append(label)
+    if images_b64:
+        intents.append("ANALYSE_IMAGE")
+    if category == "urgence" or analysis.get("gravite") == "critique":
+        intents.append("URGENCE")
+    final_response["request_context"] = {
+        "selected_language": target_lang or "fr", "source_language": source_lang,
+        "input_type": final_response["input_type"], "domain": category, "intents": intents,
+        "crop": (_find_best_focus_match("agriculture", search_text, FOCUS_SUBJECTS) or {}).get("label"),
+        "animal": (_find_best_focus_match("elevage", search_text, FOCUS_SUBJECTS) or {}).get("label"),
+        "needs_training": "FORMATION" in intents,
+        "urgency": analysis.get("gravite"),
+        "clarifying_question": analysis.get("question_complementaire") or None,
+    }
+    if analysis.get("from_fallback") and not studio_match and not local_answer:
+        final_response["knowledge_mode"] = "ai_unavailable"
+    elif knowledge_result.get("knowledge_mode") == "no_match" and not analysis.get("from_fallback"):
+        final_response["knowledge_mode"] = "external_ai"
+    print("[SONGRA-PIPELINE] " + json.dumps({
+        "inputType": final_response["input_type"], "selectedLanguage": target_lang or "fr",
+        "sourceLanguage": source_lang, "queryLength": len(text), "historyTurns": len(history),
+        "imageReceived": bool(images_b64), "imageQuality": analysis.get("image_quality"),
+        "imageRelevantToRequestedCategory": analysis.get("image_relevant"),
+        "detectedDomain": category, "detectedIntent": final_response["question_intent"],
+        "detectedCrop": (_find_best_focus_match("agriculture", search_text, FOCUS_SUBJECTS) or {}).get("label"),
+        "detectedAnimal": (_find_best_focus_match("elevage", search_text, FOCUS_SUBJECTS) or {}).get("label"),
+        "knowledgeSearchResults": len(knowledge_result.get("rag_items", [])),
+        "selectedKnowledgeId": (studio_match or {}).get("id"),
+        "bestKnowledgeScore": (studio_match or {}).get("match_score"),
+        "suggestedCourseId": (knowledge_result.get("recommended_course") or {}).get("id"),
+        "localAudioAvailable": final_response.get("local_audio_available", False),
+        "fallbackTriggered": final_response["knowledge_mode"] in {"external_ai", "ai_unavailable"},
+        "AIProvider": v2_services.AI_PROVIDER,
+        "AIModel": v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq" else v2_services.OPENAI_MODEL if v2_services.AI_PROVIDER == "openai" else v2_services.GEMINI_MODEL,
+    }, ensure_ascii=False))
     if final_response["question_intent"] in {"agricultural_technique", "livestock_technique", "general_advice"}:
         diagnostic = final_response.get("diagnostic")
         if isinstance(diagnostic, dict):
             diagnostic["icone_pedagogique"] = "arrosage" if category == "agriculture" else "veterinaire"
             diagnostic["type"] = category
+
+    if analysis.get("needs_clarification") and not analysis.get("from_fallback"):
+        final_response["knowledge_mode"] = "needs_clarification"
+    final_response["_meta"] = {
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "provider": v2_services.AI_PROVIDER,
+        "model": v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq" else v2_services.OPENAI_MODEL if v2_services.AI_PROVIDER == "openai" else v2_services.GEMINI_MODEL,
+        "from_cache": analysis.get("from_cache", False),
+        "fallback_used": analysis.get("from_fallback", False),
+        "target_lang": target_lang, "translated": False,
+        "lang_name": _TRANSLATOR_LANG_NAMES.get(target_lang) if target_lang else None,
+    }
 
     offline_payload = {
         **final_response,
@@ -13026,21 +13047,23 @@ async def v2_assistant_query(
     }
 
     try:
-        _persist_offline_knowledge_entry(
-            db=db,
-            user_id=current_user.id,
-            source_kind="v2_assistant_query",
-            category=category,
-            question_text=text or "Question Songra",
-            response_payload=offline_payload,
-        )
+        if not analysis.get("from_fallback") and not analysis.get("needs_clarification"):
+            _persist_offline_knowledge_entry(
+                db=db,
+                user_id=current_user.id,
+                source_kind="v2_assistant_query",
+                category=category,
+                question_text=original_text or "Question Songra",
+                response_payload=offline_payload,
+            )
     except Exception as e:
         print(f"[OFFLINE-CORPUS] Erreur persistance v2/assistant: {e}")
 
     # Pas de traduction : voix Studio si disponible, sinon proposition FR.
     voice_payload = None
 
-    _consume_resource(db, current_user, "analyses", "v2_assistant")
+    if not analysis.get("from_fallback") and not analysis.get("needs_clarification"):
+        _consume_resource(db, current_user, "analyses", "v2_assistant")
     return {
         "status": "success",
         **final_response,
