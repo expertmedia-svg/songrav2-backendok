@@ -13,6 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main
 
 
+@pytest.fixture(autouse=True)
+def controlled_semantic_provider(semantic_stub):
+    return semantic_stub
+
+
 def _db():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool

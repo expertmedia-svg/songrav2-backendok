@@ -1,0 +1,4041 @@
+{
+  "provider": "groq",
+  "model": "qwen/qwen3.8-27b",
+  "rubric": "ordinal 0..4, direct-answer bands only",
+  "syntheticCases": [
+    {
+      "case": "A",
+      "expected": [
+        "culture"
+      ],
+      "actual": [
+        "culture"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Comment cultiver le maïs ?",
+        "normalizedQuery": "comment cultiver le mais",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_culture",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": null,
+        "detectedSymptoms": [],
+        "requestedAction": "fournir les techniques de culture",
+        "userGoal": "apprendre à cultiver le maïs",
+        "context": "Demande générale sur les pratiques agronomiques pour la culture du maïs.",
+        "searchTerms": [
+          "culture du maïs",
+          "techniques de culture maïs",
+          "semis maïs",
+          "entretien maïs",
+          "récolte maïs",
+          "fertilisation maïs",
+          "irrigation maïs"
+        ],
+        "candidateKnowledgeIds": [
+          "culture",
+          "storage",
+          "termite",
+          "market",
+          "garlic_culture"
+        ],
+        "candidateScores": [
+          12.25,
+          10.5,
+          6.25,
+          6.25,
+          6.25
+        ],
+        "candidateTitles": [
+          "Cultiver le maïs",
+          "Conserver le maïs après la récolte",
+          "Termites des jeunes plants de maïs",
+          "Commercialisation du maïs",
+          "Culture de l'ail"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "culture",
+            "score": 4,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "Choisissez la parcelle, préparez le sol, semez",
+            "reason": "Réponse directe et complète à la demande.",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Séchez soigneusement les grains après la récolte",
+            "reason": "Hors sujet : stockage post-récolte.",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Inspectez les pieds de maïs et les galeries",
+            "reason": "Hors sujet : lutte contre les termites.",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Hors sujet : commercialisation et vente.",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "garlic_culture",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Choisissez des caïeux sains, préparez un sol drainant",
+            "reason": "Hors sujet : culture de l'ail.",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": "culture",
+        "selectedKnowledgeScore": 4,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "B",
+      "expected": [
+        "termite"
+      ],
+      "actual": [
+        "termite"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Des termites attaquent mon maïs.",
+        "normalizedQuery": "des termites attaquent mon mais",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "diagnostic",
+        "detectedCrop": "maïs",
+        "detectedAnimal": "termites",
+        "detectedProblem": "attaque de termites",
+        "detectedSymptoms": [],
+        "requestedAction": null,
+        "userGoal": "identifier la cause de l'attaque et obtenir des solutions de lutte",
+        "context": "culture de maïs",
+        "searchTerms": [
+          "termites",
+          "maïs",
+          "attaque",
+          "dommage",
+          "symptômes",
+          "lutte",
+          "prévention",
+          "insecte nuisible"
+        ],
+        "candidateKnowledgeIds": [
+          "termite",
+          "storage",
+          "armyworm",
+          "market",
+          "culture"
+        ],
+        "candidateScores": [
+          15.0,
+          8.5,
+          6.25,
+          6.25,
+          6.0
+        ],
+        "candidateTitles": [
+          "Termites des jeunes plants de maïs",
+          "Conserver le maïs après la récolte",
+          "Chenille légionnaire du maïs",
+          "Commercialisation du maïs",
+          "Cultiver le maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "termite",
+            "score": 3,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "Faites identifier le ravageur avant de demander une méthode de lutte",
+            "reason": "Répond à l'objectif de diagnostic et lutte",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Stockez le maïs sec dans des sacs propres",
+            "reason": "Hors sujet : stockage post-récolte",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "armyworm",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Recherchez les chenilles dans le cœur des feuilles",
+            "reason": "Hors sujet : chenilles, pas termites",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Hors sujet : commercialisation",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Choisissez la parcelle, préparez le sol, semez",
+            "reason": "Hors sujet : culture générale",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": "termite",
+        "selectedKnowledgeScore": 3,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "C",
+      "expected": [
+        "storage"
+      ],
+      "actual": [
+        "storage"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Comment conserver le maïs après la récolte ?",
+        "normalizedQuery": "comment conserver le mais apres la recolte",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_stockage",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": null,
+        "detectedSymptoms": [],
+        "requestedAction": "conserver",
+        "userGoal": "obtenir des méthodes de conservation post-récolte pour le maïs",
+        "context": "post-récolte",
+        "searchTerms": [
+          "conservation maïs",
+          "stockage maïs",
+          "séchage maïs",
+          "prévention moisissures maïs",
+          "prévention insectes stockage maïs",
+          "humidité maïs stockage",
+          "aération silo maïs"
+        ],
+        "candidateKnowledgeIds": [
+          "storage",
+          "culture",
+          "termite",
+          "market",
+          "armyworm"
+        ],
+        "candidateScores": [
+          23.0,
+          6.25,
+          6.25,
+          6.25,
+          6.0
+        ],
+        "candidateTitles": [
+          "Conserver le maïs après la récolte",
+          "Cultiver le maïs",
+          "Termites des jeunes plants de maïs",
+          "Commercialisation du maïs",
+          "Chenille légionnaire du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "storage",
+            "score": 4,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "Séchez soigneusement les grains après la récolte",
+            "reason": "Réponse directe et complète au stockage",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Choisissez la parcelle, préparez le sol",
+            "reason": "Sujet culture, hors sujet stockage",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Inspectez les pieds de maïs et les galeries",
+            "reason": "Lutte ravageur, hors sujet stockage",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Vente, hors sujet conservation",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "armyworm",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Recherchez les chenilles dans le cœur des feuilles",
+            "reason": "Lutte chenille, hors sujet stockage",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": "storage",
+        "selectedKnowledgeScore": 4,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "D",
+      "expected": [],
+      "actual": [],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Les feuilles de mon maïs deviennent jaunes.",
+        "normalizedQuery": "les feuilles de mon mais deviennent jaunes",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "diagnostic",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": "jaunissement des feuilles",
+        "detectedSymptoms": [
+          "feuilles jaunes"
+        ],
+        "requestedAction": "identifier la cause du jaunissement",
+        "userGoal": "comprendre pourquoi les feuilles de maïs jaunissent",
+        "context": "observation de symptômes foliaires sur une culture de maïs",
+        "searchTerms": [
+          "maïs",
+          "feuilles jaunes",
+          "chlorose",
+          "jaunissement",
+          "carences",
+          "maladies foliaires",
+          "stress hydrique",
+          "diagnostic maïs"
+        ],
+        "candidateKnowledgeIds": [
+          "nitrogen",
+          "termite",
+          "storage",
+          "armyworm",
+          "market"
+        ],
+        "candidateScores": [
+          12.25,
+          6.25,
+          6.25,
+          6.25,
+          6.25
+        ],
+        "candidateTitles": [
+          "Carence en azote du maïs",
+          "Termites des jeunes plants de maïs",
+          "Conserver le maïs après la récolte",
+          "Chenille légionnaire du maïs",
+          "Commercialisation du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "nitrogen",
+            "score": 2,
+            "checks": [
+              true,
+              true,
+              false,
+              true,
+              true,
+              false
+            ],
+            "evidence": "carence en azote confirmée",
+            "reason": "cause possible mais non confirmée",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": false,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "termites attaquent jeunes plants",
+            "reason": "ravageur racinaire, pas foliaire",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "conserver le maïs après récolte",
+            "reason": "hors sujet, post-récolte",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "armyworm",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "chenilles mangent jeunes plants",
+            "reason": "ravageur, pas jaunissement",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "vendre mon maïs",
+            "reason": "commercialisation, hors sujet",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          }
+        ],
+        "selectedKnowledgeId": null,
+        "selectedKnowledgeScore": null,
+        "fallbackTriggered": true,
+        "rejectionReason": "ambiguous_candidates",
+        "clarifyingQuestion": "Le jaunissement est-il uniforme, partiel, ou accompagné de taches/brûlures ?"
+      }
+    },
+    {
+      "case": "E",
+      "expected": [
+        "market"
+      ],
+      "actual": [
+        "market"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Je veux vendre mon maïs.",
+        "normalizedQuery": "je veux vendre mon mais",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "commercialisation",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": null,
+        "detectedSymptoms": [],
+        "requestedAction": "vendre",
+        "userGoal": "commercialiser la production de maïs",
+        "context": "L'utilisateur souhaite vendre sa récolte de maïs.",
+        "searchTerms": [
+          "vendre maïs",
+          "commercialisation maïs",
+          "circuit de vente céréales",
+          "acheteurs maïs",
+          "prix du maïs",
+          "contrat de vente agricole"
+        ],
+        "candidateKnowledgeIds": [
+          "market",
+          "termite",
+          "storage",
+          "rot",
+          "nitrogen"
+        ],
+        "candidateScores": [
+          13.0,
+          6.25,
+          6.25,
+          6.25,
+          6.25
+        ],
+        "candidateTitles": [
+          "Commercialisation du maïs",
+          "Termites des jeunes plants de maïs",
+          "Conserver le maïs après la récolte",
+          "Pourriture des tiges du maïs",
+          "Carence en azote du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "market",
+            "score": 4,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Répond directement à la vente",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Inspectez les pieds de maïs et les galeries",
+            "reason": "Sujet ravageur, pas commercialisation",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 1,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Séchez soigneusement les grains après la récolte",
+            "reason": "Stockage, pas vente",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "rot",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Observez les lésions des tiges",
+            "reason": "Maladie, hors sujet",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "nitrogen",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "demandez au conseiller agricole un apport adapté",
+            "reason": "Fertilisation, hors sujet",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": "market",
+        "selectedKnowledgeScore": 4,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "F",
+      "expected": [
+        "termite"
+      ],
+      "actual": [],
+      "passed": false,
+      "audit": {
+        "originalQuery": "Des termites attaquent les jeunes plants de maïs, pas des chenilles.",
+        "normalizedQuery": "des termites attaquent les jeunes plants de mais pas des chenilles",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "identification et gestion de ravageur",
+        "detectedCrop": "maïs",
+        "detectedAnimal": "termites",
+        "detectedProblem": "attaque de termites sur jeunes plants",
+        "detectedSymptoms": [
+          "attaque de termites"
+        ],
+        "requestedAction": "identifier le ravageur et proposer des solutions de lutte",
+        "userGoal": "résoudre le problème d'attaque de termites sur les jeunes plants de maïs",
+        "context": "Le spécifie explicitement que les ravageurs sont des termites et non des chenilles, ciblant les jeunes plants de maïs.",
+        "searchTerms": [
+          "termites",
+          "maïs",
+          "jeunes plants",
+          "ravageur",
+          "insecte",
+          "attaque",
+          "lutte",
+          "prévention",
+          "contrôle",
+          "termiticide"
+        ],
+        "candidateKnowledgeIds": [
+          "termite",
+          "armyworm",
+          "storage",
+          "market",
+          "culture"
+        ],
+        "candidateScores": [
+          25.0,
+          16.5,
+          8.5,
+          6.25,
+          6.0
+        ],
+        "candidateTitles": [
+          "Termites des jeunes plants de maïs",
+          "Chenille légionnaire du maïs",
+          "Conserver le maïs après la récolte",
+          "Commercialisation du maïs",
+          "Cultiver le maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "termite",
+            "score": 2,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              false,
+              false
+            ],
+            "evidence": "Faites identifier le ravageur avant de demander une méthode de lutte",
+            "reason": "Confirme sujet mais ne donne pas de solution",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "armyworm",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Recherchez les chenilles dans le cœur des feuilles",
+            "reason": "Sujet chenilles, exclu par l'utilisateur",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Séchez soigneusement les grains après la récolte",
+            "reason": "Contexte stockage, hors sujet culture",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Sujet commercialisation, hors sujet ravageur",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Choisissez la parcelle, préparez le sol, semez",
+            "reason": "Sujet culture générale, pas de lutte",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": null,
+        "selectedKnowledgeScore": null,
+        "fallbackTriggered": true,
+        "rejectionReason": "no_semantically_valid_candidate"
+      }
+    },
+    {
+      "case": "G",
+      "expected": [],
+      "actual": [],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Comment assurer financièrement mon maïs contre la grêle ?",
+        "normalizedQuery": "comment assurer financierement mon mais contre la grele",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_assurance",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": "grêle",
+        "detectedSymptoms": [],
+        "requestedAction": "assurer",
+        "userGoal": "obtenir des informations sur la couverture financière contre les dégâts de grêle pour une culture de maïs",
+        "context": "protection financière",
+        "searchTerms": [
+          "assurance récolte maïs",
+          "assurance grêle",
+          "couverture climatique agriculture",
+          "indemnisation dégâts grêle",
+          "assurance agricole France",
+          "protection financière culture maïs"
+        ],
+        "candidateKnowledgeIds": [
+          "storage",
+          "culture",
+          "termite",
+          "rot",
+          "market"
+        ],
+        "candidateScores": [
+          12.5,
+          12.25,
+          6.25,
+          6.25,
+          6.25
+        ],
+        "candidateTitles": [
+          "Conserver le maïs après la récolte",
+          "Cultiver le maïs",
+          "Termites des jeunes plants de maïs",
+          "Pourriture des tiges du maïs",
+          "Commercialisation du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Conserver le maïs après la récolte",
+            "reason": "Sujet stockage, pas assurance",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comment cultiver le maïs ?",
+            "reason": "Sujet culture, pas assurance",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Termites des jeunes plants de maïs",
+            "reason": "Sujet ravageur, pas assurance",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "rot",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Pourriture des tiges du maïs",
+            "reason": "Sujet maladie, pas assurance",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Commercialisation du maïs",
+            "reason": "Sujet vente, pas assurance",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          }
+        ],
+        "selectedKnowledgeId": null,
+        "selectedKnowledgeScore": null,
+        "fallbackTriggered": true,
+        "rejectionReason": "no_semantically_valid_candidate"
+      }
+    },
+    {
+      "case": "H",
+      "expected": [
+        "garlic_culture"
+      ],
+      "actual": [
+        "garlic_culture"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Comment cultiver l'ail ?",
+        "normalizedQuery": "comment cultiver l ail",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_culture",
+        "detectedCrop": "ail",
+        "detectedAnimal": null,
+        "detectedProblem": null,
+        "detectedSymptoms": [],
+        "requestedAction": "expliquer les techniques de culture",
+        "userGoal": "apprendre à cultiver l'ail",
+        "context": "Demande générale sur les méthodes de culture",
+        "searchTerms": [
+          "culture de l'ail",
+          "planter l'ail",
+          "semis d'ail",
+          "entretien de l'ail",
+          "récolte de l'ail",
+          "techniques culturales ail",
+          "sol pour l'ail",
+          "arrosage de l'ail"
+        ],
+        "candidateKnowledgeIds": [
+          "garlic_culture",
+          "culture",
+          "garlic_disease",
+          "storage",
+          "termite"
+        ],
+        "candidateScores": [
+          12.75,
+          6.5,
+          6.25,
+          4.25,
+          0.0
+        ],
+        "candidateTitles": [
+          "Culture de l'ail",
+          "Cultiver le maïs",
+          "Maladies fongiques de l'ail",
+          "Conserver le maïs après la récolte",
+          "Termites des jeunes plants de maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "garlic_culture",
+            "score": 4,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "préparez un sol drainant, plantez les caïeux",
+            "reason": "Réponse directe et complète sur la culture de l'ail.",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comment cultiver le maïs ?",
+            "reason": "Sujet différent : maïs au lieu de l'ail.",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "garlic_disease",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "maladie fongique de l'ail",
+            "reason": "Hors sujet : demande de culture, pas de maladie.",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "conserver le maïs",
+            "reason": "Sujet et culture totalement différents.",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "termites attaquent mes jeunes pieds de maïs",
+            "reason": "Sujet et culture totalement différents.",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          }
+        ],
+        "selectedKnowledgeId": "garlic_culture",
+        "selectedKnowledgeScore": 4,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "I",
+      "expected": [
+        "storage"
+      ],
+      "actual": [
+        "storage"
+      ],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Comment conserver le maïs après la récolte pour éviter les insectes ?",
+        "normalizedQuery": "comment conserver le mais apres la recolte pour eviter les insectes",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_stockage",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": "infestation par les insectes",
+        "detectedSymptoms": [],
+        "requestedAction": "conserver",
+        "userGoal": "prévenir les insectes pendant le stockage du maïs récolté",
+        "context": "post-récolte",
+        "searchTerms": [
+          "stockage maïs",
+          "conservation maïs",
+          "prévention insectes stockage",
+          "insectes de stockage",
+          "maïs sec",
+          "protection grains",
+          "hygiène stockage céréales"
+        ],
+        "candidateKnowledgeIds": [
+          "storage",
+          "culture",
+          "termite",
+          "market",
+          "armyworm"
+        ],
+        "candidateScores": [
+          23.5,
+          6.25,
+          6.25,
+          6.25,
+          6.0
+        ],
+        "candidateTitles": [
+          "Conserver le maïs après la récolte",
+          "Cultiver le maïs",
+          "Termites des jeunes plants de maïs",
+          "Commercialisation du maïs",
+          "Chenille légionnaire du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "storage",
+            "score": 4,
+            "checks": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "evidence": "Stockez le maïs sec dans des sacs propres",
+            "reason": "Répond directement au stockage et prévention insectes",
+            "subjectMatch": true,
+            "intentMatch": true,
+            "problemMatch": true,
+            "contextMatch": true,
+            "goalMatch": true,
+            "answersQuestion": true,
+            "accepted": true,
+            "groundedEvidence": true
+          },
+          {
+            "id": "culture",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Choisissez la parcelle, préparez le sol",
+            "reason": "Sujet culture, hors sujet stockage",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Inspectez les pieds de maïs et les galeries",
+            "reason": "Lutte champ, pas stockage post-récolte",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+            "reason": "Vente, hors sujet conservation",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "armyworm",
+            "score": 0,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "Recherchez les chenilles dans le cœur des feuilles",
+            "reason": "Lutte champ, pas stockage",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          }
+        ],
+        "selectedKnowledgeId": "storage",
+        "selectedKnowledgeScore": 4,
+        "fallbackTriggered": false
+      }
+    },
+    {
+      "case": "J",
+      "expected": [],
+      "actual": [],
+      "passed": true,
+      "audit": {
+        "originalQuery": "Mes pieds de maïs jaunissent après de fortes pluies, qu'est-ce que je dois faire ?",
+        "normalizedQuery": "mes pieds de mais jaunissent apres de fortes pluies qu est ce que je dois faire",
+        "detectedDomain": "agriculture",
+        "semanticUnderstandingAvailable": true,
+        "photoObservations": {},
+        "detectedIntent": "conseil_intervention",
+        "detectedCrop": "maïs",
+        "detectedAnimal": null,
+        "detectedProblem": "jaunissement des feuilles",
+        "detectedSymptoms": [
+          "jaunissement"
+        ],
+        "requestedAction": "agir",
+        "userGoal": "obtenir des recommandations pour traiter ou prévenir le jaunissement du maïs suite à des fortes pluies",
+        "context": "fortes pluies",
+        "searchTerms": [
+          "maïs",
+          "jaunissement",
+          "chlorose",
+          "excès d'eau",
+          "asphyxie racinaire",
+          "fongiques",
+          "pyrale",
+          "carences",
+          "drainage",
+          "irrigation",
+          "pluies abondantes"
+        ],
+        "candidateKnowledgeIds": [
+          "nitrogen",
+          "storage",
+          "termite",
+          "culture",
+          "market"
+        ],
+        "candidateScores": [
+          12.25,
+          10.5,
+          8.5,
+          6.5,
+          6.25
+        ],
+        "candidateTitles": [
+          "Carence en azote du maïs",
+          "Conserver le maïs après la récolte",
+          "Termites des jeunes plants de maïs",
+          "Cultiver le maïs",
+          "Commercialisation du maïs"
+        ],
+        "semanticValidationResult": [
+          {
+            "id": "nitrogen",
+            "score": 1,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "carence en azote confirmée",
+            "reason": "carence non confirmée, contexte pluie absent",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "storage",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "conserver le maïs après la récolte",
+            "reason": "hors sujet, post-récolte",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "termite",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "termites attaquent mes jeunes pieds",
+            "reason": "hors sujet, ravageur différent",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          },
+          {
+            "id": "culture",
+            "score": 1,
+            "checks": [
+              true,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "semez après une pluie utile",
+            "reason": "culture générale, pas de diagnostic",
+            "subjectMatch": true,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": true
+          },
+          {
+            "id": "market",
+            "score": 0,
+            "checks": [
+              false,
+              false,
+              false,
+              false,
+              false,
+              false
+            ],
+            "evidence": "vendre mon maïs",
+            "reason": "hors sujet, commercialisation",
+            "subjectMatch": false,
+            "intentMatch": false,
+            "problemMatch": false,
+            "contextMatch": false,
+            "goalMatch": false,
+            "answersQuestion": false,
+            "accepted": false,
+            "groundedEvidence": false
+          }
+        ],
+        "selectedKnowledgeId": null,
+        "selectedKnowledgeScore": null,
+        "fallbackTriggered": true,
+        "rejectionReason": "no_semantically_valid_candidate"
+      }
+    }
+  ],
+  "realCorpus": {
+    "database": "resolvehub.db",
+    "agricultureCards": 10,
+    "cases": [
+      {
+        "case": "A",
+        "rawScoreDistribution": [
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 5.6
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 17.5
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 14.25
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 13.75
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 3.75
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Comment cultiver le maïs ?",
+          "normalizedQuery": "comment cultiver le mais",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "conseil_culture",
+          "detectedCrop": "maïs",
+          "detectedAnimal": null,
+          "detectedProblem": null,
+          "detectedSymptoms": [],
+          "requestedAction": "fournir les étapes de culture",
+          "userGoal": "Apprendre les méthodes de culture du maïs",
+          "context": "Demande générale sur les techniques agronomiques",
+          "searchTerms": [
+            "culture du maïs",
+            "semis maïs",
+            "entretien maïs",
+            "récolte maïs",
+            "fertilisation maïs",
+            "irrigation maïs",
+            "rotation des cultures maïs",
+            "protection phytosanitaire maïs"
+          ],
+          "candidateKnowledgeIds": [
+            "25",
+            "26",
+            "5",
+            "1",
+            "18"
+          ],
+          "candidateScores": [
+            17.5,
+            14.25,
+            13.75,
+            9.75,
+            9.75
+          ],
+          "candidateTitles": [
+            "Conserver le maïs après la récolte",
+            "Avantages de la rotation des cultures",
+            "Préparation du sol avant semis de mil/maïs",
+            "Taches jaunes sur feuilles de maïs",
+            "Feuilles de maïs rouillées (taches orange)"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "25",
+              "score": 1,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après la récolte",
+              "reason": "Conserve, ne cultive pas",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "26",
+              "score": 2,
+              "checks": [
+                true,
+                true,
+                false,
+                true,
+                false,
+                false
+              ],
+              "evidence": "maïs une année, niébé ou arachide",
+              "reason": "Rotation seulement, pas culture complète",
+              "subjectMatch": true,
+              "intentMatch": true,
+              "problemMatch": false,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "5",
+              "score": 2,
+              "checks": [
+                true,
+                true,
+                true,
+                true,
+                false,
+                false
+              ],
+              "evidence": "préparer mon champ avant de semer",
+              "reason": "Préparation sol seulement, pas étapes complètes",
+              "subjectMatch": true,
+              "intentMatch": true,
+              "problemMatch": true,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches jaunes sur les feuilles",
+              "reason": "Diagnostic maladie, pas culture",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches orange comme de la rouille",
+              "reason": "Diagnostic maladie, pas culture",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        },
+        "acceptedIds": []
+      },
+      {
+        "case": "B",
+        "rawScoreDistribution": [
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 21.0
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 12.0
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 9.5
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 6.75
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Des termites attaquent mon maïs.",
+          "normalizedQuery": "des termites attaquent mon mais",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "diagnostic",
+          "detectedCrop": "maïs",
+          "detectedAnimal": "termites",
+          "detectedProblem": "attaque de termites",
+          "detectedSymptoms": [],
+          "requestedAction": "identifier la cause et les solutions",
+          "userGoal": "résoudre l'infestation de termites sur le maïs",
+          "context": "Le signale une attaque active de termites sur sa culture de maïs.",
+          "searchTerms": [
+            "termites maïs",
+            "insectes nuisibles maïs",
+            "dégâts termites culture",
+            "protection maïs termites",
+            "biologie termites",
+            "lutte termites agriculture",
+            "symptômes attaque termites",
+            "prévention termites champ"
+          ],
+          "candidateKnowledgeIds": [
+            "24",
+            "25",
+            "1",
+            "18",
+            "5"
+          ],
+          "candidateScores": [
+            21.0,
+            12.0,
+            9.75,
+            9.75,
+            9.5
+          ],
+          "candidateTitles": [
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Conserver le maïs après la récolte",
+            "Taches jaunes sur feuilles de maïs",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Préparation du sol avant semis de mil/maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "chenille légionnaire sur le maïs",
+              "reason": "Chenille, pas termites",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "25",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après la récolte",
+              "reason": "Stockage, pas attaque champ",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Taches jaunes sur feuilles de maïs",
+              "reason": "Jaunissement, pas termites",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Feuilles de maïs rouillées",
+              "reason": "Rouille, pas termites",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Préparation du sol avant semis",
+              "reason": "Préparation sol, pas lutte",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        },
+        "acceptedIds": []
+      },
+      {
+        "case": "C",
+        "rawScoreDistribution": [
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 21.6
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 37.25
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 9.5
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Comment conserver le maïs après la récolte ?",
+          "normalizedQuery": "comment conserver le mais apres la recolte",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "conseil_post_recolte",
+          "detectedCrop": "maïs",
+          "detectedAnimal": null,
+          "detectedProblem": null,
+          "detectedSymptoms": [],
+          "requestedAction": "conserver",
+          "userGoal": "Obtenir les méthodes de stockage post-récolte pour le maïs.",
+          "context": "Phase post-récolte.",
+          "searchTerms": [
+            "stockage maïs",
+            "conservation maïs",
+            "séchage maïs",
+            "humidité maïs",
+            "silos maïs",
+            "prévention moisissures",
+            "température stockage",
+            "aération grains"
+          ],
+          "candidateKnowledgeIds": [
+            "25",
+            "1",
+            "18",
+            "24",
+            "5"
+          ],
+          "candidateScores": [
+            37.25,
+            9.75,
+            9.75,
+            9.75,
+            9.5
+          ],
+          "candidateTitles": [
+            "Conserver le maïs après la récolte",
+            "Taches jaunes sur feuilles de maïs",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Préparation du sol avant semis de mil/maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "25",
+              "score": 4,
+              "checks": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "evidence": "Stocke le maïs dans des sacs propres",
+              "reason": "Réponse directe et complète au stockage",
+              "subjectMatch": true,
+              "intentMatch": true,
+              "problemMatch": true,
+              "contextMatch": true,
+              "goalMatch": true,
+              "answersQuestion": true,
+              "accepted": true,
+              "groundedEvidence": true,
+              "rejectionReason": null
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches jaunes sur les feuilles",
+              "reason": "Hors sujet : maladie foliaire",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches orange comme de la rouille",
+              "reason": "Hors sujet : maladie fongique",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "chenille qui mange les feuilles",
+              "reason": "Hors sujet : ravageur",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "préparer mon champ avant de semer",
+              "reason": "Hors sujet : préparation sol",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": "25",
+          "selectedKnowledgeScore": 4,
+          "fallbackTriggered": false
+        },
+        "acceptedIds": [
+          "25"
+        ]
+      },
+      {
+        "case": "D",
+        "rawScoreDistribution": [
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 25.4
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 13.1
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 10.1
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 8.4
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 4.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 35.25
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 19.75
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 12.0
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 10.25
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 9.5
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 5.75
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.75
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.25
+          }
+        ],
+        "audit": {
+          "originalQuery": "Les feuilles de mon maïs deviennent jaunes.",
+          "normalizedQuery": "les feuilles de mon mais deviennent jaunes",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "diagnostic",
+          "detectedCrop": "maïs",
+          "detectedAnimal": null,
+          "detectedProblem": "jaunissement des feuilles",
+          "detectedSymptoms": [
+            "feuilles jaunes"
+          ],
+          "requestedAction": "identifier la cause du jaunissement",
+          "userGoal": "Comprendre pourquoi les feuilles de son maïs jaunissent",
+          "context": "Observation de symptômes foliaires sur une culture de maïs",
+          "searchTerms": [
+            "maïs feuilles jaunes",
+            "chlorose maïs",
+            "carences azote maïs",
+            "maladies foliaires maïs",
+            "stress hydrique maïs",
+            "diagnostic jaunissement maïs"
+          ],
+          "candidateKnowledgeIds": [
+            "1",
+            "18",
+            "24",
+            "25",
+            "5"
+          ],
+          "candidateScores": [
+            35.25,
+            19.75,
+            12.0,
+            10.25,
+            9.5
+          ],
+          "candidateTitles": [
+            "Taches jaunes sur feuilles de maïs",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Conserver le maïs après la récolte",
+            "Préparation du sol avant semis de mil/maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "1",
+              "score": 4,
+              "checks": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "evidence": "carence en azote ou à un mauvais drainage",
+              "reason": "Répond directement au diagnostic du jaunissement",
+              "subjectMatch": true,
+              "intentMatch": true,
+              "problemMatch": true,
+              "contextMatch": true,
+              "goalMatch": true,
+              "answersQuestion": true,
+              "accepted": true,
+              "groundedEvidence": true,
+              "rejectionReason": null
+            },
+            {
+              "id": "18",
+              "score": 1,
+              "checks": [
+                true,
+                false,
+                false,
+                true,
+                false,
+                false
+              ],
+              "evidence": "taches orange ou couleur rouille",
+              "reason": "Symptôme spécifique (rouille) non mentionné",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                true,
+                false,
+                false
+              ],
+              "evidence": "chenille qui mange les feuilles",
+              "reason": "Hors sujet : ravageur, pas jaunissement",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "25",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après la récolte",
+              "reason": "Hors sujet : stockage post-récolte",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Préparation du sol avant semis",
+              "reason": "Hors sujet : préparation pré-semis",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": "1",
+          "selectedKnowledgeScore": 4,
+          "fallbackTriggered": false
+        },
+        "acceptedIds": [
+          "1"
+        ]
+      },
+      {
+        "case": "E",
+        "rawScoreDistribution": [
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 15.75
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 13.25
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 10.0
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 10.0
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 6.5
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.5
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Je veux vendre mon maïs.",
+          "normalizedQuery": "je veux vendre mon mais",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "commercialisation",
+          "detectedCrop": "maïs",
+          "detectedAnimal": null,
+          "detectedProblem": null,
+          "detectedSymptoms": [],
+          "requestedAction": "vendre",
+          "userGoal": "Commercialiser sa production de maïs",
+          "context": "Agriculteur souhaitant écouler sa récolte",
+          "searchTerms": [
+            "vendre maïs",
+            "commercialisation céréales",
+            "circuit de vente agricole",
+            "prix du maïs",
+            "acheteurs de maïs",
+            "contrat de vente céréales",
+            "stockage avant vente",
+            "qualité maïs commercial"
+          ],
+          "candidateKnowledgeIds": [
+            "5",
+            "25",
+            "18",
+            "24",
+            "1"
+          ],
+          "candidateScores": [
+            15.75,
+            13.25,
+            10.0,
+            10.0,
+            9.75
+          ],
+          "candidateTitles": [
+            "Préparation du sol avant semis de mil/maïs",
+            "Conserver le maïs après la récolte",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Taches jaunes sur feuilles de maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Préparation du sol avant semis",
+              "reason": "Sujet semis, pas vente",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "25",
+              "score": 1,
+              "checks": [
+                true,
+                false,
+                false,
+                true,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après la récolte",
+              "reason": "Stockage, pas commercialisation",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches orange comme de la rouille",
+              "reason": "Maladie, pas vente",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "chenille qui mange les feuilles",
+              "reason": "Pest, pas vente",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches jaunes sur les feuilles",
+              "reason": "Symptôme, pas vente",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        },
+        "acceptedIds": []
+      },
+      {
+        "case": "F",
+        "rawScoreDistribution": [
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 16.2
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 8.4
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 8.1
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.6
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.6
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 27.75
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 13.75
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 10.25
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 10.0
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.5
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.5
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.5
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Des termites attaquent les jeunes plants de maïs, pas des chenilles.",
+          "normalizedQuery": "des termites attaquent les jeunes plants de mais pas des chenilles",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "diagnostic",
+          "detectedCrop": "maïs",
+          "detectedAnimal": "termites",
+          "detectedProblem": "attaque de termites",
+          "detectedSymptoms": [
+            "attaque sur jeunes plants"
+          ],
+          "requestedAction": "identifier le ravageur",
+          "userGoal": "Confirmer que les dégâts sont causés par des termites et non par des chenilles.",
+          "context": "Observation de dégâts sur de jeunes plants de maïs avec une distinction explicite entre termites et chenilles.",
+          "searchTerms": [
+            "termites maïs",
+            "symptômes termites jeunes plants",
+            "différence termites chenilles",
+            "dégâts termites maïs",
+            "identification ravageurs maïs",
+            "attaque termites semis",
+            "confusion chenilles termites",
+            "protection jeunes plants maïs"
+          ],
+          "candidateKnowledgeIds": [
+            "24",
+            "5",
+            "1",
+            "18",
+            "25"
+          ],
+          "candidateScores": [
+            27.75,
+            13.75,
+            10.25,
+            10.0,
+            9.75
+          ],
+          "candidateTitles": [
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Préparation du sol avant semis de mil/maïs",
+            "Taches jaunes sur feuilles de maïs",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Conserver le maïs après la récolte"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "chenille légionnaire sur le maïs",
+              "reason": "Cible chenilles, pas termites",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Préparation du sol avant semis",
+              "reason": "Hors sujet : préparation sol",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches jaunes... carence en azote",
+              "reason": "Hors sujet : jaunissement feuilles",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "taches orange... maladie fongique",
+              "reason": "Hors sujet : rouille fongique",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "25",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après récolte",
+              "reason": "Hors sujet : stockage post-récolte",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        },
+        "acceptedIds": []
+      },
+      {
+        "case": "G",
+        "rawScoreDistribution": [
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 9.8
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 7.8
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 4.5
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.3
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.0
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "currentScoreDistribution": [
+          {
+            "id": 25,
+            "title": "Conserver le maïs après la récolte",
+            "lexical_score": 17.5
+          },
+          {
+            "id": 24,
+            "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "lexical_score": 12.0
+          },
+          {
+            "id": 18,
+            "title": "Feuilles de maïs rouillées (taches orange)",
+            "lexical_score": 10.0
+          },
+          {
+            "id": 1,
+            "title": "Taches jaunes sur feuilles de maïs",
+            "lexical_score": 9.75
+          },
+          {
+            "id": 5,
+            "title": "Préparation du sol avant semis de mil/maïs",
+            "lexical_score": 9.5
+          },
+          {
+            "id": 26,
+            "title": "Avantages de la rotation des cultures",
+            "lexical_score": 0.5
+          },
+          {
+            "id": 4,
+            "title": "Mildiou sur tomate (taches brunes)",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 22,
+            "title": "Préparer le champ avant la saison des pluies",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 23,
+            "title": "Utiliser le compost au champ",
+            "lexical_score": 0.25
+          },
+          {
+            "id": 6,
+            "title": "Gestion de l'eau en saison sèche (petits jardins)",
+            "lexical_score": 0.0
+          }
+        ],
+        "audit": {
+          "originalQuery": "Comment assurer financièrement mon maïs contre la grêle ?",
+          "normalizedQuery": "comment assurer financierement mon mais contre la grele",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "conseil_assurance",
+          "detectedCrop": "maïs",
+          "detectedAnimal": null,
+          "detectedProblem": "grêle",
+          "detectedSymptoms": [],
+          "requestedAction": "assurer",
+          "userGoal": "Obtenir des informations sur les modalités d'assurance contre la grêle pour une culture de maïs.",
+          "context": "Demande de gestion du risque climatique (grêle) pour une culture de maïs.",
+          "searchTerms": [
+            "assurance récolte maïs",
+            "assurance grêle",
+            "assurance agricole",
+            "risque climatique",
+            "indemnisation grêle",
+            "mutuelle agricole",
+            "contrat assurance récolte",
+            "protection contre la grêle"
+          ],
+          "candidateKnowledgeIds": [
+            "25",
+            "24",
+            "18",
+            "1",
+            "5"
+          ],
+          "candidateScores": [
+            17.5,
+            12.0,
+            10.0,
+            9.75,
+            9.5
+          ],
+          "candidateTitles": [
+            "Conserver le maïs après la récolte",
+            "Limiter les dégâts de la chenille légionnaire sur le maïs",
+            "Feuilles de maïs rouillées (taches orange)",
+            "Taches jaunes sur feuilles de maïs",
+            "Préparation du sol avant semis de mil/maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "25",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Conserver le maïs après la récolte",
+              "reason": "Sujet stockage, pas assurance",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "24",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Limiter les dégâts de la chenille",
+              "reason": "Sujet ravageur, pas assurance",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "18",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Feuilles de maïs rouillées",
+              "reason": "Sujet maladie, pas assurance",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "1",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Taches jaunes sur feuilles",
+              "reason": "Sujet symptômes, pas assurance",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            },
+            {
+              "id": "5",
+              "score": 0,
+              "checks": [
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Préparation du sol avant semis",
+              "reason": "Sujet préparation sol, pas assurance",
+              "subjectMatch": true,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": false,
+              "rejectionReason": "evidence_not_in_answer"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        },
+        "acceptedIds": []
+      }
+    ]
+  },
+  "scoreHistogram": {
+    "0": 39,
+    "1": 3,
+    "2": 2,
+    "3": 1,
+    "4": 5
+  },
+  "thresholdComparison": [
+    {
+      "threshold": 3,
+      "falsePositives": 0,
+      "falseNegatives": 1
+    },
+    {
+      "threshold": 4,
+      "falsePositives": 0,
+      "falseNegatives": 2
+    }
+  ],
+  "limitations": "Small local calibration, not proof of production accuracy or probability calibration; production VM corpus not available.",
+  "negationRecheck": {
+    "actual": [
+      "termite"
+    ],
+    "audit": {
+      "originalQuery": "Des termites attaquent les jeunes plants de maïs, pas des chenilles.",
+      "normalizedQuery": "des termites attaquent les jeunes plants de mais pas des chenilles",
+      "detectedDomain": "agriculture",
+      "semanticUnderstandingAvailable": true,
+      "photoObservations": {},
+      "detectedIntent": "identification et gestion de ravageur",
+      "detectedCrop": "maïs",
+      "detectedAnimal": "termites",
+      "detectedProblem": "attaque de termites",
+      "detectedSymptoms": [
+        "attaque sur jeunes plants"
+      ],
+      "requestedAction": "identifier et traiter l'infestation de termites",
+      "userGoal": "Protéger les jeunes plants de maïs contre les termites en excluant les chenilles.",
+      "context": "Le spécifie explicitement que les ravageurs sont des termites et non des chenilles.",
+      "searchTerms": [
+        "termites maïs",
+        "lutte termites jeunes plants",
+        "protection semis maïs termites",
+        "insecticide termites agriculture",
+        "barrière termites maïs",
+        "gestion termites sol",
+        "prévention termites semis",
+        "différenciation termites chenilles"
+      ],
+      "candidateKnowledgeIds": [
+        "termite",
+        "armyworm",
+        "culture",
+        "storage",
+        "market"
+      ],
+      "candidateScores": [
+        24.75,
+        16.25,
+        6.25,
+        6.25,
+        6.25
+      ],
+      "candidateTitles": [
+        "Termites des jeunes plants de maïs",
+        "Chenille légionnaire du maïs",
+        "Cultiver le maïs",
+        "Conserver le maïs après la récolte",
+        "Commercialisation du maïs"
+      ],
+      "semanticValidationResult": [
+        {
+          "id": "termite",
+          "score": 3,
+          "checks": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "evidence": "méthode de lutte adaptée aux termites",
+          "reason": "Cible exacte, action partielle",
+          "subjectMatch": true,
+          "intentMatch": true,
+          "problemMatch": true,
+          "contextMatch": true,
+          "goalMatch": true,
+          "answersQuestion": true,
+          "accepted": true,
+          "groundedEvidence": true,
+          "rejectionReason": null
+        },
+        {
+          "id": "armyworm",
+          "score": 0,
+          "checks": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "evidence": "Recherchez les chenilles dans le cœur",
+          "reason": "Ravageur exclu explicitement",
+          "subjectMatch": false,
+          "intentMatch": false,
+          "problemMatch": false,
+          "contextMatch": false,
+          "goalMatch": false,
+          "answersQuestion": false,
+          "accepted": false,
+          "groundedEvidence": true,
+          "rejectionReason": "semantic_checks_or_score_rejected"
+        },
+        {
+          "id": "culture",
+          "score": 0,
+          "checks": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "evidence": "Choisissez la parcelle, préparez le sol",
+          "reason": "Généralités culture, hors sujet",
+          "subjectMatch": false,
+          "intentMatch": false,
+          "problemMatch": false,
+          "contextMatch": false,
+          "goalMatch": false,
+          "answersQuestion": false,
+          "accepted": false,
+          "groundedEvidence": true,
+          "rejectionReason": "semantic_checks_or_score_rejected"
+        },
+        {
+          "id": "storage",
+          "score": 0,
+          "checks": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "evidence": "Stockez le maïs sec dans des sacs",
+          "reason": "Post-récolte, pas jeunes plants",
+          "subjectMatch": false,
+          "intentMatch": false,
+          "problemMatch": false,
+          "contextMatch": false,
+          "goalMatch": false,
+          "answersQuestion": false,
+          "accepted": false,
+          "groundedEvidence": true,
+          "rejectionReason": "semantic_checks_or_score_rejected"
+        },
+        {
+          "id": "market",
+          "score": 0,
+          "checks": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+          "reason": "Vente, hors sujet",
+          "subjectMatch": false,
+          "intentMatch": false,
+          "problemMatch": false,
+          "contextMatch": false,
+          "goalMatch": false,
+          "answersQuestion": false,
+          "accepted": false,
+          "groundedEvidence": true,
+          "rejectionReason": "semantic_checks_or_score_rejected"
+        }
+      ],
+      "selectedKnowledgeId": "termite",
+      "selectedKnowledgeScore": 3,
+      "fallbackTriggered": false
+    }
+  },
+  "rechecks": [
+    {
+      "timestamp": "2026-10-07T19:21:19.655181+00:00",
+      "profilePromptHash": "0e4cfe5d82dc04e2ef94723ddaec5cc19b1da9b66ff4bd28f2f066073c64f3f3",
+      "validationPromptHash": "038506f405e25b18c420575908812de8dde021959e841c2b594d380a5cc41149",
+      "sample": {
+        "case": "F",
+        "expected": [
+          "termite"
+        ],
+        "actual": [],
+        "passed": false,
+        "audit": {
+          "originalQuery": "Des termites attaquent les jeunes plants de maïs, pas des chenilles.",
+          "normalizedQuery": "des termites attaquent les jeunes plants de mais pas des chenilles",
+          "detectedDomain": "agriculture",
+          "semanticUnderstandingAvailable": true,
+          "photoObservations": {},
+          "detectedIntent": "identification et gestion de ravageur",
+          "detectedCrop": "maïs",
+          "detectedAnimal": "termites",
+          "detectedProblem": "attaque de jeunes plants par des termites",
+          "detectedSymptoms": [
+            "attaque sur jeunes plants"
+          ],
+          "requestedAction": "identifier le ravageur et proposer des solutions de lutte",
+          "userGoal": "Protéger les jeunes plants de maïs contre les termites en excluant les chenilles.",
+          "context": "Le spécifie explicitement que les ravageurs sont des termites et non des chenilles.",
+          "searchTerms": [
+            "termites maïs",
+            "lutte termites jeunes plants",
+            "protection semis maïs termites",
+            "insecticide termites agriculture",
+            "prévention termites sol",
+            "barrière termites maïs",
+            "gestion ravageurs sol maïs",
+            "différenciation termites chenilles"
+          ],
+          "candidateKnowledgeIds": [
+            "termite",
+            "armyworm",
+            "culture",
+            "storage",
+            "market"
+          ],
+          "candidateScores": [
+            25.0,
+            16.5,
+            6.25,
+            6.25,
+            6.25
+          ],
+          "candidateTitles": [
+            "Termites des jeunes plants de maïs",
+            "Chenille légionnaire du maïs",
+            "Cultiver le maïs",
+            "Conserver le maïs après la récolte",
+            "Commercialisation du maïs"
+          ],
+          "semanticValidationResult": [
+            {
+              "id": "termite",
+              "score": 2,
+              "checks": [
+                true,
+                true,
+                true,
+                true,
+                false,
+                false
+              ],
+              "evidence": "Faites identifier le ravageur avant de demander une méthode de lutte",
+              "reason": "Demande confirmation, ne donne pas de solution",
+              "subjectMatch": true,
+              "intentMatch": true,
+              "problemMatch": true,
+              "contextMatch": true,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "armyworm",
+              "score": 0,
+              "checks": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Recherchez les chenilles dans le cœur des feuilles",
+              "reason": "Cible chenilles, exclu par l'utilisateur",
+              "subjectMatch": false,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "culture",
+              "score": 0,
+              "checks": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Choisissez la parcelle, préparez le sol",
+              "reason": "Généralités culture, hors sujet ravageur",
+              "subjectMatch": false,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "storage",
+              "score": 0,
+              "checks": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Stockez le maïs sec dans des sacs",
+              "reason": "Stockage post-récolte, pas jeunes plants",
+              "subjectMatch": false,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            },
+            {
+              "id": "market",
+              "score": 0,
+              "checks": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "evidence": "Comparez les prix du maïs sur plusieurs marchés",
+              "reason": "Vente, hors sujet protection",
+              "subjectMatch": false,
+              "intentMatch": false,
+              "problemMatch": false,
+              "contextMatch": false,
+              "goalMatch": false,
+              "answersQuestion": false,
+              "accepted": false,
+              "groundedEvidence": true,
+              "rejectionReason": "semantic_checks_or_score_rejected"
+            }
+          ],
+          "selectedKnowledgeId": null,
+          "selectedKnowledgeScore": null,
+          "fallbackTriggered": true,
+          "rejectionReason": "no_semantically_valid_candidate"
+        }
+      }
+    }
+  ],
+  "postRecheckSummary": {
+    "passedCases": 9,
+    "totalCases": 10,
+    "thresholdComparison": [
+      {
+        "threshold": 3,
+        "falsePositives": 0,
+        "falseNegatives": 1
+      },
+      {
+        "threshold": 4,
+        "falsePositives": 0,
+        "falseNegatives": 2
+      }
+    ],
+    "note": "Initial unchanged cases plus targeted rechecks; not a new complete run."
+  }
+}

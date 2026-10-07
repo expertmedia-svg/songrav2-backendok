@@ -72,7 +72,7 @@ def _get_openai_client():
 
 # Groq expose une API compatible OpenAI. Il traite le texte et les images avec
 # certains modèles vision, mais ne génère pas les images/vidéos de Songra.
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b")
 _groq_key = os.environ.get("GROQ_API_KEY")
 _groq_client: Optional[object] = (
     _OpenAIClient(api_key=_groq_key, base_url="https://api.groq.com/openai/v1")

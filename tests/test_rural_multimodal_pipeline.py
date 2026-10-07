@@ -20,7 +20,7 @@ import yingr_ai_services as yingr
 
 
 @pytest.fixture
-def environment(monkeypatch):
+def environment(monkeypatch, semantic_stub):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     main.Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()

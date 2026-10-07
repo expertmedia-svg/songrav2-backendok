@@ -9,6 +9,7 @@ import base64
 import time
 from typing import List, Dict, Any, Optional
 import httpx
+import knowledge_relevance
 
 # Configuration des URL d'inférence de Yingr-AI
 YINGR_AI_VLLM_URL = os.getenv("YINGR_AI_VLLM_URL", "")  # ex: http://localhost:8000/v1
@@ -31,43 +32,27 @@ except Exception as e:
 
 
 def retrieve_rag_context(query: str, domain: str, limit: int = 2) -> List[Dict[str, Any]]:
-    """
-    Recherche RAG localisée : trouve les fiches les plus pertinentes dans la base locale
-    par similarité de mots-clés dans le domaine ciblé.
-    """
-    if not KNOWLEDGE_ITEMS:
+    """Lexical recall followed by the shared semantic validation gate."""
+    if not query.strip():
         return []
-    
-    domain_filter = domain
-    if domain == "sos_accident":
-        domain_filter = "health"
-        
-    filtered_items = [item for item in KNOWLEDGE_ITEMS if item.get("domain") == domain_filter]
-    if not filtered_items:
-        filtered_items = KNOWLEDGE_ITEMS
-
-    query_words = set(query.lower().split())
-    scored_items = []
-    for item in filtered_items:
-        score = 0
-        text_to_search = (
-            (item.get("title", "") + " " + item.get("question", "") + " " + item.get("answer", ""))
-            .lower()
-        )
-        
-        for word in query_words:
-            if len(word) > 3:
-                if word in text_to_search:
-                    score += 1
-                    
-        for tag in item.get("tags", []):
-            if tag.lower() in query_words:
-                score += 2
-                
-        scored_items.append((score, item))
-        
-    scored_items.sort(key=lambda x: x[0], reverse=True)
-    return [item for score, item in scored_items[:limit]]
+    domain_filter = "health" if domain in {"sos_accident", "urgence"} else domain
+    items = [item for item in KNOWLEDGE_ITEMS if item.get("domain") == domain_filter]
+    if not items:
+        return []
+    profile = knowledge_relevance.understand(query, domain)
+    words = set(knowledge_relevance.normalized(query + " " + " ".join(profile.get("searchTerms", []))).split())
+    candidates = []
+    for index, item in enumerate(items):
+        content = set(knowledge_relevance.normalized(" ".join([
+            item.get("title", ""), item.get("question", ""), item.get("answer", ""),
+            " ".join(item.get("tags") or [])])).split())
+        candidates.append({"id": str(index), "title": item.get("title", ""),
+            "question": item.get("question", ""), "answer": item.get("answer", ""),
+            "lexical_score": len(words & content), "payload": item})
+    candidates.sort(key=lambda c: c["lexical_score"], reverse=True)
+    accepted, audit = knowledge_relevance.validate(profile, candidates[:5])
+    print("[YINGR-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
+    return [candidate["payload"] for candidate in accepted[:limit]]
 
 
 async def transcribe_audio_whisper(audio_bytes: bytes, filename: str = "audio.wav") -> str:

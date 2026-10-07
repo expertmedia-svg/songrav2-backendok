@@ -1,0 +1,56 @@
+{
+  "commit": "fc85d24",
+  "database": "resolvehub.db",
+  "knowledgeCards": 42,
+  "results": [
+    {
+      "case": "A",
+      "question": "Comment cultiver le maïs ?",
+      "mode": "rag_strict",
+      "title": "Taches jaunes sur feuilles de maïs",
+      "id": 1
+    },
+    {
+      "case": "B",
+      "question": "Des termites attaquent mon maïs.",
+      "mode": "rag_strict",
+      "title": "Taches jaunes sur feuilles de maïs",
+      "id": 1
+    },
+    {
+      "case": "C",
+      "question": "Comment conserver le maïs après la récolte ?",
+      "mode": "rag_strict",
+      "title": "Conserver le maïs après la récolte",
+      "id": 25
+    },
+    {
+      "case": "D",
+      "question": "Les feuilles de mon maïs deviennent jaunes.",
+      "mode": "rag_strict",
+      "title": "Taches jaunes sur feuilles de maïs",
+      "id": 1
+    },
+    {
+      "case": "E",
+      "question": "Je veux vendre mon maïs.",
+      "mode": "rag_strict",
+      "title": "Taches jaunes sur feuilles de maïs",
+      "id": 1
+    },
+    {
+      "case": "F",
+      "question": "Des termites attaquent les jeunes plants de maïs, pas des chenilles.",
+      "mode": "rag_strict",
+      "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+      "id": 24
+    },
+    {
+      "case": "G",
+      "question": "Comment assurer financièrement mon maïs contre la grêle ?",
+      "mode": "rag_strict",
+      "title": "Limiter les dégâts de la chenille légionnaire sur le maïs",
+      "id": 24
+    }
+  ]
+}

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 import base64
 import json
 import time
+import asyncio
 
 import yingr_ai_services
 
@@ -60,7 +61,7 @@ async def diagnose_agriculture(request: Request):
         )
 
     # 2. Étape RAG : Recherche de fiches de bonnes pratiques
-    rag_items = yingr_ai_services.retrieve_rag_context(query_text, domain="agriculture")
+    rag_items = await asyncio.to_thread(yingr_ai_services.retrieve_rag_context, query_text, domain="agriculture")
     rag_text = "\n".join([f"- Fiche {item['title']}: {item['answer']}" for item in rag_items])
 
     # 3. Construction du prompt Qwen2-VL
@@ -157,7 +158,7 @@ async def diagnose_elevage(request: Request):
         )
 
     # 1. Étape RAG : Recherche documentaire
-    rag_items = yingr_ai_services.retrieve_rag_context(query_text, domain="elevage")
+    rag_items = await asyncio.to_thread(yingr_ai_services.retrieve_rag_context, query_text, domain="elevage")
     rag_text = "\n".join([f"- Fiche {item['title']}: {item['answer']}" for item in rag_items])
 
     # 2. Prompt Vision
@@ -255,7 +256,7 @@ async def sos_accident(request: Request):
         )
 
     # 2. Étape RAG : Recherche de fiches de premiers secours
-    rag_items = yingr_ai_services.retrieve_rag_context(query_text, domain="sos_accident")
+    rag_items = await asyncio.to_thread(yingr_ai_services.retrieve_rag_context, query_text, domain="sos_accident")
     rag_text = "\n".join([f"- Fiche {item['title']}: {item['answer']}" for item in rag_items])
 
     # 3. Prompt de secourisme (posture Sapeur-Pompier)

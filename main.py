@@ -52,6 +52,7 @@ try:
 except ImportError:
     GeminiVisionEngine = None
 import v2_services
+import knowledge_relevance
 import agri_services
 import yingr_ai_api
 from burkina_translator import (
@@ -2882,97 +2883,10 @@ def _generate_local_translations(
     return _attach_local_translation_audio(normalized, background_tasks)
 
 
-def _find_studio_knowledge_match(
-    db: Session,
-    *,
-    category: str,
-    query_text: str,
-    photo_analysis: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Retourne la fiche validée du Studio la plus proche du texte/diagnostic."""
-    if (photo_analysis or {}).get("needs_clarification"):
-        return None
-    normalized_category = _normalize_expert_local_category(category)
-    candidates = (
-        db.query(ExpertLocalKnowledgeDB)
-        .filter(
-            ExpertLocalKnowledgeDB.category == normalized_category,
-            ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"]),
-        )
-        .order_by(ExpertLocalKnowledgeDB.updated_at.desc())
-        .limit(1000)
-        .all()
-    )
-    analysis = photo_analysis or {}
-    search_parts = [
-        query_text,
-        str(analysis.get("problem_label") or ""),
-        str(analysis.get("disease_detected") or ""),
-        str(analysis.get("diagnosis") or ""),
-        # Contrat du pipeline V2 (v2_services._validate_analysis).
-        str(analysis.get("diagnostic") or ""),
-        str(analysis.get("description_visuelle") or ""),
-        " ".join(str(item) for item in (analysis.get("causes_probables") or [])),
-        " ".join(str(item) for item in (analysis.get("actions_immediates") or [])),
-        " ".join(str(item) for item in (analysis.get("actions_detaillees") or [])),
-        str(analysis.get("situation_type") or ""),
-        str(analysis.get("threat_type") or ""),
-        str(analysis.get("analysis") or ""),
-    ]
-    search_blob = " ".join(part for part in search_parts if part)
-    search_tokens = _rural_tokens(search_blob)
-    # Les modèles Vision peuvent employer les noms internationaux même quand
-    # la fiche Studio est rédigée en français. Ces équivalences ne traduisent
-    # pas la réponse : elles servent uniquement au rapprochement des fiches.
-    normalized_blob = _normalize_search_text(search_blob)
-    studio_match_aliases = {
-        "armyworm": "chenille legionnaire automne",
-        "fall armyworm": "chenille legionnaire automne",
-        "corn": "mais",
-        "maize": "mais",
-        "pest": "ravageur",
-        "pests": "ravageurs",
-        "caterpillar": "chenille",
-    }
-    for source_term, studio_terms in studio_match_aliases.items():
-        if source_term in normalized_blob:
-            search_tokens.update(_tokenize(studio_terms))
-    if not search_tokens:
-        return None
-
-    best: Optional[Tuple[float, ExpertLocalKnowledgeDB]] = None
-    normalized_problem = _normalize_search_text(
-        str(analysis.get("problem_label") or analysis.get("disease_detected") or query_text)
-    )
-    for item in candidates:
-        tags = [str(tag) for tag in _load_json_list(item.tags_json)]
-        if not _resource_relevant(search_blob, " ".join([item.title or "", item.question_fr or "", " ".join(tags)]), normalized_category):
-            continue
-        score = (
-            4.0 * len(search_tokens & _rural_tokens(item.title or ""))
-            + 3.5 * len(search_tokens & _rural_tokens(" ".join(tags)))
-            + 2.0 * len(search_tokens & _rural_tokens(item.question_fr or ""))
-            + 0.25 * len(search_tokens & _rural_tokens(item.resolution_fr or ""))
-        )
-        normalized_title = _normalize_search_text(item.title or "")
-        if normalized_title and normalized_problem and (
-            normalized_title in normalized_problem or normalized_problem in normalized_title
-        ):
-            score += 15.0
-        if best is None or score > best[0]:
-            best = (score, item)
-
-    if best is not None:
-        print(
-            f"[STUDIO-MATCH] "
-            f"meilleure_fiche=#{best[1].id} '{best[1].title}' score={round(best[0], 2)}"
-        )
-    if best is None or best[0] < float(os.getenv("SONGRA_KNOWLEDGE_MIN_SCORE", "4")):
-        return None
-    result = _serialize_expert_local_knowledge_item(best[1])
-    result["match_score"] = round(best[0], 2)
-    result["source"] = "studio_connaissances"
-    return result
+def _find_studio_knowledge_match(db: Session, *, category: str, query_text: str,
+                                  photo_analysis: Optional[Dict[str, Any]] = None):
+    return _select_semantic_resources(db, category, query_text,
+        photo_analysis=photo_analysis, kinds=("studio",))["studio"]
 
 
 def _apply_studio_match_to_v2_response(
@@ -3434,65 +3348,25 @@ def _trusted_shared_reuse_source_kinds() -> List[str]:
     return ["resolved_ticket"]
 
 
-def _find_reusable_offline_entry(
-    db: Session,
-    *,
-    domain: str,
-    source_kinds: List[str],
-    question_text: str,
-    limit: int = 120,
-) -> Optional[OfflineKnowledgeEntryDB]:
-    normalized_question = _normalize_search_text(question_text)
-    if not normalized_question:
+def _find_reusable_offline_entry(db: Session, *, domain: str, source_kinds: List[str],
+                                 question_text: str, limit: int = 120):
+    if not question_text.strip():
         return None
-
-    question_tokens = set(_tokenize(question_text))
-    candidates = (
-        db.query(OfflineKnowledgeEntryDB)
-        .filter(
-            OfflineKnowledgeEntryDB.domain == domain,
-            OfflineKnowledgeEntryDB.source_kind.in_(source_kinds),
-        )
-        .order_by(OfflineKnowledgeEntryDB.updated_at.desc(), OfflineKnowledgeEntryDB.id.desc())
-        .limit(max(1, min(limit, 300)))
-        .all()
-    )
-
-    best_entry: Optional[OfflineKnowledgeEntryDB] = None
-    best_score = 0.0
-
-    for entry in candidates:
-        candidate_text = entry.question or entry.title or ""
-        normalized_candidate = _normalize_search_text(candidate_text)
-        if not normalized_candidate:
-            continue
-
-        score = 0.0
-        if normalized_candidate == normalized_question:
-            score += 100.0
-        elif normalized_question in normalized_candidate or normalized_candidate in normalized_question:
-            score += 60.0
-
-        candidate_tokens = set(_tokenize(
-            f"{entry.title or ''} {entry.question or ''} {entry.answer or ''} {' '.join(_load_json_list(entry.tags_json))}"
-        ))
-        overlap = len(question_tokens & candidate_tokens)
-        if overlap:
-            score += overlap * 6.0
-            score += overlap / max(len(question_tokens), 1)
-
-        if score > best_score:
-            best_score = score
-            best_entry = entry
-
-    if best_entry is None:
+    rows = db.query(OfflineKnowledgeEntryDB).filter(
+        OfflineKnowledgeEntryDB.domain == domain,
+        OfflineKnowledgeEntryDB.source_kind.in_(source_kinds),
+    ).order_by(OfflineKnowledgeEntryDB.id).limit(max(1, min(limit, 300))).all()
+    if not rows:
         return None
-
-    if best_score >= 100.0:
-        return best_entry
-
-    min_overlap_score = max(12.0, min(24.0, len(question_tokens) * 4.0))
-    return best_entry if best_score >= min_overlap_score else None
+    profile = knowledge_relevance.understand(question_text, domain)
+    tokens = _rural_tokens(question_text + " " + " ".join(profile.get("searchTerms", [])))
+    candidates = [{"id": str(row.id), "title": row.title or "", "question": row.question or "",
+        "answer": row.answer or "", "lexical_score": len(tokens & _rural_tokens(
+            " ".join([row.title or "", row.question or "", row.answer or ""]))), "row": row} for row in rows]
+    candidates.sort(key=lambda c: c["lexical_score"], reverse=True)
+    accepted, audit = knowledge_relevance.validate(profile, candidates[:5])
+    print("[SONGRA-REUSE-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
+    return accepted[0]["row"] if accepted else None
 
 
 def _find_previously_answered_question(
@@ -3501,8 +3375,8 @@ def _find_previously_answered_question(
     """Réutilise d'abord une question identique, puis un cas expert proche.
 
     Les réponses IA ordinaires ne sont reprises que si la question normalisée
-    est identique. Les tickets résolus par un humain gardent la recherche
-    sémantique plus souple existante.
+    est identique. Les tickets résolus par un humain doivent passer la validation
+    sémantique de pertinence avant toute réutilisation approchée.
     """
     normalized_question = _normalize_search_text(question_text).strip()
     if not normalized_question:
@@ -5775,21 +5649,6 @@ def _rural_tokens(text: str) -> set:
     return tokens - (ignored - {"culture"})
 
 
-def _resource_relevant(question: str, resource: str, domain: str) -> bool:
-    query = _rural_tokens(question)
-    content = _rural_tokens(resource)
-    subjects = FOCUS_SUBJECTS.get(domain, [])
-    for subject in subjects:
-        terms = _rural_tokens(" ".join(subject["aliases"]))
-        if query & terms and not content & terms:
-            return False
-    intent = detect_rural_question_intent(question, domain)
-    resource_intent = detect_rural_question_intent(resource, domain)
-    if intent in {"agricultural_technique", "livestock_technique"} and resource_intent in {"plant_disease", "animal_disease"}:
-        return False
-    overlap = query & content
-    return len(overlap) >= 2 or (len(query) == 1 and bool(overlap))
-
 
 def _build_focus_terms(label: Optional[str], aliases: Optional[List[str]] = None) -> List[str]:
     values = [label or "", *(aliases or [])]
@@ -5911,201 +5770,97 @@ def _build_precise_no_match_answer(domain: str, focus_context: Optional[Dict[str
     )
 
 
-def retrieve_knowledge(
-    db: Session,
-    domain: str,
-    query: str,
-    limit: int = 5,
-    expand_scope: bool = True,
-    focus_subject: Optional[Dict[str, Any]] = None,
-    focus_issue: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    """Récupération améliorée basée sur le recouvrement de mots-clés pondéré.
-
-    - Les correspondances dans le titre et les tags comptent plus que celles
-      présentes uniquement dans la réponse longue.
-        - La recherche est limitée au domaine demandé. Aucun mélange automatique
-            entre agriculture et élevage n'est autorisé.
-        - Si ``expand_scope`` est activé et qu'aucune fiche n'est trouvée dans le
-            domaine demandé, on fait un second passage sur toutes les fiches pour
-            éviter de rater une correspondance évidente.
-    """
-    query_tokens = _rural_tokens(query)
-    if not query_tokens:
-        return []
-
-    focus_subject_terms = focus_subject.get("terms", []) if focus_subject else []
-    focus_issue_terms = focus_issue.get("terms", []) if focus_issue else []
-
-    def serialize_knowledge_item(it: KnowledgeItem) -> Dict[str, Any]:
-        media_data: Optional[Any] = None
-        if it.media:
-            try:
-                media_data = json.loads(it.media)
-            except Exception:
-                media_data = None
-
-        return {
-            "id": it.id,
-            "domain": it.domain,
-            "title": it.title,
-            "question": it.question,
-            "answer": it.answer,
-            "tags": _load_json_list(it.tags),
-            "language": it.language,
-            "source": it.source,
-            "media": media_data,
-        }
-
-    def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        scored_local: List[Dict[str, Any]] = []
-        for it in items:
-            if not _resource_relevant(query, " ".join([it.get("title") or "", it.get("question") or "", " ".join(it.get("tags") or [])]), domain):
-                continue
-            # Séparer les zones de texte pour mieux pondérer
-            title_tokens = set(_tokenize(it.get("title") or ""))
-            question_tokens = set(_tokenize(it.get("question") or ""))
-            answer_tokens = set(_tokenize(it.get("answer") or ""))
-
-            tags_list = [str(tag) for tag in (it.get("tags") or []) if str(tag).strip()]
-            tags_tokens = set(_tokenize(" ".join(tags_list))) if tags_list else set()
-
-            overlap_title = len(query_tokens & title_tokens)
-            overlap_question = len(query_tokens & question_tokens)
-            overlap_answer = len(query_tokens & answer_tokens)
-            overlap_tags = len(query_tokens & tags_tokens)
-
-            # Pondération : titre > tags > question > réponse
-            # answer reçoit un poids très faible pour éviter que les longs textes
-            # (fiches entreprendre, analyses) ne matchent sur des mots communs.
-            score = (
-                overlap_title * 3.0
-                + overlap_tags * 2.5
-                + overlap_question * 2.0
-                + overlap_answer * 0.3
-            )
-
-            combined_text = _normalize_free_text(
-                f"{it.get('title') or ''}\n{it.get('question') or ''}\n{it.get('answer') or ''}\n{' '.join(tags_list)}"
-            )
-            subject_match = any(term in combined_text for term in focus_subject_terms) if focus_subject_terms else False
-            issue_match = any(term in combined_text for term in focus_issue_terms) if focus_issue_terms else False
-
-            if focus_subject_terms and subject_match:
-                score += 8.0
-            if focus_issue_terms and issue_match:
-                score += 4.5
-
-            if score <= 0:
-                continue
-
-            scored_local.append({
-                "item": it,
-                "score": score,
-                "subject_match": subject_match,
-                "issue_match": issue_match,
-            })
-
-        return scored_local
-
-    generated_source_kinds = _trusted_shared_rag_source_kinds()
-
-    def fetch_generated_items(target_domain: Optional[str] = None) -> List[Dict[str, Any]]:
-        query_builder = db.query(OfflineKnowledgeEntryDB).filter(
-            OfflineKnowledgeEntryDB.source_kind.in_(generated_source_kinds)
-        )
-        if target_domain:
-            query_builder = query_builder.filter(OfflineKnowledgeEntryDB.domain == target_domain)
-        return [_serialize_offline_entry_for_rag(item) for item in query_builder.all()]
-
-    def fetch_studio_items(target_domain: Optional[str] = None) -> List[Dict[str, Any]]:
-        query_builder = db.query(ExpertLocalKnowledgeDB).filter(
+def _select_semantic_resources(db, domain, question, *, photo_analysis=None,
+                               organization_id=None, kinds=("studio", "rag", "course")):
+    """Shared selection for Studio, RAG, Academy and legacy/community callers."""
+    domain = _normalize_expert_local_category(domain)
+    storage_domains = [domain, "health", "sos_accident"] if domain == "urgence" else [domain]
+    resources = []
+    def add(kind, payload, title, query, answer, tags):
+        resources.append({"id": f"{kind}:{payload['id']}", "kind": kind,
+            "title": title or "", "question": query or "", "answer": answer or "",
+            "tags": tags, "payload": payload})
+    if "studio" in kinds:
+        for item in db.query(ExpertLocalKnowledgeDB).filter(
+            ExpertLocalKnowledgeDB.category == domain,
             ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"])
-        )
-        if target_domain:
-            query_builder = query_builder.filter(
-                ExpertLocalKnowledgeDB.category
-                == _normalize_expert_local_category(target_domain)
-            )
-        studio_items: List[Dict[str, Any]] = []
-        for item in query_builder.all():
-            studio_items.append({
-                "id": f"studio-{item.id}",
-                "domain": item.category,
-                "title": item.title,
-                "question": item.question_fr,
-                "answer": item.resolution_fr,
-                "tags": _load_json_list(item.tags_json),
-                "language": "fr",
-                "source": "studio_connaissances",
-                "translations": _load_json_dict(item.translations_json),
-                "audio": _load_json_dict(item.audio_json),
-            })
-        return studio_items
+        ).order_by(ExpertLocalKnowledgeDB.id).all():
+            payload = _serialize_expert_local_knowledge_item(item)
+            payload["source"] = "studio_connaissances"
+            add("studio", payload, item.title, item.question_fr, item.resolution_fr,
+                _load_json_list(item.tags_json))
+    if "rag" in kinds:
+        for item in db.query(KnowledgeItem).filter(KnowledgeItem.domain.in_(storage_domains)).order_by(KnowledgeItem.id).all():
+            payload = {"id": item.id, "domain": item.domain, "title": item.title,
+                "question": item.question, "answer": item.answer, "tags": _load_json_list(item.tags),
+                "language": item.language, "source": item.source,
+                "media": _load_json_list(item.media)}
+            add("rag", payload, item.title, item.question, item.answer, payload["tags"])
+        for item in db.query(OfflineKnowledgeEntryDB).filter(
+            OfflineKnowledgeEntryDB.domain.in_(storage_domains),
+            OfflineKnowledgeEntryDB.source_kind.in_(_trusted_shared_rag_source_kinds())
+        ).order_by(OfflineKnowledgeEntryDB.id).all():
+            payload = _serialize_offline_entry_for_rag(item)
+            add("resolved", payload, payload.get("title"), payload.get("question"),
+                payload.get("answer"), payload.get("tags") or [])
+    if "course" in kinds and domain in {"agriculture", "elevage"}:
+        courses = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published")
+        courses = courses.filter(AcademyCourseDB.organization_id.is_(None)) if organization_id is None else courses.filter(AcademyCourseDB.organization_id == organization_id)
+        for item in courses.order_by(AcademyCourseDB.id).all():
+            payload = _serialize_academy_course(item, include_content=False)
+            payload["open_path"] = f"/academy/courses/{item.id}"
+            # Validate the summary actually displayed, not hidden lessons.
+            add("course", payload, item.title, "", item.summary, [item.crop or ""])
+    if not resources or (photo_analysis or {}).get("needs_clarification"):
+        audit = {**knowledge_relevance.empty_profile(question, domain),
+            "candidateKnowledgeIds": [], "candidateScores": [],
+            "candidateTitles": [], "semanticValidationResult": [], "selectedKnowledgeId": None,
+            "selectedKnowledgeScore": None,
+            "rejectionReason": "needs_clarification" if photo_analysis else "no_resources",
+            "fallbackTriggered": not (photo_analysis or {}).get("needs_clarification", False)}
+        print("[SONGRA-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
+        return {"studio": None, "rag": [], "course": None, "audit": audit}
+    profile = knowledge_relevance.understand(question, domain, photo_analysis)
+    tokens = _rural_tokens(question + " " + " ".join(profile.get("searchTerms", [])))
+    for candidate in resources:
+        candidate["lexical_score"] = (
+            4 * len(tokens & _rural_tokens(candidate["title"]))
+            + 3.5 * len(tokens & _rural_tokens(" ".join(str(t) for t in candidate["tags"])))
+            + 2 * len(tokens & _rural_tokens(candidate["question"]))
+            + .25 * len(tokens & _rural_tokens(candidate["answer"])))
+    resources.sort(key=lambda c: c["lexical_score"], reverse=True)
+    # Five cards and five courses; zero lexical overlap is not a rejection.
+    shortlist = [c for c in resources if c["kind"] != "course"][:5]
+    shortlist += [c for c in resources if c["kind"] == "course"][:5]
+    accepted, audit = knowledge_relevance.validate(profile, shortlist)
+    for candidate in accepted:
+        candidate["payload"].update(match_score=candidate["semantic_score"],
+            lexical_score=candidate["lexical_score"],
+            validated_query=question,
+            semantic_validation=candidate["semantic_validation"])
+    studios = [c for c in accepted if c["kind"] == "studio"]
+    rag = [c for c in accepted if c["kind"] in {"rag", "resolved"}]
+    courses = [c for c in accepted if c["kind"] == "course"]
+    selected = (studios or rag or courses or [None])[0]
+    audit.update(selectedKnowledgeId=selected["id"] if selected else None,
+                 selectedKnowledgeScore=selected["semantic_score"] if selected else None,
+                 fallbackTriggered=selected is None and not audit.get("clarifyingQuestion"))
+    print("[SONGRA-RELEVANCE] " + json.dumps(audit, ensure_ascii=False))
+    return {"studio": studios[0]["payload"] if studios else None,
+            "rag": [c["payload"] for c in rag],
+            "course": courses[0]["payload"] if courses else None, "audit": audit}
 
-    # 1) Fiches strictement dans le domaine demandé
-    primary_items = [
-        serialize_knowledge_item(item)
-        for item in db.query(KnowledgeItem).filter(KnowledgeItem.domain == domain).all()
-    ]
-    primary_items.extend(fetch_generated_items(domain))
-    primary_items.extend(fetch_studio_items(domain))
-    scored = score_items(primary_items)
 
-    # 2) Fallback global optionnel : si rien trouvé, on regarde toutes les fiches
-    if not scored and expand_scope:
-        all_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
-        all_items.extend(fetch_generated_items())
-        all_items.extend(fetch_studio_items())
-        scored = score_items(all_items)
-
-    # 3) Dernier recours : recherche par sous-chaîne, soit dans le domaine
-    # strict, soit sur toute la base si l'élargissement est autorisé.
-    if not scored:
-        fallback_items = primary_items
-        if expand_scope:
-            fallback_items = [serialize_knowledge_item(item) for item in db.query(KnowledgeItem).all()]
-            fallback_items.extend(fetch_generated_items())
-            fallback_items.extend(fetch_studio_items())
-
-        def normalize_text(text: str) -> str:
-            if not text:
-                return ""
-            tokens = _tokenize(text)
-            return " ".join(tokens)
-
-        norm_query_parts = list(query_tokens)
-        for it in fallback_items:
-            tags_list = [str(tag) for tag in (it.get("tags") or []) if str(tag).strip()]
-            big_text = f"{it.get('title') or ''}\n{it.get('question') or ''}\n{it.get('answer') or ''}\n"
-            if tags_list:
-                big_text += " ".join(tags_list)
-            norm_text = normalize_text(big_text)
-            if any(part in norm_text for part in norm_query_parts):
-                scored.append({"item": it, "score": 1.0})
-
-    if not expand_scope:
-        scored = [
-            entry
-            for entry in scored
-            if _normalize_expert_local_category(entry["item"].get("domain"))
-            == _normalize_expert_local_category(domain)
-        ]
-
-    if focus_subject_terms and any(entry.get("subject_match") for entry in scored):
-        scored = [entry for entry in scored if entry.get("subject_match")]
-
-    if focus_issue_terms and any(entry.get("issue_match") for entry in scored):
-        scored = [entry for entry in scored if entry.get("issue_match")]
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    top_items = [s["item"] for s in scored[:limit]]
-
-    results: List[Dict[str, Any]] = []
-    for it in top_items:
-        results.append(dict(it))
-
-    return results
+def retrieve_knowledge(db: Session, domain: str, query: str, limit: int = 5,
+                       expand_scope: bool = True, focus_subject=None, focus_issue=None):
+    # Compatibility arguments retained; no cross-domain or substring bypass.
+    selected = _select_semantic_resources(db, domain, query, kinds=("studio", "rag"))
+    items = selected["rag"]
+    studio = selected["studio"]
+    if studio:
+        items = [{**studio, "question": studio.get("question_fr"),
+                  "answer": studio.get("resolution_fr")}] + items
+    return items[:limit]
 
 
 def generate_llm_answer_with_general_knowledge(
@@ -6286,23 +6041,17 @@ def resolve_knowledge_answer(
     allow_external: bool = True,
 ) -> Dict[str, Any]:
     """Fiches locales, puis cours pratique, puis connaissance IA generale."""
-    question_intent = detect_rural_question_intent(question, domain)
-    # Les fiches maladie ne doivent jamais detourner une demande de semis,
-    # rendement, alimentation ou autre technique. Pour ces demandes, Songra
-    # repond directement comme assistant agricole generaliste.
-    use_general_knowledge = (
-        domain in {"agriculture", "elevage"}
-        and question_intent in {"agricultural_technique", "livestock_technique", "general_advice"}
-    )
-    course_match = _find_academy_course_match(
-        db, question, domain=domain, organization_id=organization_id
-    )
-    studio_match = _find_studio_knowledge_match(
-        db, category=domain, query_text=question, photo_analysis=photo_analysis
-    )
+    selected = _select_semantic_resources(db, domain, question,
+        photo_analysis=photo_analysis, organization_id=organization_id)
+    studio_match = selected["studio"]
+    course_match = selected["course"]
+    if selected["audit"].get("clarifyingQuestion"):
+        return {"relevance_audit": selected["audit"], "rag_items": [], "llm_answer": selected["audit"]["clarifyingQuestion"],
+                "rag_fallback_answer": None, "knowledge_mode": "needs_clarification",
+                "knowledge_fallback_used": False, "recommended_course": None}
     if studio_match:
         return {
-            "rag_items": [studio_match],
+            "relevance_audit": selected["audit"], "rag_items": [studio_match],
             "llm_answer": studio_match["resolution_fr"],
             "rag_fallback_answer": None,
             "knowledge_mode": "studio_knowledge",
@@ -6311,15 +6060,7 @@ def resolve_knowledge_answer(
             "recommended_course": course_match,
         }
 
-    rag_items = retrieve_knowledge(
-        db,
-        domain,
-        question,
-        limit=limit + 3,
-        expand_scope=False,
-        focus_subject=(focus_context or {}).get("subject"),
-        focus_issue=(focus_context or {}).get("issue"),
-    )
+    rag_items = selected["rag"][:limit]
     if rag_items:
         llm_answer = rag_items[0].get("answer") if not allow_external else generate_llm_answer(
             question=question,
@@ -6331,7 +6072,7 @@ def resolve_knowledge_answer(
             photo_analysis=photo_analysis,
         )
         return {
-            "rag_items": rag_items,
+            "relevance_audit": selected["audit"], "rag_items": rag_items,
             "llm_answer": llm_answer,
             "rag_fallback_answer": None if llm_answer else rag_items[0].get("answer"),
             "knowledge_mode": "rag_strict",
@@ -6341,12 +6082,12 @@ def resolve_knowledge_answer(
 
     if course_match:
         return {
-            "rag_items": [], "llm_answer": course_match.get("summary"),
+            "relevance_audit": selected["audit"], "rag_items": [], "llm_answer": course_match.get("summary"),
             "rag_fallback_answer": None, "knowledge_mode": "course_knowledge",
             "knowledge_fallback_used": False, "recommended_course": course_match,
         }
     if not allow_external:
-        return {"rag_items": [], "llm_answer": None, "rag_fallback_answer": None,
+        return {"relevance_audit": selected["audit"], "rag_items": [], "llm_answer": None, "rag_fallback_answer": None,
                 "knowledge_mode": "no_match", "recommended_course": None}
 
     # Aucune fiche Studio assez proche : analyse générale en repli.
@@ -6386,7 +6127,7 @@ def resolve_knowledge_answer(
 
     if general_answer:
         return {
-            "rag_items": [],
+            "relevance_audit": selected["audit"], "rag_items": [],
             "llm_answer": general_answer,
             "rag_fallback_answer": None,
             "knowledge_mode": "llm_general_knowledge",
@@ -6396,7 +6137,7 @@ def resolve_knowledge_answer(
 
     # ÉTAPE 3 : Fallback ultime - aucune source d'info disponible
     return {
-        "rag_items": [],
+        "relevance_audit": selected["audit"], "rag_items": [],
         "llm_answer": None,
         "rag_fallback_answer": _build_precise_no_match_answer(domain, focus_context),
         "knowledge_mode": "no_match",
@@ -7287,6 +7028,7 @@ async def analyze_scanner_photo(
                 language=target_lang,
                 photo_analysis=photo_analysis,
                 french_answer=str(photo_analysis.get("analysis") or ""),
+                query_text=data.content or "",
             )
 
         response = {
@@ -8185,98 +7927,26 @@ Appelez les secours pendant que vous effectuez ces gestes
     return response
 
 
-def _find_recorded_local_case_audio(
-    db: Session,
-    *,
-    category: str,
-    language: str,
-    photo_analysis: Optional[Dict[str, Any]],
-    french_answer: str,
-) -> Optional[Dict[str, Any]]:
-    """Trouve une fiche française validée possédant un vrai audio humain local."""
-    if language not in _TRANSLATOR_VALID_LANGS:
+def _find_recorded_local_case_audio(db: Session, *, category: str, language: str,
+                                   photo_analysis: Optional[Dict[str, Any]],
+                                   french_answer: str, query_text: str = ""):
+    # Audio belongs to a semantically validated answer, never to shared words
+    # extracted from generated recommendations.
+    if language not in _TRANSLATOR_VALID_LANGS or not query_text:
         return None
-    if photo_analysis and photo_analysis.get("problem_status") != "identified":
+    match = _find_studio_knowledge_match(db, category=category,
+        query_text=query_text, photo_analysis=photo_analysis)
+    if not match:
         return None
-
-    normalized_category = _normalize_expert_local_category(category)
-    candidates = (
-        db.query(ExpertLocalKnowledgeDB)
-        .filter(
-            ExpertLocalKnowledgeDB.category == normalized_category,
-            ExpertLocalKnowledgeDB.status.in_(["validated", "resolved", "expert_verified"]),
-        )
-        .order_by(ExpertLocalKnowledgeDB.updated_at.desc())
-        .limit(500)
-        .all()
-    )
-
-    analysis = photo_analysis or {}
-    diagnostic_parts: List[str] = [
-        str(analysis.get("problem_label") or ""),
-        str(analysis.get("disease_detected") or ""),
-        str(analysis.get("diagnosis") or ""),
-        str(analysis.get("situation_type") or ""),
-        str(analysis.get("threat_type") or ""),
-        str(analysis.get("analysis") or ""),
-        french_answer or "",
-    ]
-    for key in ("all_symptoms", "visible_symptoms", "symptoms", "red_flags"):
-        value = analysis.get(key)
-        if isinstance(value, list):
-            diagnostic_parts.extend(str(item) for item in value)
-
-    diagnostic_text = " ".join(part for part in diagnostic_parts if part).strip()
-    diagnostic_tokens = set(_tokenize(diagnostic_text))
-    if not diagnostic_tokens:
+    audio = (match.get("audio") or {}).get(language) or {}
+    if not str(audio.get("url") or "").strip():
         return None
-
-    best: Optional[Tuple[float, ExpertLocalKnowledgeDB, Dict[str, Any]]] = None
-    for item in candidates:
-        audio_map = _load_json_dict(item.audio_json)
-        audio = audio_map.get(language)
-        if not isinstance(audio, dict) or not str(audio.get("url") or "").strip():
-            continue
-
-        tags = [str(tag) for tag in _load_json_list(item.tags_json)]
-        title_tokens = set(_tokenize(item.title or ""))
-        question_tokens = set(_tokenize(item.question_fr or ""))
-        resolution_tokens = set(_tokenize(item.resolution_fr or ""))
-        tag_tokens = set(_tokenize(" ".join(tags)))
-        score = (
-            4.0 * len(diagnostic_tokens & tag_tokens)
-            + 3.0 * len(diagnostic_tokens & title_tokens)
-            + 1.5 * len(diagnostic_tokens & question_tokens)
-            + 0.5 * len(diagnostic_tokens & resolution_tokens)
-        )
-        normalized_title = _normalize_search_text(item.title or "")
-        normalized_problem = _normalize_search_text(str(analysis.get("problem_label") or ""))
-        if normalized_title and normalized_problem and (
-            normalized_title in normalized_problem or normalized_problem in normalized_title
-        ):
-            score += 12.0
-
-        if best is None or score > best[0]:
-            best = (score, item, audio)
-
-    if best is None or best[0] < 4.0:
-        return None
-
-    score, item, audio = best
-    translations = _load_json_dict(item.translations_json)
-    local_text = translations.get(language) if isinstance(translations.get(language), dict) else {}
-    return {
-        "knowledge_id": item.id,
-        "title": item.title,
-        "question_fr": item.question_fr,
-        "resolution_fr": item.resolution_fr,
-        "match_score": round(score, 2),
-        "language": language,
-        "audio_url": str(audio.get("url") or "").strip(),
-        "audio_mime_type": str(audio.get("mime_type") or "audio/webm"),
-        "local_text": str((local_text or {}).get("text") or "").strip() or None,
-        "source": "recorded_expert_local_knowledge",
-    }
+    translation = (match.get("translations") or {}).get(language) or {}
+    return {"knowledge_id": match["id"], "title": match["title"],
+        "question_fr": match["question_fr"], "resolution_fr": match["resolution_fr"],
+        "match_score": match["match_score"], "language": language,
+        "audio_url": audio["url"], "audio_mime_type": audio.get("mime_type") or "audio/webm",
+        "local_text": translation.get("text"), "source": "recorded_expert_local_knowledge"}
 
 
 @app.post("/api/assistant/query")
@@ -8592,13 +8262,8 @@ async def assistant_query(data: MessageCreate, db: Session = Depends(get_db)):
                 response["local_text"] = translation_entry.get("text")
                 response["french_text"] = studio_case.get("resolution_fr")
             else:
-                recorded_case = _find_recorded_local_case_audio(
-                    db,
-                    category=chosen_category,
-                    language=target_lang,
-                    photo_analysis=photo_analysis,
-                    french_answer=cache_answer_fr,
-                )
+                # A rejected card cannot be revived by matching the AI answer.
+                recorded_case = None
             response["translated"] = False
             response["target_lang"] = target_lang
             response["lang_name"] = _TRANSLATOR_LANG_NAMES.get(target_lang)
@@ -9902,42 +9567,10 @@ def _scope_courses_for_user(query: Any, user: User) -> Any:
     return query.filter(AcademyCourseDB.organization_id == organization_id)
 
 
-def _find_academy_course_match(
-    db: Session, question: str, *, domain: str, organization_id: Optional[int]
-) -> Optional[Dict[str, Any]]:
-    if domain not in {"agriculture", "elevage"}:
-        return None
-    query = db.query(AcademyCourseDB).filter(AcademyCourseDB.status == "published")
-    if organization_id is None:
-        query = query.filter(AcademyCourseDB.organization_id.is_(None))
-    else:
-        query = query.filter(AcademyCourseDB.organization_id == organization_id)
-    query_tokens = _rural_tokens(question)
-    normalized_question = _normalize_free_text(question)
-    temporal_terms = {"quand", "periode", "date", "calendrier", "saison", "moment"}
-    asks_calendar = any(term in normalized_question for term in temporal_terms)
-    best: Optional[Tuple[float, AcademyCourseDB]] = None
-    for course in query.all():
-        headline = " ".join([course.title or "", course.crop or "", course.summary or ""])
-        searchable = " ".join([headline, json.dumps(_load_json_list(course.steps_json), ensure_ascii=False)])
-        course_tokens = _rural_tokens(searchable)
-        if not _resource_relevant(question, headline, domain):
-            continue
-        overlap = query_tokens & course_tokens
-        headline_normalized = _normalize_free_text(headline)
-        if asks_calendar and not any(term in headline_normalized for term in temporal_terms):
-            continue
-        # Un seul mot commun (souvent seulement "mais") ne suffit pas pour
-        # afficher un cours comme pertinent.
-        score = float(len(overlap))
-        if score >= float(os.getenv("SONGRA_COURSE_MIN_SCORE", "2")) and (best is None or score > best[0]):
-            best = (score, course)
-    if best is None:
-        return None
-    result = _serialize_academy_course(best[1], include_content=False)
-    result["match_score"] = best[0]
-    result["open_path"] = f"/academy/courses/{best[1].id}"
-    return result
+def _find_academy_course_match(db: Session, question: str, *, domain: str,
+                               organization_id: Optional[int]):
+    return _select_semantic_resources(db, domain, question,
+        organization_id=organization_id, kinds=("course",))["course"]
 
 
 def _course_access_status(db: Session, user: User, course_id: int) -> Dict[str, Any]:
@@ -12823,6 +12456,7 @@ def _resolve_v2_local_knowledge(**kwargs):
 async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Session,
                            *, generate_media: bool = False):
     """Assistant conversationnel v2 : texte +/- image, pas de génération média par défaut"""
+    import asyncio
     started_at = time.perf_counter()
     _require_resource(db, current_user, "analyses")
     text = (data.text or data.content or "").strip()
@@ -12871,7 +12505,7 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
     domain = "health" if category in {"urgence", "sos_accident"} else category
     knowledge_result = None
     if not images_b64:
-        knowledge_result = _resolve_v2_local_knowledge(
+        knowledge_result = await asyncio.to_thread(_resolve_v2_local_knowledge,
             db=db, domain=domain, question=search_text, language="fr",
             conversation_context=history, organization_id=getattr(current_user, "organization_id", None),
             allow_external=False,
@@ -12883,6 +12517,8 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
             "type_probleme": category, "diagnostic": card.get("title") or local_answer,
             "gravite": "critique" if category == "urgence" else "faible", "confiance": 1,
             "consulter_expert": classified.get("urgency") == "high",
+            "needs_clarification": knowledge_result.get("knowledge_mode") == "needs_clarification",
+            "question_complementaire": local_answer if knowledge_result.get("knowledge_mode") == "needs_clarification" else "",
         })
     else:
         analysis = await v2_services.gemini_analyze(text=search_text, images_b64=images_b64, category=category)
@@ -12939,19 +12575,9 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
                     video_result = result
 
     final_response = v2_services.build_response(analysis=analysis, decision=decision, image_result=image_result, video_result=video_result)
-    studio_match = (knowledge_result or {}).get("studio_match")
-    if not studio_match and not analysis.get("needs_clarification"):
-        try:
-            studio_match = _find_studio_knowledge_match(
-                db, category=category, query_text=search_text, photo_analysis=analysis,
-            )
-        except Exception as error:
-            print(f"[SONGRA-KNOWLEDGE] studio unavailable error={type(error).__name__}")
-    if studio_match:
-        final_response = _apply_studio_match_to_v2_response(
-            final_response, studio_match, target_lang
-        )
-    knowledge_result = knowledge_result or ({} if analysis.get("needs_clarification") else _resolve_v2_local_knowledge(
+    # Text rejections stay rejected: generated AI advice must never become
+    # new evidence for a second lexical match. Photos are resolved once after observation.
+    knowledge_result = knowledge_result or ({} if analysis.get("needs_clarification") else await asyncio.to_thread(_resolve_v2_local_knowledge,
         db=db,
         domain=domain,
         question=search_text,
@@ -12961,6 +12587,14 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         conversation_context=history,
         allow_external=False,
     ))
+    studio_match = knowledge_result.get("studio_match")
+    if knowledge_result.get("knowledge_mode") == "needs_clarification":
+        analysis["needs_clarification"] = True
+        analysis["question_complementaire"] = knowledge_result.get("llm_answer")
+        final_response["message"] = knowledge_result.get("llm_answer")
+        final_response["actions"] = []
+    if studio_match:
+        final_response = _apply_studio_match_to_v2_response(final_response, studio_match, target_lang)
     grounded_answer = _clean_assistant_text(
         knowledge_result.get("llm_answer") or knowledge_result.get("rag_fallback_answer")
     )
@@ -13006,7 +12640,18 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         final_response["knowledge_mode"] = "ai_unavailable"
     elif knowledge_result.get("knowledge_mode") == "no_match" and not analysis.get("from_fallback"):
         final_response["knowledge_mode"] = "external_ai"
+    relevance_audit = knowledge_result.get("relevance_audit") or {}
     print("[SONGRA-PIPELINE] " + json.dumps({
+        "originalQuery": original_text, "normalizedQuery": knowledge_relevance.normalized(search_text),
+        "detectedProblem": relevance_audit.get("detectedProblem"),
+        "detectedSymptoms": relevance_audit.get("detectedSymptoms", []),
+        "userGoal": relevance_audit.get("userGoal"),
+        "candidateKnowledgeIds": relevance_audit.get("candidateKnowledgeIds", []),
+        "candidateScores": relevance_audit.get("candidateScores", []),
+        "candidateTitles": relevance_audit.get("candidateTitles", []),
+        "semanticValidationResult": relevance_audit.get("semanticValidationResult", []),
+        "rejectionReason": relevance_audit.get("rejectionReason"),
+        "selectedKnowledgeScore": relevance_audit.get("selectedKnowledgeScore"),
         "inputType": final_response["input_type"], "selectedLanguage": target_lang or "fr",
         "sourceLanguage": source_lang, "queryLength": len(text), "historyTurns": len(history),
         "imageReceived": bool(images_b64), "imageQuality": analysis.get("image_quality"),
@@ -13015,7 +12660,7 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         "detectedCrop": (_find_best_focus_match("agriculture", search_text, FOCUS_SUBJECTS) or {}).get("label"),
         "detectedAnimal": (_find_best_focus_match("elevage", search_text, FOCUS_SUBJECTS) or {}).get("label"),
         "knowledgeSearchResults": len(knowledge_result.get("rag_items", [])),
-        "selectedKnowledgeId": (studio_match or {}).get("id"),
+        "selectedKnowledgeId": relevance_audit.get("selectedKnowledgeId") or (studio_match or {}).get("id"),
         "bestKnowledgeScore": (studio_match or {}).get("match_score"),
         "suggestedCourseId": (knowledge_result.get("recommended_course") or {}).get("id"),
         "localAudioAvailable": final_response.get("local_audio_available", False),
