@@ -1009,12 +1009,14 @@ async def gemini_analyze(text: str = "", images_b64: Optional[List[str]] = None,
         normalized_images = []
         for payload in images:
             try:
+                if len(payload) > 28 * 1024 * 1024:
+                    return clarification_analysis(category, "La photo est trop volumineuse. Choisissez une image de moins de 20 Mo.")
                 decoded = base64.b64decode(payload, validate=True)
-                if len(decoded) > 8 * 1024 * 1024:
-                    raise ValueError("Image trop volumineuse")
+                if len(decoded) > 20 * 1024 * 1024:
+                    return clarification_analysis(category, "La photo est trop volumineuse. Choisissez une image de moins de 20 Mo.")
                 with Image.open(BytesIO(decoded)) as photo:
-                    if photo.width * photo.height > 24_000_000:
-                        raise ValueError("Image trop grande")
+                    if photo.width * photo.height > 50_000_000:
+                        return clarification_analysis(category, "La photo est trop grande. Reduisez sa resolution et reessayez.")
                     photo.load()
                     if min(photo.size) < 48:
                         return clarification_analysis(category, "La photo est trop petite. Envoyez une photo plus proche et nette.")
@@ -1024,7 +1026,9 @@ async def gemini_analyze(text: str = "", images_b64: Optional[List[str]] = None,
                     if stats.mean[0] < 8 or stats.mean[0] > 248 or stats.stddev[0] < 2:
                         return clarification_analysis(category, "La photo est trop sombre ou inexploitable. Envoyez une photo claire du sujet.")
                     output = BytesIO()
-                    ImageOps.exif_transpose(photo).convert("RGB").save(output, format="JPEG", quality=90)
+                    prepared = ImageOps.exif_transpose(photo)
+                    prepared.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+                    prepared.convert("RGB").save(output, format="JPEG", quality=85, optimize=True)
                     normalized_images.append(base64.b64encode(output.getvalue()).decode("ascii"))
             except Exception:
                 return clarification_analysis(category, "Cette image est invalide. Envoyez une nouvelle photo.")

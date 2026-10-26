@@ -242,6 +242,35 @@ def test_invalid_image_never_calls_provider(environment):
     assert result["needs_clarification"] and not calls
 
 
+def test_high_resolution_photo_is_resized_before_provider(environment):
+    db, calls = environment
+    output = BytesIO()
+    image = Image.new("RGB", (3200, 2400), (30, 100, 40))
+    image.paste((120, 160, 80), (1600, 0, 3200, 2400))
+    image.save(output, format="JPEG")
+    result = query(db, photo_base64=base64.b64encode(output.getvalue()).decode())
+    assert not result["needs_clarification"]
+    with Image.open(BytesIO(base64.b64decode(calls[0][1][0]))) as normalized:
+        assert normalized.format == "JPEG"
+        assert normalized.size == (1600, 1200)
+
+
+def test_valid_photo_above_old_size_limit_reaches_provider(environment):
+    db, calls = environment
+    # A valid JPEG can contain a large trailing payload from an export tool.
+    raw = base64.b64decode(photo()) + b'\0' * (9 * 1024 * 1024)
+    result = query(db, photo_base64=base64.b64encode(raw).decode())
+    assert not result["needs_clarification"] and len(calls) == 1
+    assert len(base64.b64decode(calls[0][1][0])) < 100_000
+
+
+def test_oversized_photo_explains_limit_without_calling_provider(environment):
+    db, calls = environment
+    result = query(db, photo_base64=base64.b64encode(b'x' * (21 * 1024 * 1024)).decode())
+    assert result["needs_clarification"] and not calls
+    assert "20 Mo" in result["message"]
+
+
 def test_json_validation_handles_zero_confidence_and_null_arrays():
     result = ai._validate_analysis({"diagnostic": "Observation incertaine", "confiance": 0, "causes_probables": None})
     assert result["confiance"] == 0 and result["causes_probables"] == []
