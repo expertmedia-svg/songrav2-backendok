@@ -12809,11 +12809,21 @@ async def _run_v2_pipeline(data: V2AnalyzeRequest, current_user: User, db: Sessi
         "AIProvider": v2_services.AI_PROVIDER,
         "AIModel": v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq" else v2_services.OPENAI_MODEL if v2_services.AI_PROVIDER == "openai" else v2_services.GEMINI_MODEL,
     }, ensure_ascii=False))
-    if final_response["question_intent"] in {"agricultural_technique", "livestock_technique", "general_advice"}:
-        diagnostic = final_response.get("diagnostic")
-        if isinstance(diagnostic, dict):
-            diagnostic["icone_pedagogique"] = "arrosage" if category == "agriculture" else "veterinaire"
-            diagnostic["type"] = category
+    diagnostic = final_response.get("diagnostic")
+    if isinstance(diagnostic, dict):
+        disease_request = final_response["question_intent"] in {"plant_disease", "animal_disease"}
+        photo_diagnostic = (
+            bool(images_b64) and category in {"agriculture", "elevage"}
+            and final_response["question_intent"] == "general_advice"
+            and not final_response["learning_requested"]
+            and not final_response["needs_clarification"]
+        )
+        diagnostic["icone_pedagogique"] = (
+            "secourisme" if category == "urgence"
+            else "maladie" if disease_request or photo_diagnostic
+            else "connaissance"
+        )
+        diagnostic["type"] = category
 
     if analysis.get("needs_clarification") and not analysis.get("from_fallback"):
         final_response["knowledge_mode"] = "needs_clarification"

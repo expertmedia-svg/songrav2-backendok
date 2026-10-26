@@ -74,6 +74,24 @@ def test_01_termite_text(environment):
     result = query(db, text="Il y a des termites dans mon champ de maïs.")
     assert result["question_intent"] == "plant_disease"
     assert result["message"] and calls
+    assert result["diagnostic"]["icone_pedagogique"] == "maladie"
+
+
+@pytest.mark.parametrize("text,category", [
+    ("Comment semer le mais ?", "agriculture"),
+    ("Comment nourrir mes poulets ?", "elevage"),
+    ("Comment proteger mon compte WhatsApp ?", "cybersecurity"),
+])
+def test_advice_uses_knowledge_icon(environment, text, category):
+    db, _ = environment
+    result = query(db, text=text, category=category)
+    assert result["diagnostic"]["icone_pedagogique"] == "connaissance"
+
+
+def test_animal_disease_uses_disease_icon(environment):
+    db, _ = environment
+    result = query(db, text="Mon poulet est malade et tousse", category="elevage")
+    assert result["diagnostic"]["icone_pedagogique"] == "maladie"
 
 
 def test_02_voice_transcription_enters_same_engine(environment):
