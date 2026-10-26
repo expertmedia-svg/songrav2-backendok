@@ -59,6 +59,22 @@ async def transcribe_audio_whisper(audio_bytes: bytes, filename: str = "audio.wa
     """
     Transcrit un vocal de terrain à l'aide du moteur de transcription local Yingr-AI.
     """
+    if os.getenv('AI_PROVIDER', 'groq').strip().lower() == 'groq':
+        import asyncio
+        import v2_services
+        if not audio_bytes:
+            raise ValueError('Enregistrement vide.')
+        try:
+            result = await asyncio.to_thread(
+                v2_services._get_groq_client().audio.transcriptions.create,
+                model='whisper-large-v3-turbo', file=(filename, audio_bytes), language='fr',
+            )
+            transcript = str(result.text or '').strip()
+            if not transcript:
+                raise ValueError('Transcription vide')
+            return transcript
+        except Exception as error:
+            raise RuntimeError('Reconnaissance vocale indisponible. Reessayez ou ecrivez votre question.') from error
     print(f"[Yingr-AI] Ingestion Audio - Taille : {len(audio_bytes)/1024:.1f} KB - Canal Whisper Local")
     
     if not audio_bytes:
@@ -89,6 +105,12 @@ async def run_yingr_ai_inference(prompt: str, category: str, image_b64: Optional
     """
     Appelle le modèle de Vision ou de Texte de la suite d'IA Souveraine Yingr-AI.
     """
+    if os.getenv('AI_PROVIDER', 'groq').strip().lower() == 'groq':
+        import v2_services
+        try:
+            return await v2_services._groq_chat('Tu es Songra. Reponds en JSON selon la demande.', prompt, [image_b64] if image_b64 else [], json_mode=True)
+        except Exception as error:
+            raise RuntimeError('Analyse IA indisponible. Reessayez ou contactez un conseiller.') from error
     if image_b64:
         model_name = "Qwen/Qwen2-VL-7B-Instruct"
         vllm_url = YINGR_AI_VLLM_VISION_URL

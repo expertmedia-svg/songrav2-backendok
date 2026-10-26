@@ -303,6 +303,7 @@ def test_learning_answer_is_not_presented_as_disease(environment):
 
 @pytest.mark.parametrize("transcript", ["Les termites attaquent mon maïs", ""])
 def test_whisper_receives_uploaded_audio_and_rejects_empty_result(monkeypatch, transcript):
+    monkeypatch.setenv("AI_PROVIDER", "local")
     received = []
     class Client:
         def __init__(self, **kwargs):

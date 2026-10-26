@@ -53,14 +53,13 @@ except ImportError:
 # CONFIGURATION
 # ══════════════════════════════════════════════════════
 
-# Fournisseur actif : "openai" ou "gemini"
-# Changer dans .env (AI_PROVIDER=gemini) quand le billing Gemini est réglé
-AI_PROVIDER = os.environ.get("AI_PROVIDER", "openai").strip().lower()
+# Groq est le fournisseur par défaut. Aucun repli externe en mode Groq.
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "groq").strip().lower()
 
 # ── OpenAI config ────────────────────────────────────
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 OPENAI_IMAGE_MODEL = "gpt-image-1"
-_openai_key = os.environ.get("OPENAI_API_KEY")
+_openai_key = os.environ.get("OPENAI_API_KEY") if AI_PROVIDER != "groq" else None
 _openai_client: Optional[object] = _OpenAIClient(api_key=_openai_key) if (_openai_available and _openai_key) else None
 if _openai_client:
     print(f"[OK] OpenAI API configuree (Modèle: {OPENAI_MODEL})")
@@ -88,7 +87,7 @@ def _get_groq_client():
     return _groq_client
 
 # ── Gemini config ────────────────────────────────────
-_gemini_key = os.environ.get("GEMINI_API_KEY")
+_gemini_key = os.environ.get("GEMINI_API_KEY") if AI_PROVIDER != "groq" else None
 if _gemini_key and genai is not None:
     genai.configure(api_key=_gemini_key)
 
@@ -330,6 +329,8 @@ IMPORTANT :
 
 def _get_model(model_name: str = GEMINI_MODEL):
     """Obtenir un modèle Gemini configuré"""
+    if AI_PROVIDER == 'groq':
+        raise RuntimeError('Cette fonction ne peut pas appeler Gemini en mode Groq exclusif.')
     if genai is None:
         raise RuntimeError("google-generativeai non installe; utilisez AI_PROVIDER=groq ou installez la dependance")
     return genai.GenerativeModel(model_name)
@@ -363,6 +364,8 @@ async def _generate_content_with_timeout(
 
 def _get_media_client(api_key: Optional[str] = None):
     """Client google.genai dédié aux générations image/vidéo."""
+    if AI_PROVIDER == 'groq':
+        raise RuntimeError('Cette fonction ne peut pas appeler Gemini en mode Groq exclusif.')
     if google_genai is None or genai_types is None:
         raise RuntimeError("google-genai indisponible dans cet environnement")
 
@@ -1140,6 +1143,13 @@ async def gemini_analyze_entrepreneurship(
 ) -> dict:
     """Analyse entrepreneuriale terrain.
     Dispatche vers OpenAI ou Gemini selon AI_PROVIDER."""
+    if AI_PROVIDER == 'groq':
+        try:
+            prompt = ENTREPRENDRE_PROMPT + '\nContexte: ' + category + '\nDescription: ' + (text or '')
+            raw = await _groq_chat(SYSTEM_PROMPT, prompt, images_b64 or [], json_mode=True)
+            return _validate_entrepreneurship(_parse_gemini_json(raw))
+        except Exception as error:
+            return _build_entrepreneurship_fallback(category=category, has_image=bool(images_b64), error=error)
     images_b64 = images_b64 or []
     has_image = len(images_b64) > 0
     has_text = bool(text.strip())
@@ -1292,6 +1302,8 @@ def decide(analysis: dict) -> dict:
 
 async def generate_image(prompt: str, style: str = "illustration", category: str = "agriculture") -> dict:
     """Génère une image explicative (DALL-E 3 ou Gemini Imagen selon AI_PROVIDER)"""
+    if AI_PROVIDER == 'groq':
+        return {'success': False, 'error': 'Generation d images indisponible avec la configuration Groq actuelle.'}
     if not prompt or not prompt.strip():
         return {"success": False, "error": "Prompt image requis"}
 
@@ -1378,6 +1390,8 @@ async def generate_video(
 ) -> dict:
     """Génère une courte vidéo pédagogique via Veo (Gemini uniquement).
     Retourne un fallback texte quand AI_PROVIDER=openai."""
+    if AI_PROVIDER == 'groq':
+        return _video_fallback(prompt, duration_sec, error='Generation video indisponible avec la configuration Groq actuelle.')
     if not prompt or not prompt.strip():
         return _video_fallback(prompt, duration_sec)
 

@@ -74,13 +74,13 @@ if not DATABASE_URL:
     db_path = os.path.join(base_dir, "resolvehub.db")
     DATABASE_URL = f"sqlite:///{db_path}"
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").lower()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "groq").lower()
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") if AI_PROVIDER != "groq" else None
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -90,7 +90,7 @@ groq_client = OpenAI(
 ) if GROQ_API_KEY else None
 
 # Gemini API Key pour analyse photo
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") if AI_PROVIDER != "groq" else None
 if GEMINI_API_KEY and genai is not None:
     genai.configure(api_key=GEMINI_API_KEY)
     print(f"[OK] Gemini API configuree")
@@ -2816,6 +2816,13 @@ RETOURNE SEULEMENT LE JSON PUR."""
 
 
 def _generate_local_translations_with_gemini(prompt: str) -> Dict[str, Any]:
+    if AI_PROVIDER == 'groq':
+        result = groq_client.chat.completions.create(
+            model=os.getenv('GROQ_MODEL', 'qwen/qwen3.8-27b'),
+            messages=[{'role': 'user', 'content': prompt}],
+            temperature=0.1, max_tokens=4000,
+        )
+        return _parse_json_object_from_text(result.choices[0].message.content or '')
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY non configuree")
     model = genai.GenerativeModel("gemini-2.5-flash")
@@ -2824,6 +2831,13 @@ def _generate_local_translations_with_gemini(prompt: str) -> Dict[str, Any]:
 
 
 def _generate_local_translations_with_openai(prompt: str) -> Dict[str, Any]:
+    if AI_PROVIDER == 'groq':
+        result = groq_client.chat.completions.create(
+            model=os.getenv('GROQ_MODEL', 'qwen/qwen3.8-27b'),
+            messages=[{'role': 'user', 'content': prompt}],
+            temperature=0.1, max_tokens=4000,
+        )
+        return _parse_json_object_from_text(result.choices[0].message.content or '')
     if not openai_client or not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY non configuree")
     response = openai_client.chat.completions.create(
@@ -3812,7 +3826,7 @@ CONTROLE OBLIGATOIRE DE LA PHOTO (catégorie demandée: {category or 'non préci
             print(f"📤 Envoi à {self.provider_name}/{self.model}: {len(content)} éléments (1 texte + {len(images_base64)} images)")
 
             # Appeler le modèle avec vision.
-            # NOTE: certains modèles Groq (ex: qwen/qwen3.6-27b) sont des
+            # NOTE: certains modèles Groq (ex: qwen/qwen3.8-27b) sont des
             # modèles "thinking" qui émettent un bloc <think>...</think> de
             # raisonnement AVANT la réponse finale. Avec un max_tokens trop
             # bas, ce raisonnement consommait tout le budget et la réponse
@@ -4068,14 +4082,14 @@ class ResilientVisionEngine:
         self.gemini_engine = GeminiVisionEngine(gemini_key) if (gemini_key and GeminiVisionEngine) else None
         self.groq_engine = GPTVisionEngine(
             groq_client,
-            model=os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
+            model=os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
             provider_name="Groq",
         ) if groq_client else None
         self.gpt_engine = GPTVisionEngine(openai_client) if openai_client else None
         self.local_engine = LocalComputerVision()
 
     def analyze_images(self, images_data: List[bytes], text_description: str = "", category: Optional[str] = None) -> Dict[str, Any]:
-        provider = os.getenv("AI_PROVIDER", "openai").lower()
+        provider = os.getenv("AI_PROVIDER", "groq").lower()
         engines = []
         if provider == "groq":
             if self.groq_engine:
@@ -6005,6 +6019,18 @@ def generate_llm_answer_with_general_knowledge(
         result = model.generate_content(full_prompt)
         return result.text
 
+    if AI_PROVIDER == "groq":
+        try:
+            response = groq_client.chat.completions.create(
+                model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.1, max_tokens=1500,
+            )
+            return response.choices[0].message.content
+        except Exception as error:
+            print("[GROQ] General answer unavailable:", type(error).__name__)
+            return None
+
     provider_errors = []
     if AI_PROVIDER == "openai":
         try:
@@ -6361,6 +6387,18 @@ def generate_llm_answer(
         model = genai.GenerativeModel('gemini-2.5-flash')
         result = model.generate_content(full_prompt)
         return result.text
+
+    if AI_PROVIDER == "groq":
+        try:
+            response = groq_client.chat.completions.create(
+                model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0.1, max_tokens=1500,
+            )
+            return response.choices[0].message.content
+        except Exception as error:
+            print("[GROQ] General answer unavailable:", type(error).__name__)
+            return None
 
     provider_errors = []
     if AI_PROVIDER == "openai":
@@ -6933,54 +6971,54 @@ async def get_authenticated_user(current_user: User = Depends(get_current_user))
     return serialize_user(current_user)
 
 
-# @app.get("/api/dashboard")
-# async def get_user_dashboard(
-#     current_user: User = Depends(get_current_user),
-#     db: Session = Depends(get_db),
-# ):
-#     recent_questions = await get_user_tickets(current_user.phone_number, db)
-#     recent_questions = recent_questions[:5]
-# 
-#     preferred_domain = next(
-#         (item.get("category") for item in recent_questions if item.get("category")),
-#         "agriculture",
-#     )
-#     ai_suggestions = retrieve_knowledge(db, preferred_domain, preferred_domain, limit=3)
-# 
-#     community_messages = (
-#         db.query(ChatMessageDB)
-#         .filter(ChatMessageDB.is_hidden == False)
-#         .order_by(ChatMessageDB.created_at.desc())
-#         .limit(6)
-#         .all()
-#     )
-# 
-#     return {
-#         "user": serialize_user(current_user),
-#         "recent_questions": recent_questions,
-#         "ai_suggestions": [
-#             {
-#                 "id": item.get("id"),
-#                 "title": item.get("title"),
-#                 "answer": item.get("answer"),
-#                 "domain": item.get("domain"),
-#                 "tags": item.get("tags") or [],
-#             }
-#             for item in ai_suggestions
-#         ],
-#         "community_activity": [
-#             {
-#                 "id": message.id,
-#                 "sender": message.sender,
-#                 "text": message.text,
-#                 "is_bot": message.is_bot,
-#                 "created_at": message.created_at.isoformat() if message.created_at else None,
-#             }
-#             for message in community_messages
-#         ],
-#     }
-# 
-# 
+@app.get("/api/dashboard")
+async def get_user_dashboard(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    recent_questions = await get_user_tickets(current_user.phone_number, db)
+    recent_questions = recent_questions[:5]
+
+    preferred_domain = next(
+        (item.get("category") for item in recent_questions if item.get("category")),
+        "agriculture",
+    )
+    ai_suggestions = retrieve_knowledge(db, preferred_domain, preferred_domain, limit=3)
+
+    community_messages = (
+        db.query(ChatMessageDB)
+        .filter(ChatMessageDB.is_hidden == False)
+        .order_by(ChatMessageDB.created_at.desc())
+        .limit(6)
+        .all()
+    )
+
+    return {
+        "user": serialize_user(current_user),
+        "recent_questions": recent_questions,
+        "ai_suggestions": [
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "answer": item.get("answer"),
+                "domain": item.get("domain"),
+                "tags": item.get("tags") or [],
+            }
+            for item in ai_suggestions
+        ],
+        "community_activity": [
+            {
+                "id": message.id,
+                "sender": message.sender,
+                "text": message.text,
+                "is_bot": message.is_bot,
+                "created_at": message.created_at.isoformat() if message.created_at else None,
+            }
+            for message in community_messages
+        ],
+    }
+
+
 @app.post("/api/scanner/analyze")
 async def analyze_scanner_photo(
     data: MobileQuestionCreate,
@@ -10134,7 +10172,7 @@ DOCUMENT :
     provider_errors: List[str] = []
     providers = []
     if groq_client:
-        providers.append(("groq", groq_client, os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")))
+        providers.append(("groq", groq_client, os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")))
     if openai_client:
         providers.append(("openai", openai_client, os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")))
     for provider_name, client, model_name in ([] if parsed_items else providers):
@@ -13002,6 +13040,9 @@ async def v2_health():
         "status": "ok",
         "service": "songra-v2",
         "gemini_configured": bool(GEMINI_API_KEY),
+        "provider": v2_services.AI_PROVIDER,
+        "model": v2_services.GROQ_MODEL if v2_services.AI_PROVIDER == "groq" else None,
+        "groq_configured": bool(GROQ_API_KEY),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -13524,7 +13565,7 @@ class LocalTranslateIn(BaseModel):
 #     import uvicorn
 #     port = int(os.getenv("PORT", "3000"))
 #     
-#     provider_name = os.getenv("AI_PROVIDER", "openai").upper()
+#     provider_name = os.getenv("AI_PROVIDER", "groq").upper()
 #     print("=" * 50)
 #     print(f"SONGRA - Backend unifié v2 ({provider_name})")
 #     print("Version 6.0 - Pipeline v2 + RAG + Expert + Entreprendre")
